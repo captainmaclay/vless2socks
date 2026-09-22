@@ -24,3 +24,4 @@ release/
 bin/*
 !bin/.gitkeep
 runtime/
+Claude outputs/

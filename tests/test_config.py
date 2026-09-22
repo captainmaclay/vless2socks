@@ -16,7 +16,7 @@ class LoadConfigTest(unittest.TestCase):
         cfg = load_config(None, url=URL)
         self.assertEqual(cfg.server.address, "srv.example")
         self.assertEqual(cfg.listen_host, "127.0.0.1")
-        self.assertEqual(cfg.listen_port, 1080)
+        self.assertEqual(cfg.listen_port, 1081)
         self.assertTrue(cfg.udp_enabled)
         self.assertFalse(cfg.auth_required)
 
@@ -28,10 +28,10 @@ class LoadConfigTest(unittest.TestCase):
         self.assertEqual(load_config(None, url=URL, listen="[::1]:9050").listen_port, 9050)
 
     def test_bare_ipv6_is_not_split_as_host_port(self):
-        """"::1" — это адрес целиком; наивный rpartition(":") дал бы host="::"."""
+        """::1" — это адрес целиком; наивный rpartition(":") дал бы host="::"."""
         cfg = load_config(None, url=URL, listen="::1")
         self.assertEqual(cfg.listen_host, "::1")
-        self.assertEqual(cfg.listen_port, 1080)
+        self.assertEqual(cfg.listen_port, 1081)
 
     def test_bracketed_ipv6_keeps_port(self):
         cfg = load_config(None, url=URL, listen="[2001:db8::1]:9050")
@@ -118,7 +118,7 @@ class LoadConfigTest(unittest.TestCase):
             path = Path(d) / "config.json"
             path.write_text(json.dumps(DEFAULT_CONFIG), encoding="utf-8")
             cfg = load_config(path)
-        self.assertEqual(cfg.listen_port, 1080)
+        self.assertEqual(cfg.listen_port, 1081)
         self.assertTrue(cfg.server.uses_tls)
 
 

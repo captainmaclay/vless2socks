@@ -38,6 +38,7 @@ a = Analysis(
         (os.path.join(root, 'config.example.json'), '.'),
         (os.path.join(root, 'instances.example.json'), '.'),
         (os.path.join(root, 'settings.example.json'), '.'),
+        (os.path.join(root, 'app_icon.ico'), '.'),
         (os.path.join(root, 'bin'), 'bin'),
     ],
     hiddenimports=[
@@ -85,5 +86,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon=os.path.join(root, 'app_icon.ico') if os.path.exists(os.path.join(root, 'app_icon.ico')) else None,
 )

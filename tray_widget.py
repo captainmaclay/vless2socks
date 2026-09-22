@@ -66,11 +66,11 @@ def read_listen_addr() -> tuple[str, int]:
     try:
         with open(CONFIG_FILE, encoding="utf-8") as f:
             cfg = json.load(f)
-        listen = cfg.get("listen", "127.0.0.1:1080")
+        listen = cfg.get("listen", "127.0.0.1:1081")
         host, _, port = listen.rpartition(":")
-        return host or "127.0.0.1", int(port or 1080)
+        return host or "127.0.0.1", int(port or 1081)
     except Exception:
-        return "127.0.0.1", 1080
+        return "127.0.0.1", 1081
 
 
 # ── Генерация иконок ──────────────────────────────────────────

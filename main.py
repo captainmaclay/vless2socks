@@ -4,7 +4,7 @@
 Примеры::
 
     python main.py -c config.json
-    python main.py --url "vless://UUID@host:443?security=tls&sni=host&type=tcp" -l 127.0.0.1:1080
+    python main.py --url "vless://UUID@host:443?security=tls&sni=host&type=tcp" -l 127.0.0.1:1081
     python main.py -c config.json --test
     python main.py --init-config config.json
 """
@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-u", "--url", metavar="VLESS_URL", help="ссылка vless://...")
     p.add_argument(
         "-l", "--listen", metavar="HOST:PORT",
-        help="адрес SOCKS5-сервера (по умолчанию 127.0.0.1:1080)",
+        help="адрес SOCKS5-сервера (по умолчанию 127.0.0.1:1081)",
     )
     p.add_argument("--username", help="логин для SOCKS5 (включает аутентификацию)")
     p.add_argument("--password", help="пароль для SOCKS5")
@@ -257,7 +257,7 @@ async def _test_via_xray(config, choice, host, port, path) -> tuple[bool, str]:
     from vless2socks.xray import XrayProcess, XrayStartupError
 
     if config.listen_port == 0:
-        return False, "для движка xray нужен конкретный порт (-l 127.0.0.1:1080)"
+        return False, "для движка xray нужен конкретный порт (-l 127.0.0.1:1081)"
 
     process = XrayProcess(
         config, xray_path=choice.xray_path, restart=False,

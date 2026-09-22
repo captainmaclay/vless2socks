@@ -323,7 +323,7 @@ def wipe_all_sensitive_data(stop_all_callback: Optional[Callable[[], None]] = No
     default_instance = [
         {
             "url": "",
-            "listen": "127.0.0.1:1080",
+            "listen": "127.0.0.1:1081",
             "username": "",
             "password": "",
             "udp": True,

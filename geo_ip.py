@@ -121,7 +121,7 @@ def extract_country_hint(url: str) -> dict[str, str]:
 
 def fetch_geo_via_socks(
     socks_host: str = "127.0.0.1",
-    socks_port: int = 1080,
+    socks_port: int = 1081,
     timeout: float = 8.0,
 ) -> dict[str, Any]:
     """Query external IP and Geo location through local SOCKS5 proxy synchronously."""

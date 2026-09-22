@@ -16,7 +16,7 @@ __all__ = ["AppConfig", "load_config", "ConfigError"]
 class AppConfig:
     server: VlessServer
     listen_host: str = "127.0.0.1"
-    listen_port: int = 1080
+    listen_port: int = 1081
     username: str = ""
     password: str = ""
     udp_enabled: bool = True
@@ -48,7 +48,7 @@ class AppConfig:
 DEFAULT_CONFIG = {
     "url": "vless://00000000-0000-0000-0000-000000000000@example.com:443"
            "?security=tls&type=tcp&sni=example.com#my-server",
-    "listen": "127.0.0.1:1080",
+    "listen": "127.0.0.1:1081",
     "username": "",
     "password": "",
     "udp": True,
@@ -125,7 +125,7 @@ def load_config(
     host, port = _split_listen(
         listen if listen is not None else data.get("listen", ""),
         "127.0.0.1",
-        1080,
+        1081,
     )
 
     return AppConfig(

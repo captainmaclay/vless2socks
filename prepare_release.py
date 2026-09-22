@@ -53,7 +53,7 @@ COPY_DIRS = [
 # Clean template data
 CLEAN_CONFIG = {
     "url": "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=tcp&sni=example.com#my-server",
-    "listen": "127.0.0.1:1080",
+    "listen": "127.0.0.1:1081",
     "username": "",
     "password": "",
     "udp": True,

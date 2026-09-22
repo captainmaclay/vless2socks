@@ -154,7 +154,7 @@ def download_xray(emit) -> bool:
     return True
 
 PAGE_SIZE = 10
-BASE_PORT = 1080
+BASE_PORT = 1081
 
 # ── Colors (Catppuccin Mocha Palette) ──────────────────────────
 C = {
@@ -296,7 +296,7 @@ def load_base_config() -> dict:
         with open(CONFIG_FILE, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {"url": "", "listen": "127.0.0.1:1080"}
+        return {"url": "", "listen": "127.0.0.1:1081"}
 
 
 def load_instances() -> list[dict]:
@@ -518,16 +518,16 @@ class ProxyInstance:
             self.geo_info["flag"] = hint["flag"]
 
     def get_listen(self) -> tuple[str, str]:
-        listen = self.cfg.get("listen", "127.0.0.1:1080")
+        listen = self.cfg.get("listen", "127.0.0.1:1081")
         h, _, p = listen.rpartition(":")
-        return h or "127.0.0.1", p or "1080"
+        return h or "127.0.0.1", p or "1081"
 
     def get_http_port(self) -> int:
         _, p = self.get_listen()
         try:
             return int(p) + 10000
         except ValueError:
-            return 11080
+            return 11081
 
     def build_tab_ui(self, parent: ttk.Notebook) -> tk.Frame:
         """Build the Tkinter frame for this instance tab."""
@@ -727,7 +727,7 @@ class ProxyInstance:
         try:
             port = int(port_str)
         except ValueError:
-            port = 1080
+            port = 1081
 
         url = self.url_entry.get().strip() if self.url_entry else self.cfg.get("url", "")
 
@@ -752,7 +752,7 @@ class ProxyInstance:
     def free_port(self):
         port_str = self.port_entry.get().strip() if self.port_entry else self.get_listen()[1]
         try:
-            port = int(port_str or "1080")
+            port = int(port_str or "1081")
         except ValueError:
             messagebox.showwarning("vless2socks", t("port_invalid"))
             return
@@ -781,7 +781,7 @@ class ProxyInstance:
         host = self.host_entry.get().strip() if self.host_entry else self.get_listen()[0]
         port = self.port_entry.get().strip() if self.port_entry else self.get_listen()[1]
         host = host or "127.0.0.1"
-        port = port or "1080"
+        port = port or "1081"
 
         if not url:
             messagebox.showwarning("vless2socks", t("msg_url_required"))
@@ -900,7 +900,7 @@ class ProxyInstance:
             self.cfg["url"] = self.url_entry.get().strip()
         if self.host_entry and self.port_entry:
             h = self.host_entry.get().strip() or "127.0.0.1"
-            p = self.port_entry.get().strip() or "1080"
+            p = self.port_entry.get().strip() or "1081"
             self.cfg["listen"] = f"{h}:{p}"
         self._init_geo_from_url()
         self.app.save_all()
@@ -1043,7 +1043,7 @@ class ProxyInstance:
             cfg["url"] = self.url_entry.get().strip()
         if self.host_entry and self.port_entry:
             h = self.host_entry.get().strip() or "127.0.0.1"
-            p = self.port_entry.get().strip() or "1080"
+            p = self.port_entry.get().strip() or "1081"
             cfg["listen"] = f"{h}:{p}"
         return cfg
 
@@ -2071,7 +2071,7 @@ class VlessApp(tk.Tk):
 #: На случай, если шаблона не оказалось и в сборке.
 _FALLBACK_CONFIG = {
     "url": "",
-    "listen": "127.0.0.1:1080",
+    "listen": "127.0.0.1:1081",
     "username": "",
     "password": "",
     "udp": True,
