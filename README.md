@@ -50,12 +50,19 @@
 
 ### Quick Start
 
-```bash
+```powershell
 git clone https://github.com/captainmaclay/vless2socks.git
 cd vless2socks
-install.bat     :: .venv + dependencies + Xray-core + config templates
-start.bat       :: launch the GUI
+.\install.bat
+.\start.bat
 ```
+
+`install.bat` sets up `.venv`, installs the dependencies, downloads Xray-core and
+seeds the config templates; `start.bat` launches the GUI. Double-clicking either
+file in Explorer does the same thing.
+
+> The `.\` prefix is required in PowerShell, which does not run programs from the
+> current directory. In `cmd.exe` plain `install.bat` works too.
 
 `install.bat` is idempotent — re-running it only fills in what is missing.
 `start.bat` calls it by itself when `.venv` is absent, so a fresh clone needs
@@ -64,12 +71,12 @@ nothing but `start.bat`.
 <details>
 <summary>Manual setup, step by step</summary>
 
-```bash
+```powershell
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\Activate.ps1          # in cmd.exe: .venv\Scripts\activate.bat
 pip install -r requirements.txt
 python -m tools.get_xray
-gui.bat
+.\gui.bat
 ```
 </details>
 
@@ -94,8 +101,8 @@ python main.py -c config.json --ip
 
 ## Building a Windows .exe
 
-```bash
-build.bat
+```powershell
+.\build.bat
 ```
 
 Runs PyInstaller against `vless2socks.spec` and produces **two** executables plus
@@ -280,12 +287,19 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 ### Быстрый старт
 
-```bash
+```powershell
 git clone https://github.com/captainmaclay/vless2socks.git
 cd vless2socks
-install.bat     :: .venv + зависимости + Xray-core + шаблоны конфигов
-start.bat       :: запуск GUI
+.\install.bat
+.\start.bat
 ```
+
+`install.bat` создаёт `.venv`, ставит зависимости, качает Xray-core и раскладывает
+шаблоны конфигов; `start.bat` запускает GUI. Двойной щелчок по этим файлам в
+Проводнике делает то же самое.
+
+> Префикс `.\` обязателен в PowerShell — он не запускает программы из текущей
+> папки. В `cmd.exe` работает и просто `install.bat`.
 
 `install.bat` можно запускать повторно — он доставляет только то, чего нет.
 `start.bat` сам вызовет установку, если `.venv` отсутствует, так что свежему
@@ -294,12 +308,12 @@ start.bat       :: запуск GUI
 <details>
 <summary>Установка вручную, по шагам</summary>
 
-```bash
+```powershell
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\Activate.ps1          # in cmd.exe: .venv\Scripts\activate.bat
 pip install -r requirements.txt
 python -m tools.get_xray
-gui.bat
+.\gui.bat
 ```
 </details>
 
@@ -324,8 +338,8 @@ python main.py -c config.json --ip
 
 ## Сборка .exe под Windows
 
-```bash
-build.bat
+```powershell
+.\build.bat
 ```
 
 Запускает PyInstaller по `vless2socks.spec` и кладёт рядом **два** исполняемых
