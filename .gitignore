@@ -9,6 +9,7 @@ instances.json
 settings.json
 .env
 .instance_*.json
+.vless2socks.lock
 *.hbak
 selftest-output.txt
 *.log

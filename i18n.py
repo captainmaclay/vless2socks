@@ -149,6 +149,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "lang_ru": "🇷🇺 Русский (Исходный)",
         "btn_apply_lang": "Apply Language / Применить",
 
+        # Single Instance Lock
+        "already_running": "vless2socks is already running.",
+
         # System Tray
         "tray_show": "Show Window",
         "tray_exit": "Exit",
@@ -294,8 +297,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "lang_ru": "🇷🇺 Русский (Исходный)",
         "btn_apply_lang": "Применить язык / Apply",
 
+        # Single Instance Lock
+        "already_running": "vless2socks уже запущена.",
+
         # System Tray
-        "tray_show": "Показать",
+        "tray_show": "Показать окно",
         "tray_exit": "Выход",
         "tray_running": "vless2socks — {count} работает",
         "tray_starting": "vless2socks — запускается...",

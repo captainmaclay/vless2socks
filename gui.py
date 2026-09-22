@@ -35,7 +35,7 @@ import backup_manager
 import geo_ip
 import settings_manager
 from i18n import get_current_language, load_language_preference, save_language_preference, t
-from vless2socks.paths import APP_DIR, FROZEN, bundled
+from vless2socks.paths import APP_DIR, FROZEN, bundled, unpack_bundled_bin
 
 # ── Tray dependencies ──────────────────────────────────────────
 try:
@@ -55,15 +55,18 @@ MAIN_SCRIPT = ROOT_DIR / "main.py"
 VENV_PYTHON = ROOT_DIR / ".venv" / "Scripts" / "python.exe"
 PYTHON = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
 
-#: Чем поднимать отдельный прокси в собранном виде: внутри .exe нет ни
-#: python.exe, ни main.py на диске, поэтому рядом кладётся консольный CLI.
+#: В собранном виде запускаем этот же исполняемый файл с флагом --cli (или vless2socks-cli если он есть)
 CLI_EXE = ROOT_DIR / ("vless2socks-cli.exe" if sys.platform == "win32" else "vless2socks-cli")
 
 
 def proxy_command(config_path: Path | str) -> list[str]:
-    """Команда запуска одного прокси — для скрипта и для сборки по-разному."""
+    """Команда запуска одного прокси — для скрипта и для сборки по-разному.
+    В режиме frozen (один .exe) вызывает сам себя с флагом --cli.
+    """
     if FROZEN:
-        return [str(CLI_EXE), "-c", str(config_path)]
+        if CLI_EXE.exists():
+            return [str(CLI_EXE), "-c", str(config_path)]
+        return [sys.executable, "--cli", "-c", str(config_path)]
     return [PYTHON, str(MAIN_SCRIPT), "-c", str(config_path)]
 
 
@@ -817,12 +820,6 @@ class ProxyInstance:
             return
 
         cmd = proxy_command(self.config_path)
-        if FROZEN and not CLI_EXE.exists():
-            self._log(
-                f"Не найден {CLI_EXE.name} рядом с программой — нечем поднять прокси."
-            )
-            self._set_state("error")
-            return
         try:
             self.process = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -2088,12 +2085,12 @@ _FALLBACK_CONFIG = {
 
 
 def _bootstrap_files() -> None:
-    """Первый запуск: создать отсутствующие файлы из зашитых шаблонов.
+    """Первый запуск: создать отсутствующие файлы из зашитых шаблонов и распаковать bin/."""
+    try:
+        unpack_bundled_bin()
+    except Exception:
+        pass
 
-    Раньше отсутствие config.json означало ``sys.exit(1)`` с сообщением в
-    stderr. У собранного .exe консоли нет (``console=False``), поэтому со
-    стороны это выглядело как «программа просто не запускается».
-    """
     plan = (
         (CONFIG_FILE, "config.example.json", _FALLBACK_CONFIG),
         (INSTANCES_FILE, "instances.example.json", [_FALLBACK_CONFIG]),
@@ -2124,7 +2121,115 @@ def _fatal(details: str) -> None:
         pass
 
 
+def _show_already_running_notice(duration_ms: int = 1200) -> None:
+    """Отображает окно уведомления о том, что программа уже запущена, на duration_ms миллисекунд и закрывается."""
+    try:
+        root = tk.Tk()
+        root.title("vless2socks")
+        root.overrideredirect(True)
+        root.attributes("-topmost", True)
+        root.configure(bg="#1e1e2e")
+
+        frame = tk.Frame(root, bg="#1e1e2e", highlightbackground="#89b4fa", highlightthickness=2, padx=24, pady=16)
+        frame.pack(fill="both", expand=True)
+
+        tk.Label(
+            frame,
+            text="⚠️  " + t("already_running"),
+            font=("Segoe UI", 11, "bold"),
+            fg="#cdd6f4",
+            bg="#1e1e2e"
+        ).pack()
+
+        root.update_idletasks()
+        w = root.winfo_reqwidth()
+        h = root.winfo_reqheight()
+        sw = root.winfo_screenwidth()
+        sh = root.winfo_screenheight()
+        x = (sw - w) // 2
+        y = (sh - h) // 2
+        root.geometry(f"{w}x{h}+{x}+{y}")
+
+        root.after(duration_ms, root.destroy)
+        root.mainloop()
+    except Exception:
+        pass
+
+
+_LOCK_FILE_HANDLE = None
+
+
+def _acquire_instance_lock() -> bool:
+    """Пытается захватить блокировку единственного экземпляра приложения.
+    Возвращает True, если экземпляр первый, False — если уже запущен.
+    """
+    global _LOCK_FILE_HANDLE
+    lock_path = ROOT_DIR / ".vless2socks.lock"
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            f = open(lock_path, "a+b")
+            f.seek(0)
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                _LOCK_FILE_HANDLE = f
+                return True
+            except (BlockingIOError, PermissionError, OSError):
+                f.close()
+                return False
+        else:
+            import fcntl
+            f = open(lock_path, "a+b")
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _LOCK_FILE_HANDLE = f
+                return True
+            except (BlockingIOError, PermissionError, OSError):
+                f.close()
+                return False
+    except Exception:
+        return True
+
+
+def _release_instance_lock() -> None:
+    """Освобождает блокировку приложения."""
+    global _LOCK_FILE_HANDLE
+    if _LOCK_FILE_HANDLE is not None:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                _LOCK_FILE_HANDLE.seek(0)
+                msvcrt.locking(_LOCK_FILE_HANDLE.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(_LOCK_FILE_HANDLE.fileno(), fcntl.LOCK_UN)
+            _LOCK_FILE_HANDLE.close()
+        except Exception:
+            pass
+        _LOCK_FILE_HANDLE = None
+
+
 def main():
+    # Если запущен с аргументами командной строки (фоновый прокси от GUI или прямой запуск)
+    argv = sys.argv[1:]
+    if argv:
+        try:
+            unpack_bundled_bin()
+        except Exception:
+            pass
+        if "--cli" in argv:
+            argv = [a for a in argv if a != "--cli"]
+            import main as cli_module
+            return cli_module.main(argv)
+        if any(arg in argv for arg in ("-c", "--config", "-u", "--url", "--test", "--doctor", "--ip", "--help", "-h")):
+            import main as cli_module
+            return cli_module.main(argv)
+
+    # Проверка на множественный запуск GUI
+    if not _acquire_instance_lock():
+        _show_already_running_notice(1200)
+        return 0
+
     try:
         _bootstrap_files()
         app = VlessApp()
@@ -2133,8 +2238,13 @@ def main():
             f"Не удалось запустить программу.\n\nРабочая папка: {ROOT_DIR}\n\n"
             f"{traceback.format_exc()}"
         )
+        _release_instance_lock()
         return 1
-    app.mainloop()
+
+    try:
+        app.mainloop()
+    finally:
+        _release_instance_lock()
     return 0
 
 
