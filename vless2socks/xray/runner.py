@@ -20,6 +20,7 @@ from typing import Any
 
 from ..config import AppConfig
 from ..logging_setup import get_logger
+from ..noconsole import no_window_kwargs
 from ..paths import APP_DIR
 from .binary import find_xray
 from .config_builder import build_xray_config, redact_config
@@ -166,6 +167,9 @@ class XrayProcess:
                 stderr=asyncio.subprocess.STDOUT,
                 stdin=asyncio.subprocess.DEVNULL,
                 cwd=str(self.xray_path.parent),
+                # Без этого xray на Windows поднимает собственное окно консоли
+                # и держит его всё время работы прокси.
+                **no_window_kwargs(),
             )
         except OSError as exc:
             raise XrayStartupError(

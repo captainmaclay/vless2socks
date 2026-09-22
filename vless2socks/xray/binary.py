@@ -9,6 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from ..noconsole import no_window_kwargs
 from ..paths import APP_DIR
 
 __all__ = ["XrayNotFound", "find_xray", "xray_version", "search_paths"]
@@ -76,6 +77,8 @@ def xray_version(path: str | os.PathLike[str]) -> str:
             text=True,
             timeout=10,
             check=False,
+            # Иначе на Windows каждый опрос версии мигает окном консоли.
+            **no_window_kwargs(),
         )
     except (OSError, subprocess.SubprocessError):
         return ""

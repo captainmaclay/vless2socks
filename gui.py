@@ -15,6 +15,8 @@ Features:
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import shutil
 import socket
@@ -63,6 +65,90 @@ def proxy_command(config_path: Path | str) -> list[str]:
     if FROZEN:
         return [str(CLI_EXE), "-c", str(config_path)]
     return [PYTHON, str(MAIN_SCRIPT), "-c", str(config_path)]
+
+
+# ── Xray-core: автоустановка ───────────────────────────────────
+# Профили с reality / xtls-flow / ws встроенный Python-клиент поднять не может:
+# REALITY прячет ключ внутри TLS ClientHello, стандартному ssl это недоступно.
+# Раньше такой профиль просто падал с советом запустить tools/get_xray.py —
+# теперь бинарник докачивается сам, до первого запуска прокси.
+
+#: Качаем в один поток на всё приложение, даже если стартуют несколько прокси.
+_xray_fetch_lock = threading.Lock()
+#: После неудачи не долбим сеть на каждом авто-переподключении.
+_xray_fetch_failed = False
+
+
+class _LogStream(io.TextIOBase):
+    """Приёмник вывода загрузчика: отдаёт готовые строки в лог GUI.
+
+    Нужен вдвойне: в windowed-сборке sys.stdout равен None, и обычный print()
+    внутри загрузчика свалился бы с AttributeError.
+    """
+
+    def __init__(self, emit):
+        self._emit = emit
+        self._buf = ""
+
+    def write(self, text: str) -> int:
+        self._buf += text
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            line = line.strip()
+            if line:
+                self._emit(line)
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buf.strip():
+            self._emit(self._buf.strip())
+        self._buf = ""
+
+
+def xray_required_but_missing(config_path: Path | str) -> bool:
+    """Профиль пойдёт через xray, а бинарника нет?"""
+    from vless2socks.config import load_config
+    from vless2socks.url import ConfigError
+    from vless2socks.xray import XrayNotFound, find_xray
+
+    try:
+        cfg = load_config(config_path, strict=False)
+    except ConfigError:
+        return False  # пусть прокси сам объяснит, что не так со ссылкой
+
+    backend = (cfg.backend or "auto").lower()
+    if backend == "python":
+        return False
+    if backend == "auto" and not cfg.server.unsupported:
+        return False
+
+    try:
+        find_xray(cfg.xray_path or None)
+    except XrayNotFound:
+        return True
+    return False
+
+
+def download_xray(emit) -> bool:
+    """Скачать xray-core в bin/ рядом с приложением. Блокирует свой поток."""
+    global _xray_fetch_failed
+    from tools.get_xray import DownloadError, install
+
+    dest = ROOT_DIR / "bin"
+    stream = _LogStream(emit)
+    try:
+        with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
+            install(None, dest)
+        stream.flush()
+    except (DownloadError, OSError, ValueError) as exc:
+        stream.flush()
+        _xray_fetch_failed = True
+        emit(f"Не удалось скачать xray-core: {exc}")
+        emit("Скачайте вручную: https://github.com/XTLS/Xray-core/releases")
+        emit(f"и распакуйте xray.exe, geoip.dat, geosite.dat в {dest}")
+        return False
+    emit("xray-core установлен.")
+    return True
 
 PAGE_SIZE = 10
 BASE_PORT = 1080
@@ -725,6 +811,11 @@ class ProxyInstance:
         self._log(f"Starting proxy on {host}:{port}...")
         self._set_state("starting")
 
+        # Профиль на reality / xtls / ws без xray не поднимется — доставим сами.
+        if not _xray_fetch_failed and xray_required_but_missing(self.config_path):
+            self._fetch_xray_then_start()
+            return
+
         cmd = proxy_command(self.config_path)
         if FROZEN and not CLI_EXE.exists():
             self._log(
@@ -754,6 +845,26 @@ class ProxyInstance:
 
         # Auto-check Geo IP shortly after startup
         self.app.after(3000, self.check_geo_now)
+
+    def _fetch_xray_then_start(self):
+        """Скачать xray-core в фоне и повторить запуск, когда он появится."""
+        if not _xray_fetch_lock.acquire(blocking=False):
+            self._log("xray-core уже скачивается — повторю через 5 с.")
+            self.app.after(5000, self.start)
+            return
+
+        self._set_state("starting")
+        self._log("Профиль требует xray-core (reality / xtls / ws).")
+
+        def worker():
+            emit = lambda msg: self.app.after(0, self._log, msg)
+            try:
+                ok = download_xray(emit)
+            finally:
+                _xray_fetch_lock.release()
+            self.app.after(0, self.start if ok else lambda: self._set_state("error"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def stop(self):
         self._manual_stop = True

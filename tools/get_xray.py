@@ -31,7 +31,10 @@ API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 API_TAG = f"https://api.github.com/repos/{REPO}/releases/tags/{{tag}}"
 USER_AGENT = "vless2socks-get-xray"
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+try:  # в собранном .exe __file__ ведёт во временную папку распаковки
+    from vless2socks.paths import APP_DIR as PROJECT_ROOT
+except ImportError:  # запуск файла напрямую, без пакета на пути
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DEST = PROJECT_ROOT / "bin"
 
 #: Что распаковываем из архива.
