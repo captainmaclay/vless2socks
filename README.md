@@ -105,8 +105,8 @@ python main.py -c config.json --ip
 .\build.bat
 ```
 
-Runs PyInstaller against `vless2socks.spec` and produces **two** executables plus
-the xray-core files next to them:
+Creates `.venv`, installs the dependencies and PyInstaller if they are missing,
+then builds **two** executables from `vless2socks.spec`:
 
 ```
 dist/
@@ -119,9 +119,13 @@ dist/
 ```
 
 Both executables are required: the GUI runs every proxy as a separate process,
-and a frozen build has no `python.exe` or `main.py` on disk to call. `xray.exe`
-and its databases deliberately stay **outside** the exe — baking 65 MB into a
-onefile build would re-extract them to a temp folder on every launch.
+and a frozen build has no `python.exe` or `main.py` on disk to call.
+
+`bin/` is optional. Xray-core deliberately stays **outside** the exe — baking
+65 MB into a onefile build would re-extract it to a temp folder on every launch —
+and the app downloads it into `bin/` by itself the first time a profile needs it
+(REALITY, XTLS or WebSocket). `build.bat` copies an existing `bin/` next to the
+exe if you have one, so the release can ship with or without it.
 
 `config.json`, `instances.json` and `settings.json` are created automatically on
 first run from templates bundled inside the exe, so `dist/` ships as-is.
@@ -347,8 +351,8 @@ python main.py -c config.json --ip
 .\build.bat
 ```
 
-Запускает PyInstaller по `vless2socks.spec` и кладёт рядом **два** исполняемых
-файла и xray-core:
+Создаёт `.venv`, доставляет зависимости и PyInstaller, если их нет, и собирает
+по `vless2socks.spec` **два** исполняемых файла:
 
 ```
 dist/
@@ -361,9 +365,14 @@ dist/
 ```
 
 Нужны оба exe: GUI поднимает каждый прокси отдельным процессом, а внутри сборки
-нет ни `python.exe`, ни `main.py` на диске. `xray.exe` и его базы намеренно лежат
-**снаружи** exe — зашивать 65 МБ в onefile-сборку значит распаковывать их во
-временную папку при каждом запуске.
+нет ни `python.exe`, ни `main.py` на диске.
+
+Папка `bin/` необязательна. Xray-core намеренно лежит **снаружи** exe — зашивать
+65 МБ в onefile-сборку значит распаковывать их во временную папку при каждом
+запуске, — а программа сама скачивает его в `bin/`, когда впервые встречает
+профиль, которому он нужен (REALITY, XTLS или WebSocket). `build.bat` скопирует
+существующий `bin/` рядом с exe, если он у вас есть, так что релиз можно отдавать
+и с ним, и без него.
 
 `config.json`, `instances.json` и `settings.json` создаются сами при первом
 запуске из шаблонов, зашитых в exe, — папку `dist/` можно отдавать как есть.

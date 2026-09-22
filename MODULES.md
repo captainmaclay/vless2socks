@@ -654,6 +654,9 @@ Clean template with placeholder UUID for new users to fill in.
 
 | Script | Command | Description |
 |--------|---------|-------------|
+| `install.bat` | `.venv` + deps + Xray-core + config templates | First-time setup, idempotent |
+| `start.bat` | `pythonw gui.py` (runs `install.bat` first if needed) | Recommended way to launch |
+| `build.bat` | `.venv` + PyInstaller if missing, then `pyinstaller vless2socks.spec` | Build both .exe into `dist/` |
 | `gui.bat` | `pythonw gui.py` | Launch GUI (auto-installs pystray/Pillow if missing) |
 | `run.bat` | `python main.py -c config.json` | Start CLI proxy (creates config template if missing) |
 | `tray.bat` | `pythonw tray_widget.py` | Launch standalone tray widget |
