@@ -14,6 +14,8 @@
   <sub>Professional GUI for managing unlimited SOCKS5 proxies over VLESS (TCP/TLS/REALITY) with Xray-core backend</sub>
 </p>
 
+![screenshot](https://i.imgur.com/LReRDxM.png)
+
 ---
 
 <!-- ENGLISH SECTION -->
