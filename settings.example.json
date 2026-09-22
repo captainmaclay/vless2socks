@@ -1,0 +1,13 @@
+{
+  "language": "en",
+  "force_port_takeover": true,
+  "autostart_proxies": true,
+  "start_minimized_tray": false,
+  "auto_reconnect": true,
+  "reconnect_intervals": "10, 15, 30, 60, 120, 180, 30",
+  "auto_backup_enabled": false,
+  "backup_interval_hours": 24,
+  "backup_dir": "",
+  "last_backup_time": "-",
+  "backup_password": ""
+}

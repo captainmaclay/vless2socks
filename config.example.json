@@ -1,0 +1,13 @@
+{
+  "url": "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=tcp&sni=example.com#my-server",
+  "listen": "127.0.0.1:1080",
+  "username": "",
+  "password": "",
+  "udp": true,
+  "connectTimeout": 10,
+  "udpIdleTimeout": 60,
+  "logLevel": "info",
+  "backend": "auto",
+  "xrayPath": "",
+  "xrayLegacyConfig": false
+}
