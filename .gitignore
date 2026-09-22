@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.venv/
+.idea/
+
+# Личные данные — не коммитить никогда
+config.json
+instances.json
+settings.json
+.env
+.instance_*.json
+*.hbak
+selftest-output.txt
+*.log
+
+# Результаты сборки
+build/
+dist/
+release/
+*.exe
+
+# xray-core и его базы качаются отдельно (tools/get_xray.py)
+bin/*
+!bin/.gitkeep
+runtime/

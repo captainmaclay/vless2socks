@@ -1,0 +1,18 @@
+# Батники обязаны оставаться с CRLF: cmd.exe спотыкается на LF-переводах
+# строк в блоках if (...) и переходах goto.
+*.bat   text eol=crlf
+
+# Остальное — LF, независимо от настроек core.autocrlf у клонирующего
+*.py    text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.txt   text eol=lf
+*.spec  text eol=lf
+.gitignore      text eol=lf
+.env.example    text eol=lf
+
+# Бинарники не трогать
+*.exe   binary
+*.dat   binary
+*.hbak  binary
+*.png   binary
