@@ -23,6 +23,10 @@ from vless2socks.socks_client import http_get_via_socks5
 _GEO_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _CACHE_TTL = 300.0  # 5 minutes cache
 
+def invalidate_cache(socks_host: str = "127.0.0.1", socks_port: int = 1081) -> None:
+    """Очищает кэшированные данные геолокации для указанного хоста и порта."""
+    _GEO_CACHE.pop(f"{socks_host}:{socks_port}", None)
+
 # Flag emoji map for common country codes or fallback conversion
 def code_to_flag(code: str) -> str:
     """Convert ISO 3166-1 alpha-2 country code to emoji flag."""
@@ -59,6 +63,8 @@ DOMAIN_COUNTRY_MAP = {
     "ua": ("Ukraine", "🇺🇦"),
     "sg": ("Singapore", "🇸🇬"),
     "jp": ("Japan", "🇯🇵"),
+    "lv": ("Latvia", "🇱🇻"),
+    "latvia": ("Latvia", "🇱🇻"),
 }
 
 FLAG_RE = re.compile(r"([\U0001F1E6-\U0001F1FF]{2})")
@@ -101,7 +107,8 @@ def extract_country_hint(url: str) -> dict[str, str]:
 
     # 2. Parse host domain if country still unknown
     try:
-        after_at = url.split("@", 1)[1] if "@" in url else url
+        clean_url = url.split("://", 1)[1] if "://" in url else url
+        after_at = clean_url.split("@", 1)[1] if "@" in clean_url else clean_url
         hostport = after_at.split("?", 1)[0].split("#", 1)[0]
         host = hostport.split(":")[0].strip().lower()
         res["host"] = host

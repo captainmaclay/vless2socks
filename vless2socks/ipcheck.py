@@ -17,7 +17,8 @@ from .logging_setup import get_logger
 from .socks_client import Socks5ClientError, http_get_via_socks5
 
 __all__ = ["IpReport", "Service", "DEFAULT_SERVICES", "fetch_ip_direct",
-           "fetch_ip_via_socks5", "compare_ip", "format_ip_report"]
+           "fetch_ip_via_socks5", "compare_ip", "format_ip_report",
+           "check_ip_leak", "check_ip_leak_async"]
 
 log = get_logger("vless2socks.ipcheck")
 
@@ -268,3 +269,71 @@ def format_ip_report(report: IpReport) -> str:
     lines.append("=" * 72)
     lines.append("")
     return "\n".join(lines)
+
+
+async def check_ip_leak_async(
+    socks_host: str,
+    socks_port: int,
+    *,
+    username: str = "",
+    password: str = "",
+    timeout: float = 6.0,
+    services=DEFAULT_SERVICES,
+) -> tuple[bool, str, str, str]:
+    """Check whether local proxy leaks the real machine IP.
+
+    Returns:
+        (is_leak, direct_ip, tunnel_ip, message)
+        is_leak is True if direct_ip and tunnel_ip both exist and are identical.
+    """
+    report = await compare_ip(
+        socks_host,
+        socks_port,
+        username=username,
+        password=password,
+        services=services,
+    )
+    if report.substituted is False:
+        return (
+            True,
+            report.direct,
+            report.tunnel,
+            f"LEAK DETECTED: Original IP ({report.direct}) matches proxy exit IP ({report.tunnel})!",
+        )
+    elif report.substituted is True:
+        return (
+            False,
+            report.direct,
+            report.tunnel,
+            f"SAFE: Exit IP ({report.tunnel}) differs from real IP ({report.direct}).",
+        )
+    else:
+        err = report.tunnel_error or report.direct_error or "Could not resolve both IPs"
+        return False, report.direct, report.tunnel, f"Indeterminate: {err}"
+
+
+def check_ip_leak(
+    socks_host: str,
+    socks_port: int,
+    *,
+    username: str = "",
+    password: str = "",
+    timeout: float = 6.0,
+    services=DEFAULT_SERVICES,
+) -> tuple[bool, str, str, str]:
+    """Synchronous wrapper for check_ip_leak_async."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(
+            check_ip_leak_async(
+                socks_host,
+                socks_port,
+                username=username,
+                password=password,
+                timeout=timeout,
+                services=services,
+            )
+        )
+    finally:
+        loop.close()
+

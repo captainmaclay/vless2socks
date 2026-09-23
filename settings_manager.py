@@ -4,6 +4,7 @@ Stores persistent user preferences in settings.json:
 - language ('en' by default, 'ru')
 - force_port_takeover (True by default): Reclaim busy ports before starting proxy
 - autostart_proxies (True by default): Start all configured proxies on app launch
+- force_restart (True by default): Automatically restart proxies on crash or disconnect
 - start_minimized_tray (False by default): Launch minimized in system tray
 - auto_reconnect (True by default): Automatically attempt to restart failed proxies
 - reconnect_intervals ("10, 15, 30, 60, 120, 180, 30" by default): Retry backoff schedule
@@ -32,6 +33,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "language": "en",
     "force_port_takeover": True,
     "autostart_proxies": True,
+    "force_restart": True,
     "start_minimized_tray": False,
     "auto_reconnect": True,
     "reconnect_intervals": DEFAULT_RECONNECT_INTERVALS,

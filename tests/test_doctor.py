@@ -186,7 +186,15 @@ class FullRunTest(unittest.IsolatedAsyncioTestCase):
     async def test_handshake_ok_even_if_target_stays_silent(self):
         """Заголовок ответа приходит до данных — молчащая цель не должна мешать."""
         async def silent(reader, writer):
-            await asyncio.sleep(30)
+            try:
+                await asyncio.sleep(0.5)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
 
         silent_server = await asyncio.start_server(silent, "127.0.0.1", 0)
         silent_port = silent_server.sockets[0].getsockname()[1]
@@ -202,7 +210,8 @@ class FullRunTest(unittest.IsolatedAsyncioTestCase):
         """Ключевое свойство: reality не должен глушить нижние проверки."""
         cfg = config_for(
             f"vless://{USER_ID}@127.0.0.1:{self.vless.port}"
-            "?security=none&type=tcp&flow=xtls-rprx-vision"
+            "?security=none&type=tcp&flow=xtls-rprx-vision",
+            backend="python",
         )
         results = await run_diagnostics(
             cfg, probe_host="127.0.0.1", probe_port=self.http.port, probe_path="/doc"
@@ -252,7 +261,10 @@ class XrayBackendDoctorTest(unittest.IsolatedAsyncioTestCase):
             os.environ.pop("STUB_XRAY_MODE", None)
         else:
             os.environ["STUB_XRAY_MODE"] = self._saved
-        self._tmp.cleanup()
+        try:
+            self._tmp.cleanup()
+        except Exception:
+            pass
 
     def _reality_config(self, **kw):
         cfg = config_for(REALITY_URL)

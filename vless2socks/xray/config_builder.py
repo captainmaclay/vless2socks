@@ -12,7 +12,7 @@ import copy
 from typing import Any
 
 from ..config import AppConfig
-from ..url import VlessServer
+from ..url import SocksServer, VlessServer
 
 __all__ = ["build_xray_config", "describe_config", "redact_config"]
 
@@ -45,6 +45,24 @@ _LOG_LEVELS = {
 }
 
 
+def get_physical_gateway_ip() -> str | None:
+    """Определить локальный IP физического шлюза в Windows, минуя виртуальные адаптеры (TUN)."""
+    import subprocess
+    import sys
+    if sys.platform == "win32":
+        try:
+            out = subprocess.check_output("route print 0.0.0.0", shell=True, text=True)
+            for line in out.splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 5 and parts[0] == "0.0.0.0" and parts[1] == "0.0.0.0":
+                    gateway, iface = parts[2], parts[3]
+                    if not iface.startswith(("172.19.", "127.", "169.254.")):
+                        return iface
+        except Exception:
+            pass
+    return None
+
+
 def build_xray_config(config: AppConfig, *, legacy_vnext: bool = False) -> dict[str, Any]:
     """Собрать полный конфиг xray для текущих настроек.
 
@@ -54,14 +72,59 @@ def build_xray_config(config: AppConfig, *, legacy_vnext: bool = False) -> dict[
         откажется читать конфиг, поэтому :class:`XrayProcess` при отказе
         пробует вторую форму автоматически.
     """
-    return {
+    if isinstance(config.server, SocksServer):
+        primary_outbound = _socks_outbound(config.server)
+    else:
+        primary_outbound = _vless_outbound(config.server, legacy_vnext=legacy_vnext)
+
+    send_through = getattr(config, "send_through", "")
+    if send_through == "none":
+        pass
+    elif send_through and send_through != "auto":
+        primary_outbound["sendThrough"] = send_through
+    else:
+        # Автоматически на Windows: направлять исходящий сокет Xray через реальный
+        # физический адаптер, чтобы туннель не перехватывался локальными TUN (Throne, Sing-box).
+        phys_ip = get_physical_gateway_ip()
+        if phys_ip:
+            primary_outbound["sendThrough"] = phys_ip
+
+    outbounds = [primary_outbound]
+    routing = None
+
+    if getattr(config, "killswitch", False):
+        outbounds.append({
+            "tag": "block",
+            "protocol": "blackhole",
+            "settings": {"response": {"type": "none"}},
+        })
+        outbounds.append(_direct_outbound())
+        routing = {
+            "domainStrategy": "AsIs",
+            "rules": [
+                {
+                    "type": "field",
+                    "inboundTag": ["socks-in", "http-in"],
+                    "outboundTag": "proxy",
+                },
+                {
+                    "type": "field",
+                    "inboundTag": ["socks-in", "http-in"],
+                    "outboundTag": "block",
+                },
+            ],
+        }
+    else:
+        outbounds.append(_direct_outbound())
+
+    res = {
         "log": {"loglevel": _LOG_LEVELS.get(config.log_level.lower(), "warning")},
         "inbounds": [_socks_inbound(config), _http_inbound(config)],
-        "outbounds": [
-            _vless_outbound(config.server, legacy_vnext=legacy_vnext),
-            _direct_outbound(),
-        ],
+        "outbounds": outbounds,
     }
+    if routing:
+        res["routing"] = routing
+    return res
 
 
 # ------------------------------------------------------------------- inbound
@@ -142,6 +205,28 @@ def _vless_outbound(server: VlessServer, *, legacy_vnext: bool = False) -> dict[
         "protocol": "vless",
         "settings": settings,
         "streamSettings": _stream_settings(server),
+    }
+
+
+def _socks_outbound(server: SocksServer) -> dict[str, Any]:
+    srv: dict[str, Any] = {
+        "address": server.address,
+        "port": int(server.port),
+    }
+    if server.username:
+        srv["users"] = [
+            {
+                "user": server.username,
+                "pass": server.password or "",
+                "level": 0,
+            }
+        ]
+    return {
+        "tag": "proxy",
+        "protocol": "socks",
+        "settings": {
+            "servers": [srv]
+        },
     }
 
 
@@ -255,6 +340,10 @@ def redact_config(config: dict[str, Any]) -> dict[str, Any]:
             for user in vnext.get("users", []):
                 if user.get("id"):
                     user["id"] = _mask(user["id"])
+        for server in settings.get("servers", []):  # SOCKS outbound
+            for user in server.get("users", []):
+                if user.get("pass"):
+                    user["pass"] = "***"
     for inbound in safe.get("inbounds", []):
         for account in inbound.get("settings", {}).get("accounts", []):
             if account.get("pass"):
@@ -276,8 +365,23 @@ def describe_config(config: dict[str, Any]) -> str:
     """Короткая сводка конфига одной строкой на каждый значимый параметр."""
     inbound = config["inbounds"][0]
     outbound = config["outbounds"][0]
-    stream = outbound["streamSettings"]
-    settings = outbound["settings"]
+    proto = outbound.get("protocol", "vless")
+
+    if proto == "socks":
+        servers = outbound.get("settings", {}).get("servers", [{}])
+        srv = servers[0] if servers else {}
+        auth = "user/pass" if srv.get("users") else "no-auth"
+        lines = [
+            f"inbound:  socks {inbound['listen']}:{inbound['port']} "
+            f"({inbound['settings']['auth']}, udp={inbound['settings']['udp']})",
+            f"outbound: socks5 {srv.get('address')}:{srv.get('port')} [{auth}]",
+        ]
+        if any(o.get("tag") == "block" and o.get("protocol") == "blackhole" for o in config.get("outbounds", [])):
+            lines.append("killswitch: активен (blackhole при утечке)")
+        return "\n".join(lines)
+
+    stream = outbound.get("streamSettings", {})
+    settings = outbound.get("settings", {})
     if "vnext" in settings:
         target = settings["vnext"][0]
         peer, flow = target, target["users"][0].get("flow")
@@ -289,8 +393,8 @@ def describe_config(config: dict[str, Any]) -> str:
     lines = [
         f"inbound:  socks {inbound['listen']}:{inbound['port']} "
         f"({inbound['settings']['auth']}, udp={inbound['settings']['udp']})",
-        f"outbound: vless {peer['address']}:{peer['port']}  [{shape}]",
-        f"поток:    network={stream['network']}, security={stream['security']}",
+        f"outbound: vless {peer.get('address')}:{peer.get('port')}  [{shape}]",
+        f"поток:    network={stream.get('network')}, security={stream.get('security')}",
     ]
     if flow:
         lines.append(f"flow:     {flow}")
@@ -307,4 +411,6 @@ def describe_config(config: dict[str, Any]) -> str:
             f"allowInsecure={t['allowInsecure']}"
             + (f", fingerprint={t['fingerprint']}" if t.get("fingerprint") else "")
         )
+    if any(o.get("tag") == "block" and o.get("protocol") == "blackhole" for o in config.get("outbounds", [])):
+        lines.append("killswitch: активен (blackhole при утечке)")
     return "\n".join(lines)

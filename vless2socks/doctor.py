@@ -94,8 +94,19 @@ def check_backend(config: AppConfig) -> tuple[CheckResult, str, str]:
 def check_parameters(config: AppConfig, backend: str = "") -> CheckResult:
     """Убедиться, что все параметры ссылки выбранный движок умеет."""
     from .backend import XRAY
+    from .url import SocksServer
 
     server = config.server
+    if isinstance(server, SocksServer):
+        notes = [
+            f"сервер:    {server.address}:{server.port}",
+            f"протокол:  socks5",
+            f"логин:     {server.username or '-'}",
+        ]
+        if server.remark:
+            notes.insert(0, f"профиль:   {server.remark}")
+        return CheckResult("Параметры ссылки", Status.OK, "SOCKS5 сервер", notes=notes)
+
     notes = [
         f"сервер:    {server.address}:{server.port}",
         f"транспорт: type={server.network}, security={server.security}"
@@ -465,7 +476,7 @@ async def check_vless_handshake(
         )
     finally:
         if conn is not None:
-            await conn.wait_closed()
+            conn.close()
 
 
 async def check_http_through_tunnel(
@@ -553,7 +564,7 @@ def check_xray_config(config: AppConfig) -> CheckResult:
         )
 
     missing = []
-    stream = data["outbounds"][0]["streamSettings"]
+    stream = data["outbounds"][0].get("streamSettings") or {}
     if stream.get("security") == "reality":
         reality = stream["realitySettings"]
         if not reality.get("publicKey"):

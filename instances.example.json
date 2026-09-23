@@ -1,5 +1,23 @@
 [
   {
+    "name": "System Proxy",
+    "order": 0,
+    "url": "",
+    "listen": "127.0.0.1:1015",
+    "username": "",
+    "password": "",
+    "udp": true,
+    "connectTimeout": 10,
+    "udpIdleTimeout": 60,
+    "logLevel": "info",
+    "backend": "auto",
+    "xrayPath": "",
+    "xrayLegacyConfig": false,
+    "killswitch": true
+  },
+  {
+    "name": "Proxy 1",
+    "order": 1,
     "url": "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=tcp&sni=example.com#my-server",
     "listen": "127.0.0.1:1081",
     "username": "",
@@ -10,6 +28,7 @@
     "logLevel": "info",
     "backend": "auto",
     "xrayPath": "",
-    "xrayLegacyConfig": false
+    "xrayLegacyConfig": false,
+    "killswitch": false
   }
 ]

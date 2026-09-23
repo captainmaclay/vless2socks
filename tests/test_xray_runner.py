@@ -12,6 +12,7 @@ import json
 import os
 import socket
 import stat
+import sys
 import tempfile
 import unittest
 import uuid as uuid_mod
@@ -180,7 +181,10 @@ class ProcessLifecycleTest(unittest.IsolatedAsyncioTestCase):
             os.environ.pop("STUB_XRAY_MODE", None)
         else:
             os.environ["STUB_XRAY_MODE"] = self._saved_mode
-        self._tmp.cleanup()
+        try:
+            self._tmp.cleanup()
+        except Exception:
+            pass
 
     def _process(self, mode: str = "ok", **kw) -> tuple[XrayProcess, AppConfig]:
         os.environ["STUB_XRAY_MODE"] = mode
@@ -346,7 +350,15 @@ class ProcessLifecycleTest(unittest.IsolatedAsyncioTestCase):
         first_pid = process.pid
         supervisor = asyncio.ensure_future(process.supervise())
         try:
-            process._proc.kill()
+            if sys.platform == "win32":
+                import subprocess
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                process._proc.kill()
             with mock.patch("vless2socks.xray.runner.RESTART_BACKOFF", (0.2,)):
                 for _ in range(100):
                     await asyncio.sleep(0.1)

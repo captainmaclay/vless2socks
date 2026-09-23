@@ -122,7 +122,10 @@ def xray_required_but_missing(config_path: Path | str) -> bool:
     backend = (cfg.backend or "auto").lower()
     if backend == "python":
         return False
-    if backend == "auto" and not cfg.server.unsupported:
+    from vless2socks.url import SocksServer
+    if isinstance(cfg.server, SocksServer):
+        pass  # SOCKS5 upstream always requires xray
+    elif backend == "auto" and not getattr(cfg.server, "unsupported", None):
         return False
 
     try:
@@ -299,17 +302,80 @@ def load_base_config() -> dict:
         return {"url": "", "listen": "127.0.0.1:1081"}
 
 
+def format_order(val: Any) -> str:
+    """Format numeric order cleanly: integer as '0', '1'; float as '1.5', '2.25'."""
+    try:
+        f = float(val)
+        if f.is_integer():
+            return str(int(f))
+        return f"{f:g}"
+    except (ValueError, TypeError):
+        return str(val) if val is not None else "0"
+
+
+def ensure_system_proxy_1015(instances: list[dict]) -> list[dict]:
+    """Ensure that the default unfilled System Proxy on port 1015 (#0) exists with killswitch=True."""
+    found_1015 = False
+    for inst in instances:
+        if not isinstance(inst, dict):
+            continue
+        listen = str(inst.get("listen", "")).strip()
+        port = None
+        if ":" in listen:
+            try:
+                port = int(listen.rpartition(":")[2])
+            except ValueError:
+                pass
+        elif listen.isdigit():
+            port = int(listen)
+        if port == 1015:
+            found_1015 = True
+            if not inst.get("name"):
+                inst["name"] = "System Proxy"
+            if "order" not in inst:
+                inst["order"] = 0
+            if "killswitch" not in inst:
+                inst["killswitch"] = True
+            break
+
+    if not found_1015:
+        system_proxy = {
+            "name": "System Proxy",
+            "order": 0,
+            "url": "",
+            "listen": "127.0.0.1:1015",
+            "username": "",
+            "password": "",
+            "udp": True,
+            "connectTimeout": 10,
+            "udpIdleTimeout": 60,
+            "logLevel": "info",
+            "backend": "auto",
+            "xrayPath": "",
+            "xrayLegacyConfig": False,
+            "killswitch": True,
+        }
+        instances.insert(0, system_proxy)
+
+    return instances
+
+
 def load_instances() -> list[dict]:
-    """Load list of instances from instances.json."""
+    """Load list of instances from instances.json, ensuring System Proxy :1015 is present."""
+    data = None
     try:
         with open(INSTANCES_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, list) and data:
-            return data
+            raw = json.load(f)
+        if isinstance(raw, list) and raw:
+            data = raw
     except Exception:
         pass
-    base = load_base_config()
-    return [base]
+
+    if not data:
+        data = []
+
+    data = ensure_system_proxy_1015(data)
+    return data
 
 
 def save_instances(instances: list[dict]) -> None:
@@ -467,10 +533,79 @@ class ProxyInstance:
         self.eye_btn: Optional[tk.Button] = None
         self._url_revealed = False
 
+        # Protocol & SOCKS5 UI
+        self.proto_var: Optional[tk.StringVar] = None
+        self.vless_container: Optional[tk.Frame] = None
+        self.socks_container: Optional[tk.Frame] = None
+        self.socks_summary_lbl: Optional[tk.Label] = None
+
+        # Killswitch state & UI
+        self.killswitch_var: Optional[tk.BooleanVar] = None
+        self.ks_badge: Optional[tk.Label] = None
+
+        # Name & Order UI references
+        self.name_label: Optional[tk.Label] = None
+        self.order_label: Optional[tk.Label] = None
+
         # Reconnect state
         self._manual_stop = False
         self._reconnect_attempt = 0
         self._reconnect_timer_id: Optional[str] = None
+
+        # Ensure port 1015 defaults
+        _, port = self.get_listen()
+        if str(port) == "1015":
+            if "killswitch" not in self.cfg:
+                self.cfg["killswitch"] = True
+            if not self.cfg.get("name"):
+                self.cfg["name"] = "System Proxy"
+            if "order" not in self.cfg:
+                self.cfg["order"] = 0
+
+    def get_order(self) -> float:
+        """Return numeric order value (>= 0). Default is 0.0 for port 1015, or global_id for others."""
+        if "order" in self.cfg:
+            try:
+                val = float(self.cfg["order"])
+                return max(0.0, val)
+            except (ValueError, TypeError):
+                pass
+        _, port = self.get_listen()
+        if str(port) == "1015":
+            return 0.0
+        return float(self.global_id)
+
+    def set_order(self, new_order: float | int) -> None:
+        val = max(0.0, float(new_order))
+        self.cfg["order"] = int(val) if val.is_integer() else val
+        self.app.sort_instances()
+        self.app.save_all()
+        self.app.refresh_overview()
+        self.app.refresh_current_page_tabs()
+
+    def get_display_name(self) -> str:
+        """Return configured custom name or fallback to server remark / host."""
+        name = str(self.cfg.get("name", "")).strip()
+        if name:
+            return name
+        _, port = self.get_listen()
+        if str(port) == "1015":
+            return "System Proxy"
+        return extract_server_name(self.cfg.get("url", ""))
+
+    def set_name(self, new_name: str) -> None:
+        self.cfg["name"] = new_name.strip()
+        self.app.save_all()
+        self.app.refresh_overview()
+        self.app.refresh_current_page_tabs()
+        if self.name_label and self.name_label.winfo_exists():
+            self.name_label.config(text=self.get_display_name())
+
+    def prompt_rename(self) -> None:
+        self.app.prompt_rename_proxy(self)
+
+    def prompt_reorder(self) -> None:
+        self.app.prompt_reorder_proxy(self)
 
     def _cancel_reconnect(self):
         if self._reconnect_timer_id:
@@ -480,10 +615,21 @@ class ProxyInstance:
                 pass
             self._reconnect_timer_id = None
 
+    def is_auto_reconnect_enabled(self) -> bool:
+        """Check if auto-reconnect / forced reconnect is enabled for this instance / globally."""
+        if "auto_reconnect" in self.cfg:
+            return bool(self.cfg["auto_reconnect"])
+        if "force_restart" in self.cfg:
+            return bool(self.cfg["force_restart"])
+        return bool(settings_manager.get_setting("auto_reconnect", True))
+
+    def is_force_restart_enabled(self) -> bool:
+        return self.is_auto_reconnect_enabled()
+
     def _schedule_reconnect(self):
         if self._manual_stop:
             return
-        if not settings_manager.get_setting("auto_reconnect", True):
+        if not self.is_force_restart_enabled():
             return
         if self.running or (self.process and self.process.poll() is None):
             return
@@ -563,6 +709,30 @@ class ProxyInstance:
         )
         close_btn.pack(side=tk.RIGHT, padx=(4, 0))
 
+        # 1.5. Name & Order Bar inside Proxy Tab
+        name_bar = tk.Frame(self.frame, bg=bg)
+        name_bar.pack(fill=tk.X, padx=px, pady=(2, 4))
+
+        tk.Label(name_bar, text=t("lbl_proxy_name"), font=("Segoe UI", 9), fg=C["subtext"], bg=bg).pack(side=tk.LEFT, padx=(0, 4))
+        self.name_label = tk.Label(name_bar, text=self.get_display_name(), font=("Segoe UI", 10, "bold"), fg=fg, bg=bg)
+        self.name_label.pack(side=tk.LEFT, padx=(0, 4))
+        tk.Button(
+            name_bar, text="✏️", font=("Segoe UI", 9),
+            bg=bg, fg=C["subtext"], activebackground=C["hover"], activeforeground=C["text"],
+            relief=tk.FLAT, bd=0, padx=4, pady=0, cursor="hand2",
+            command=self.prompt_rename
+        ).pack(side=tk.LEFT, padx=(0, 14))
+
+        tk.Label(name_bar, text=t("lbl_proxy_order"), font=("Segoe UI", 9), fg=C["subtext"], bg=bg).pack(side=tk.LEFT, padx=(0, 4))
+        self.order_label = tk.Label(name_bar, text=f"#{format_order(self.get_order())}", font=("Consolas", 10, "bold"), fg=C["blue"], bg=bg)
+        self.order_label.pack(side=tk.LEFT, padx=(0, 4))
+        tk.Button(
+            name_bar, text="🔢", font=("Segoe UI", 9),
+            bg=bg, fg=C["subtext"], activebackground=C["hover"], activeforeground=C["text"],
+            relief=tk.FLAT, bd=0, padx=4, pady=0, cursor="hand2",
+            command=self.prompt_reorder
+        ).pack(side=tk.LEFT)
+
         # 2. Geo IP & Country Zone Card
         geo_box = tk.Frame(self.frame, bg=C["card"], relief=tk.FLAT, borderwidth=1)
         geo_box.pack(fill=tk.X, padx=px, pady=4)
@@ -618,15 +788,77 @@ class ProxyInstance:
         )
         free_port_btn.grid(row=0, column=4, sticky="w", padx=(10, 0))
 
-        # 4. VLESS URL with Hidden Mask & Eye Toggle
-        url_frame = tk.Frame(self.frame, bg=bg)
-        url_frame.pack(fill=tk.X, padx=px, pady=4)
+        # 3.5. Killswitch & IP Leak Protection
+        ks_frame = tk.Frame(self.frame, bg=bg)
+        ks_frame.pack(fill=tk.X, padx=px, pady=(2, 4))
 
-        url_header = tk.Frame(url_frame, bg=bg)
+        default_ks = True if str(p) == "1015" else False
+        self.killswitch_var = tk.BooleanVar(value=bool(self.cfg.get("killswitch", default_ks)))
+
+        ks_chk = tk.Checkbutton(
+            ks_frame, text=f" {t('lbl_killswitch')}", variable=self.killswitch_var,
+            font=("Segoe UI", 9, "bold"), fg=C["text"], bg=bg,
+            selectcolor=C["card"], activebackground=bg, activeforeground=C["blue"],
+            command=self._on_killswitch_toggled,
+        )
+        ks_chk.pack(side=tk.LEFT)
+
+        self.ks_badge = tk.Label(
+            ks_frame,
+            text=f"[{t('ks_active')}]" if self.killswitch_var.get() else f"[{t('ks_off')}]",
+            font=("Segoe UI", 8, "bold"),
+            fg=C["green"] if self.killswitch_var.get() else C["muted"],
+            bg=bg,
+        )
+        self.ks_badge.pack(side=tk.LEFT, padx=(6, 12))
+
+        verify_ks_btn = tk.Button(
+            ks_frame, text=t("btn_verify_leak"), font=("Segoe UI", 8),
+            bg=C["overlay"], fg=C["subtext"], activebackground=C["hover"], activeforeground=C["text"],
+            relief=tk.FLAT, padx=8, pady=1, command=lambda: self.verify_killswitch(manual=True),
+        )
+        verify_ks_btn.pack(side=tk.LEFT)
+
+        # 4. Upstream Protocol & Server Configuration
+        proto_frame = tk.Frame(self.frame, bg=bg)
+        proto_frame.pack(fill=tk.X, padx=px, pady=4)
+
+        # Protocol selector row
+        proto_row = tk.Frame(proto_frame, bg=bg)
+        proto_row.pack(fill=tk.X, pady=(0, 4))
+
+        tk.Label(
+            proto_row, text=t("lbl_protocol"), font=("Segoe UI", 9, "bold"),
+            fg=C["subtext"], bg=bg
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        current_url = self.cfg.get("url", "").strip()
+        is_socks = current_url.startswith(("socks5://", "socks://"))
+        self.proto_var = tk.StringVar(value="socks5" if is_socks else "vless")
+
+        rb_vless = tk.Radiobutton(
+            proto_row, text=t("proto_vless"), variable=self.proto_var, value="vless",
+            font=("Segoe UI", 9, "bold"), fg=C["text"], bg=bg,
+            selectcolor=C["card"], activebackground=bg, activeforeground=C["blue"],
+            command=self._on_proto_changed,
+        )
+        rb_vless.pack(side=tk.LEFT, padx=(0, 14))
+
+        rb_socks = tk.Radiobutton(
+            proto_row, text=t("proto_socks5"), variable=self.proto_var, value="socks5",
+            font=("Segoe UI", 9, "bold"), fg=C["text"], bg=bg,
+            selectcolor=C["card"], activebackground=bg, activeforeground=C["blue"],
+            command=self._on_proto_changed,
+        )
+        rb_socks.pack(side=tk.LEFT)
+
+        # VLESS Container
+        self.vless_container = tk.Frame(proto_frame, bg=bg)
+        url_header = tk.Frame(self.vless_container, bg=bg)
         url_header.pack(fill=tk.X)
         tk.Label(url_header, text=t("lbl_vless_url"), font=("Segoe UI", 9, "bold"), fg=C["subtext"], bg=bg).pack(side=tk.LEFT)
 
-        input_row = tk.Frame(url_frame, bg=bg)
+        input_row = tk.Frame(self.vless_container, bg=bg)
         input_row.pack(fill=tk.X, pady=(2, 4))
 
         self.url_entry = tk.Entry(
@@ -635,10 +867,9 @@ class ProxyInstance:
             relief=tk.FLAT, borderwidth=5, show="•",
         )
         self.url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-        self.url_entry.insert(0, self.cfg.get("url", ""))
+        self.url_entry.insert(0, current_url if not is_socks else "")
         attach_clipboard_and_context_menu(self.url_entry)
 
-        # Eye toggle button
         self.eye_btn = tk.Button(
             input_row, text="👁️", font=("Segoe UI", 10),
             bg=C["overlay"], fg=fg, activebackground=C["hover"],
@@ -646,7 +877,6 @@ class ProxyInstance:
         )
         self.eye_btn.pack(side=tk.LEFT, padx=(0, 4))
 
-        # Copy button
         copy_btn = tk.Button(
             input_row, text="📋", font=("Segoe UI", 10),
             bg=C["overlay"], fg=fg, activebackground=C["hover"],
@@ -654,13 +884,56 @@ class ProxyInstance:
         )
         copy_btn.pack(side=tk.LEFT)
 
-        # Save & Apply button
+        # SOCKS5 Container
+        self.socks_container = tk.Frame(proto_frame, bg=bg)
+
+        socks_card = tk.Frame(self.socks_container, bg=C["card"], relief=tk.FLAT, borderwidth=1)
+        socks_card.pack(fill=tk.X, pady=(2, 4))
+
+        socks_info = tk.Frame(socks_card, bg=C["card"])
+        socks_info.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10, pady=8)
+
+        tk.Label(
+            socks_info, text=t("lbl_socks_summary"), font=("Segoe UI", 9, "bold"),
+            fg=C["blue"], bg=C["card"]
+        ).pack(anchor="w")
+
+        self.socks_summary_lbl = tk.Label(
+            socks_info, text=self._format_socks_summary(), font=("Consolas", 9),
+            fg=C["text"], bg=C["card"], justify=tk.LEFT, wraplength=480
+        )
+        self.socks_summary_lbl.pack(anchor="w", pady=(2, 0))
+
+        socks_btns = tk.Frame(socks_card, bg=C["card"])
+        socks_btns.pack(side=tk.RIGHT, padx=8, pady=8)
+
+        edit_socks_btn = tk.Button(
+            socks_btns, text=t("btn_edit_socks"), font=("Segoe UI", 9, "bold"),
+            bg=C["blue"], fg="#1e1e2e", activebackground=C["teal"],
+            relief=tk.FLAT, padx=10, pady=4, command=self.open_socks_dialog,
+        )
+        edit_socks_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        socks_copy_btn = tk.Button(
+            socks_btns, text="📋", font=("Segoe UI", 10),
+            bg=C["overlay"], fg=fg, activebackground=C["hover"],
+            relief=tk.FLAT, padx=8, pady=3, command=self.copy_url,
+        )
+        socks_copy_btn.pack(side=tk.LEFT)
+
+        # Show active container
+        if is_socks:
+            self.socks_container.pack(fill=tk.X)
+        else:
+            self.vless_container.pack(fill=tk.X)
+
+        # Common Save & Apply button
         apply_btn = tk.Button(
-            url_frame, text=t("btn_save_apply"), font=("Segoe UI", 9, "bold"),
+            proto_frame, text=t("btn_save_apply"), font=("Segoe UI", 9, "bold"),
             bg=C["hover"], fg=fg, activebackground="#585b70",
             relief=tk.FLAT, padx=12, pady=3, command=self.apply,
         )
-        apply_btn.pack(anchor="w")
+        apply_btn.pack(anchor="w", pady=(4, 0))
 
         # 5. Connection Log
         sep = tk.Frame(self.frame, height=1, bg=C["border"])
@@ -698,6 +971,286 @@ class ProxyInstance:
             return t("geo_offline_hint", flag=flag, country=country)
         return t("geo_not_checked")
 
+    def _format_socks_summary(self) -> str:
+        url = self.cfg.get("url", "").strip()
+        if not (url.startswith("socks5://") or url.startswith("socks://")):
+            return t("socks_not_configured")
+        try:
+            from vless2socks.url import parse_socks_url
+            srv = parse_socks_url(url)
+            name_part = f"[{srv.remark}] " if srv.remark else ""
+            user_part = f" • user: {srv.username}" if srv.username else " • no-auth"
+            return f"{name_part}{srv.address}:{srv.port} (SOCKS{srv.version}{user_part})"
+        except Exception:
+            return url
+
+    def _update_socks_summary(self):
+        if self.socks_summary_lbl:
+            self.socks_summary_lbl.config(text=self._format_socks_summary())
+
+    def _on_killswitch_toggled(self):
+        val = bool(self.killswitch_var.get() if self.killswitch_var else False)
+        self.cfg["killswitch"] = val
+        if self.ks_badge:
+            self.ks_badge.config(
+                text=f"[{t('ks_active')}]" if val else f"[{t('ks_off')}]",
+                fg=C["green"] if val else C["muted"],
+            )
+        self.app.save_all()
+        self.app.refresh_overview()
+        status_msg = f"Killswitch {'АКТИВИРОВАН (весь трафик привязан к прокси, утечки блокируются)' if val else 'ВЫКЛЮЧЕН'}."
+        self._log(status_msg)
+        if val and self.running:
+            self.verify_killswitch(manual=False)
+
+    def verify_killswitch(self, manual: bool = False, sync: bool = False):
+        """Active leak verification: compare real ISP IP vs proxy exit IP."""
+        if not self.running:
+            if manual:
+                messagebox.showinfo("Killswitch", "Запустите прокси перед проверкой утечки.", parent=self.app)
+            return
+
+        host, port_str = self.get_listen()
+        try:
+            port = int(port_str)
+        except ValueError:
+            port = 1081
+
+        def worker():
+            from vless2socks.ipcheck import check_ip_leak
+            self._log("🛡️ [KILLSWITCH] Проверка защиты от утечек...")
+            is_leak, direct_ip, tunnel_ip, msg = check_ip_leak(host, port)
+
+            def on_done():
+                if is_leak:
+                    self._log(f"⚠️ [KILLSWITCH ALERT] УТЕЧКА ОБНАРУЖЕНА! Реальный IP ({direct_ip}) == IP прокси ({tunnel_ip})")
+                    self._log("🛡️ [KILLSWITCH] Немедленная остановка прокси для предотвращения утечки!")
+                    self.stop()
+                    self._set_state("error")
+                elif tunnel_ip and direct_ip and tunnel_ip != direct_ip:
+                    self._log(f"✓ [KILLSWITCH SAFE] Реальный IP: {direct_ip} != Выходной IP: {tunnel_ip}. Утечек нет.")
+                    if manual:
+                        messagebox.showinfo(
+                            "Killswitch",
+                            t("killswitch_verified_safe", real_ip=direct_ip, exit_ip=tunnel_ip),
+                            parent=self.app,
+                        )
+                else:
+                    self._log(f"ℹ️ [KILLSWITCH] Статус проверки: {msg}")
+                    if manual:
+                        messagebox.showinfo("Killswitch", f"Статус проверки:\n{msg}", parent=self.app)
+
+            if sync:
+                on_done()
+            else:
+                target = self.frame if self.frame else self.app
+                try:
+                    target.after(0, on_done)
+                except Exception:
+                    on_done()
+
+        if sync:
+            worker()
+            return None
+
+        worker_thread = threading.Thread(target=worker, daemon=True)
+        worker_thread.start()
+        return worker_thread
+
+    def _on_proto_changed(self):
+        val = self.proto_var.get() if self.proto_var else "vless"
+        if val == "socks5":
+            if self.vless_container:
+                self.vless_container.pack_forget()
+            if self.socks_container:
+                self.socks_container.pack(fill=tk.X)
+                self._update_socks_summary()
+            curr_url = self.cfg.get("url", "").strip()
+            if not curr_url.startswith(("socks5://", "socks://")):
+                self.open_socks_dialog()
+        else:
+            if self.socks_container:
+                self.socks_container.pack_forget()
+            if self.vless_container:
+                self.vless_container.pack(fill=tk.X)
+
+    def open_socks_dialog(self):
+        """Open SOCKS5 credentials editor dialog matching screenshot."""
+        from vless2socks.url import parse_socks_url, SocksServer
+
+        url = self.cfg.get("url", "").strip()
+        init_name = ""
+        init_addr = ""
+        init_port = ""
+        init_ver = "5"
+        init_user = ""
+        init_pass = ""
+
+        if url.startswith(("socks5://", "socks://")):
+            try:
+                srv = parse_socks_url(url)
+                init_name = srv.remark
+                init_addr = srv.address
+                init_port = str(srv.port) if srv.port else ""
+                init_ver = str(srv.version or 5)
+                init_user = srv.username
+                init_pass = srv.password
+            except Exception:
+                pass
+
+        dlg = tk.Toplevel(self.app)
+        dlg.title(t("dlg_socks_title"))
+        dlg.geometry("420x460")
+        dlg.resizable(False, False)
+        dlg.configure(bg=C["bg"])
+        dlg.transient(self.app)
+        dlg.grab_set()
+
+        try:
+            x = self.app.winfo_x() + (self.app.winfo_width() - 420) // 2
+            y = self.app.winfo_y() + (self.app.winfo_height() - 460) // 2
+            dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+
+        # ── Group: Common ─────────────────────────────────────────────
+        grp_common = tk.LabelFrame(
+            dlg, text=f" {t('grp_common')} ", font=("Segoe UI", 9, "bold"),
+            bg=C["bg"], fg=C["text"], bd=1, relief=tk.GROOVE
+        )
+        grp_common.pack(fill=tk.X, padx=14, pady=(12, 6))
+
+        tk.Label(grp_common, text=t("lbl_name"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
+            row=0, column=0, sticky="w", padx=(12, 10), pady=(10, 4)
+        )
+        name_ent = tk.Entry(grp_common, font=("Consolas", 10), bg=C["overlay"], fg=C["text"],
+                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=30)
+        name_ent.grid(row=0, column=1, sticky="ew", padx=(0, 12), pady=(10, 4))
+        name_ent.insert(0, init_name)
+        attach_clipboard_and_context_menu(name_ent)
+
+        tk.Label(grp_common, text=t("lbl_address"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
+            row=1, column=0, sticky="w", padx=(12, 10), pady=4
+        )
+        addr_ent = tk.Entry(grp_common, font=("Consolas", 10), bg=C["overlay"], fg=C["text"],
+                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=30)
+        addr_ent.grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=4)
+        addr_ent.insert(0, init_addr)
+        attach_clipboard_and_context_menu(addr_ent)
+
+        tk.Label(grp_common, text=t("lbl_port_field"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
+            row=2, column=0, sticky="w", padx=(12, 10), pady=4
+        )
+        port_ent = tk.Entry(grp_common, font=("Consolas", 10), bg=C["overlay"], fg=C["text"],
+                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=30)
+        port_ent.grid(row=2, column=1, sticky="ew", padx=(0, 12), pady=4)
+        port_ent.insert(0, init_port)
+        attach_clipboard_and_context_menu(port_ent)
+
+        adv_btn = tk.Button(
+            grp_common, text=t("btn_advanced_settings"), font=("Segoe UI", 9),
+            bg=C["card"], fg=C["subtext"], activebackground=C["hover"], activeforeground=C["text"],
+            relief=tk.GROOVE, bd=1, padx=10, pady=3,
+            command=lambda: messagebox.showinfo("vless2socks", "Advanced Settings:\nStandard SOCKS5 with full TCP & UDP stream tunneling via Xray.", parent=dlg),
+        )
+        adv_btn.grid(row=3, column=0, columnspan=2, sticky="ew", padx=12, pady=(8, 12))
+
+        # ── Group: Socks ──────────────────────────────────────────────
+        grp_socks = tk.LabelFrame(
+            dlg, text=f" {t('grp_socks')} ", font=("Segoe UI", 9, "bold"),
+            bg=C["bg"], fg=C["text"], bd=1, relief=tk.GROOVE
+        )
+        grp_socks.pack(fill=tk.X, padx=14, pady=6)
+
+        tk.Label(grp_socks, text=t("lbl_version"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
+            row=0, column=0, sticky="w", padx=(12, 10), pady=(10, 4)
+        )
+        ver_cb = ttk.Combobox(grp_socks, values=["5"], state="readonly", font=("Consolas", 10), width=28)
+        ver_cb.set(init_ver if init_ver == "5" else "5")
+        ver_cb.grid(row=0, column=1, sticky="ew", padx=(0, 12), pady=(10, 4))
+
+        tk.Label(grp_socks, text=t("lbl_username"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
+            row=1, column=0, sticky="w", padx=(12, 10), pady=4
+        )
+        user_ent = tk.Entry(grp_socks, font=("Consolas", 10), bg=C["overlay"], fg=C["text"],
+                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=30)
+        user_ent.grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=4)
+        user_ent.insert(0, init_user)
+        attach_clipboard_and_context_menu(user_ent)
+
+        tk.Label(grp_socks, text=t("lbl_password"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
+            row=2, column=0, sticky="w", padx=(12, 10), pady=(4, 12)
+        )
+        pass_ent = tk.Entry(grp_socks, font=("Consolas", 10), bg=C["overlay"], fg=C["text"],
+                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=30)
+        pass_ent.grid(row=2, column=1, sticky="ew", padx=(0, 12), pady=(4, 12))
+        pass_ent.insert(0, init_pass)
+        attach_clipboard_and_context_menu(pass_ent)
+
+        # ── Buttons: OK & Cancel ──────────────────────────────────────
+        btn_bar = tk.Frame(dlg, bg=C["bg"])
+        btn_bar.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=14)
+
+        def on_ok():
+            addr = addr_ent.get().strip()
+            p_val = port_ent.get().strip()
+            name_val = name_ent.get().strip()
+            user_val = user_ent.get().strip()
+            pass_val = pass_ent.get().strip()
+
+            if not addr:
+                messagebox.showwarning("vless2socks", t("msg_addr_required"), parent=dlg)
+                addr_ent.focus_set()
+                return
+
+            try:
+                p_int = int(p_val)
+                if not (1 <= p_int <= 65535):
+                    raise ValueError()
+            except ValueError:
+                messagebox.showwarning("vless2socks", t("msg_port_required"), parent=dlg)
+                port_ent.focus_set()
+                return
+
+            srv = SocksServer(
+                address=addr,
+                port=p_int,
+                username=user_val,
+                password=pass_val,
+                version=5,
+                remark=name_val,
+            )
+            socks_url = srv.to_url()
+            self.cfg["url"] = socks_url
+            if self.proto_var:
+                self.proto_var.set("socks5")
+            self._update_socks_summary()
+            self._init_geo_from_url()
+            self.app.save_all()
+            self.app.refresh_current_page_tabs()
+            self.app.refresh_overview()
+            self._log(f"Configured SOCKS5 upstream: {srv.describe()}")
+            dlg.destroy()
+
+        cancel_btn = tk.Button(
+            btn_bar, text=t("btn_cancel"), font=("Segoe UI", 9),
+            bg=C["card"], fg=C["text"], activebackground=C["hover"],
+            relief=tk.GROOVE, bd=1, padx=16, pady=4, command=dlg.destroy,
+        )
+        cancel_btn.pack(side=tk.RIGHT, padx=(8, 0))
+
+        ok_btn = tk.Button(
+            btn_bar, text=t("btn_ok"), font=("Segoe UI", 9, "bold"),
+            bg=C["card"], fg=C["blue"], activebackground=C["hover"],
+            relief=tk.GROOVE, bd=2, highlightthickness=1, highlightbackground=C["blue"],
+            padx=20, pady=4, command=on_ok,
+        )
+        ok_btn.pack(side=tk.RIGHT)
+
+        dlg.bind("<Return>", lambda e: on_ok())
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+        addr_ent.focus_set()
+
     def toggle_url_visibility(self):
         if not self.url_entry:
             return
@@ -712,22 +1265,37 @@ class ProxyInstance:
                 self.eye_btn.config(text="👁️", bg=C["overlay"])
 
     def copy_url(self):
-        url = self.url_entry.get().strip() if self.url_entry else self.cfg.get("url", "")
+        val = self.proto_var.get() if self.proto_var else "vless"
+        if val == "vless" and self.url_entry:
+            url = self.url_entry.get().strip()
+        else:
+            url = self.cfg.get("url", "").strip()
         if url:
             self.app.clipboard_clear()
             self.app.clipboard_append(url)
-            self._log(f"VLESS URL {t('copied_toast')}")
+            self._log(f"URL {t('copied_toast')}")
 
     def check_geo_now(self):
         """Perform live IP and Geo probe."""
-        if self.geo_card_label:
-            self.geo_card_label.config(text=t("geo_checking"))
-
         host, port_str = self.get_listen()
         try:
             port = int(port_str)
         except ValueError:
             port = 1081
+
+        if not self.running or not is_port_alive(host, port):
+            self.geo_info["verified"] = False
+            self.geo_info["ip"] = ""
+            if self.frame and self.geo_card_label:
+                try:
+                    self.geo_card_label.config(text=f"{self._format_geo_text()} ({t('status_stopped')})")
+                except Exception:
+                    pass
+            self._log(f"Geo IP: {t('status_stopped')} (порт {port} не отвечает)")
+            return
+
+        if self.geo_card_label:
+            self.geo_card_label.config(text=t("geo_checking"))
 
         url = self.url_entry.get().strip() if self.url_entry else self.cfg.get("url", "")
 
@@ -777,7 +1345,12 @@ class ProxyInstance:
         if self.process and self.process.poll() is None:
             return
 
-        url = self.url_entry.get().strip() if self.url_entry else self.cfg.get("url", "").strip()
+        val = self.proto_var.get() if self.proto_var else ("socks5" if self.cfg.get("url", "").startswith(("socks5://", "socks://")) else "vless")
+        if val == "vless" and self.url_entry:
+            url = self.url_entry.get().strip()
+        else:
+            url = self.cfg.get("url", "").strip()
+
         host = self.host_entry.get().strip() if self.host_entry else self.get_listen()[0]
         port = self.port_entry.get().strip() if self.port_entry else self.get_listen()[1]
         host = host or "127.0.0.1"
@@ -786,8 +1359,8 @@ class ProxyInstance:
         if not url:
             messagebox.showwarning("vless2socks", t("msg_url_required"))
             return
-        if not url.startswith("vless://"):
-            messagebox.showwarning("vless2socks", t("msg_url_prefix"))
+        if not (url.startswith("vless://") or url.startswith("socks5://") or url.startswith("socks://")):
+            messagebox.showwarning("vless2socks", t("msg_url_prefix_any"))
             return
 
         # Force Port Takeover if enabled in Options
@@ -805,6 +1378,8 @@ class ProxyInstance:
 
         self.cfg["url"] = url
         self.cfg["listen"] = f"{host}:{port}"
+        if self.killswitch_var is not None:
+            self.cfg["killswitch"] = bool(self.killswitch_var.get())
         self._init_geo_from_url()
 
         # Write instance config
@@ -843,6 +1418,11 @@ class ProxyInstance:
         # Auto-check Geo IP shortly after startup
         self.app.after(3000, self.check_geo_now)
 
+        # If killswitch is active, schedule leak verification
+        if self.cfg.get("killswitch", False):
+            self._log("🛡️ [KILLSWITCH] Активен: весь трафик привязан к прокси, проверка утечек запущена...")
+            self.app.after(3500, lambda: self.verify_killswitch(manual=False))
+
     def _fetch_xray_then_start(self):
         """Скачать xray-core в фоне и повторить запуск, когда он появится."""
         if not _xray_fetch_lock.acquire(blocking=False):
@@ -868,24 +1448,54 @@ class ProxyInstance:
         self._cancel_reconnect()
         self._reconnect_attempt = 0
 
-        proc = self.process
-        if proc is None:
-            self.running = False
-            self._set_state("stopped")
-            self.app.update_tray_icon()
-            self.app.refresh_overview()
-            return
-
         self._log("Stopping...")
+
+        h, port_str = self.get_listen()
         try:
-            proc.terminate()
+            port = int(port_str)
+            http_port = self.get_http_port()
+        except ValueError:
+            port = 1081
+            http_port = 11081
+
+        proc = self.process
+        if proc is not None:
             try:
-                proc.wait(timeout=4)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=2)
+                # На Windows proc.terminate() убивает только родительский процесс Python,
+                # оставляя дочерний xray.exe висеть зомби-процессом на порту!
+                # Принудительно уничтожаем всё дерево процессов через taskkill /F /T
+                if sys.platform == "win32":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                    )
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=1)
+            except Exception as e:
+                self._log(f"Stop error: {e}")
+
+        # Гарантированное завершение любых процессов (xray/socks), удерживающих порты SOCKS5 и HTTP CONNECT
+        try:
+            kill_processes_on_port(port)
+            kill_processes_on_port(http_port)
         except Exception as e:
-            self._log(f"Stop error: {e}")
+            self._log(f"Port cleanup error: {e}")
+
+        # Сбрасываем кэш GeoIP и очищаем verified IP для данного порта
+        geo_ip.invalidate_cache(h, port)
+        self.geo_info["verified"] = False
+        self.geo_info["ip"] = ""
+        if self.frame and self.geo_card_label:
+            try:
+                self.geo_card_label.config(text=self._format_geo_text())
+            except Exception:
+                pass
 
         self.process = None
         self.running = False
@@ -894,14 +1504,27 @@ class ProxyInstance:
         self._log("Stopped")
         self.app.update_tray_icon()
         self.app.refresh_overview()
+        self.app._update_header_stats()
 
     def apply(self):
-        if self.url_entry:
+        val = self.proto_var.get() if self.proto_var else "vless"
+        if val == "vless" and self.url_entry:
             self.cfg["url"] = self.url_entry.get().strip()
         if self.host_entry and self.port_entry:
             h = self.host_entry.get().strip() or "127.0.0.1"
             p = self.port_entry.get().strip() or "1081"
             self.cfg["listen"] = f"{h}:{p}"
+            if p == "1015":
+                if "killswitch" not in self.cfg:
+                    self.cfg["killswitch"] = True
+                    if self.killswitch_var is not None:
+                        self.killswitch_var.set(True)
+                if not self.cfg.get("name"):
+                    self.cfg["name"] = "System Proxy"
+                if "order" not in self.cfg:
+                    self.cfg["order"] = 0
+        if self.killswitch_var is not None:
+            self.cfg["killswitch"] = bool(self.killswitch_var.get())
         self._init_geo_from_url()
         self.app.save_all()
         self.app.refresh_current_page_tabs()
@@ -956,40 +1579,83 @@ class ProxyInstance:
             return
         proc.wait()
         code = proc.returncode
-        if self.running:
-            self._log(f"Process terminated (exit code {code})")
-            self.running = False
-            self.process = None
-            self.healthy = False
+        if self._manual_stop:
+            return
+        self._log(f"Process terminated (exit code {code})")
+        self.running = False
+        self.process = None
+        self.healthy = False
+        h, port_str = self.get_listen()
+        try:
+            p = int(port_str)
+            kill_processes_on_port(p)
+            kill_processes_on_port(self.get_http_port())
+            geo_ip.invalidate_cache(h, p)
+        except Exception:
+            pass
+        try:
             if self.frame:
                 self.frame.after(0, lambda: self._set_state("error"))
             self.app.after(0, self.app.update_tray_icon)
             self.app.after(0, self.app.refresh_overview)
 
-            if not self._manual_stop:
+            if self.is_auto_reconnect_enabled():
                 self.app.after(0, self._schedule_reconnect)
+        except Exception:
+            pass
 
     def poll_health(self):
-        if not self.running:
-            return
         h, p_str = self.get_listen()
         try:
             p = int(p_str)
         except ValueError:
             return
         alive = is_port_alive(h, p)
-        if alive and not self.healthy:
-            self.healthy = True
-            self._reconnect_attempt = 0
-            self._set_state("running")
-        elif not alive and self.healthy:
-            self.healthy = False
-            if self.process and self.process.poll() is None:
-                self._set_state("starting")
+
+        if self.running:
+            if alive and not self.healthy:
+                self.healthy = True
+                self._reconnect_attempt = 0
+                self._set_state("running")
+                self.app.update_tray_icon()
+                self.app.refresh_overview()
+                self.app._update_header_stats()
+            elif not alive and self.healthy:
+                self.healthy = False
+                if self.process and self.process.poll() is None:
+                    self._set_state("starting")
+                else:
+                    self._set_state("error")
+                    if not self._manual_stop and self.is_auto_reconnect_enabled():
+                        self._schedule_reconnect()
+                self.app.update_tray_icon()
+                self.app.refresh_overview()
+                self.app._update_header_stats()
+        else:
+            if alive:
+                if self._manual_stop:
+                    # User stopped proxy, but an orphan process is still holding the port
+                    kill_processes_on_port(p)
+                    kill_processes_on_port(self.get_http_port())
+                    geo_ip.invalidate_cache(h, p)
+                elif self._reconnect_timer_id is not None:
+                    # Reconnect in progress, do not mark running prematurely
+                    pass
+                else:
+                    # Preexisting process detected on port
+                    self.running = True
+                    self.healthy = True
+                    self._set_state("running")
+                    self.app.update_tray_icon()
+                    self.app.refresh_overview()
+                    self.app._update_header_stats()
             else:
-                self._set_state("error")
-                if not self._manual_stop:
-                    self._schedule_reconnect()
+                if self.healthy:
+                    self.healthy = False
+                    self._set_state("stopped")
+                    self.app.update_tray_icon()
+                    self.app.refresh_overview()
+                    self.app._update_header_stats()
 
     def _set_state(self, state: str):
         h, port = self.get_listen()
@@ -1039,12 +1705,21 @@ class ProxyInstance:
 
     def get_config(self) -> dict:
         cfg = dict(self.cfg)
-        if self.url_entry:
+        val = self.proto_var.get() if self.proto_var else "vless"
+        if val == "vless" and self.url_entry:
             cfg["url"] = self.url_entry.get().strip()
         if self.host_entry and self.port_entry:
             h = self.host_entry.get().strip() or "127.0.0.1"
             p = self.port_entry.get().strip() or "1081"
             cfg["listen"] = f"{h}:{p}"
+        if self.killswitch_var is not None:
+            cfg["killswitch"] = bool(self.killswitch_var.get())
+        if "name" in self.cfg:
+            cfg["name"] = self.cfg["name"]
+        if "order" in self.cfg:
+            cfg["order"] = self.cfg["order"]
+        if "sendThrough" in self.cfg:
+            cfg["sendThrough"] = self.cfg["sendThrough"]
         return cfg
 
 
@@ -1082,9 +1757,14 @@ class VlessApp(tk.Tk):
         if HAS_TRAY and settings_manager.get_setting("start_minimized_tray", True):
             self.after(100, self._hide_to_tray)
 
+    def sort_instances(self):
+        """Sort instances ascending by numeric order (>= 0), then by global_id."""
+        self.instances.sort(key=lambda inst: (inst.get_order(), inst.global_id))
+
     def _load_saved_data(self):
         raw_instances = load_instances()
         self.instances = [ProxyInstance(self, cfg, idx) for idx, cfg in enumerate(raw_instances)]
+        self.sort_instances()
         if not self.instances:
             base = load_base_config()
             self.instances = [ProxyInstance(self, base, 0)]
@@ -1228,7 +1908,8 @@ class VlessApp(tk.Tk):
         for idx, inst in enumerate(self.instances):
             h, port = inst.get_listen()
             http_port = inst.get_http_port()
-            server_name = extract_server_name(inst.cfg.get("url", ""))
+            display_name = inst.get_display_name()
+            order_str = format_order(inst.get_order())
 
             flag = inst.geo_info.get("flag", "🌐")
             country = inst.geo_info.get("country", "Unknown")
@@ -1244,7 +1925,15 @@ class VlessApp(tk.Tk):
 
             dot_color = C["green"] if inst.running and inst.healthy else (C["yellow"] if inst.running else C["red"])
             tk.Label(left_badge, text="●", font=("Segoe UI", 14), fg=dot_color, bg=C["card"]).pack(side=tk.LEFT, padx=(0, 4))
-            tk.Label(left_badge, text=f"#{idx + 1}", font=("Consolas", 10, "bold"), fg=C["blue"], bg=C["card"]).pack(side=tk.LEFT)
+            
+            # Interactive order badge (click to change order)
+            order_btn = tk.Button(
+                left_badge, text=f"#{order_str}", font=("Consolas", 10, "bold"),
+                fg=C["blue"], bg=C["card"], activebackground=C["card"], activeforeground=C["teal"],
+                relief=tk.FLAT, bd=0, cursor="hand2",
+                command=lambda i=inst: self.prompt_reorder_proxy(i),
+            )
+            order_btn.pack(side=tk.LEFT)
 
             # Center Info: Name, Ports, Geo
             info = tk.Frame(card, bg=C["card"])
@@ -1253,7 +1942,21 @@ class VlessApp(tk.Tk):
             title_row = tk.Frame(info, bg=C["card"])
             title_row.pack(anchor="w")
 
-            tk.Label(title_row, text=server_name, font=("Segoe UI", 10, "bold"), fg=C["text"], bg=C["card"]).pack(side=tk.LEFT)
+            tk.Label(title_row, text=display_name, font=("Segoe UI", 10, "bold"), fg=C["text"], bg=C["card"]).pack(side=tk.LEFT)
+
+            # Pencil rename button
+            rename_btn = tk.Button(
+                title_row, text="✏️", font=("Segoe UI", 9),
+                bg=C["card"], fg=C["subtext"], activebackground=C["card"], activeforeground=C["text"],
+                relief=tk.FLAT, bd=0, padx=4, pady=0, cursor="hand2",
+                command=lambda i=inst: self.prompt_rename_proxy(i),
+            )
+            rename_btn.pack(side=tk.LEFT, padx=(4, 0))
+            if inst.cfg.get("killswitch", False):
+                tk.Label(
+                    title_row, text=" 🛡️ KS ", font=("Segoe UI", 7, "bold"),
+                    bg=C["hover"], fg=C["green"], padx=4, pady=1
+                ).pack(side=tk.LEFT, padx=(6, 0))
 
             detail_row = tk.Frame(info, bg=C["card"])
             detail_row.pack(anchor="w", pady=(2, 0))
@@ -1306,6 +2009,54 @@ class VlessApp(tk.Tk):
         self.refresh_current_page_tabs()
         if target_tab_idx < len(self.sub_notebook.tabs()):
             self.sub_notebook.select(target_tab_idx)
+
+    def prompt_rename_proxy(self, inst: ProxyInstance):
+        old_name = inst.get_display_name()
+        _, port = inst.get_listen()
+        res = simpledialog.askstring(
+            t("rename_proxy_title"),
+            t("rename_proxy_prompt", port=port),
+            initialvalue=old_name,
+            parent=self,
+        )
+        if res is not None:
+            inst.set_name(res.strip())
+
+    def prompt_reorder_proxy(self, inst: ProxyInstance):
+        old_order = format_order(inst.get_order())
+        res = simpledialog.askstring(
+            t("reorder_proxy_title"),
+            t("reorder_proxy_prompt", name=inst.get_display_name()),
+            initialvalue=old_order,
+            parent=self,
+        )
+        if res is not None:
+            res_clean = res.strip().replace(",", ".")
+            try:
+                val = float(res_clean)
+                if val < 0:
+                    messagebox.showerror(t("app_title"), t("err_negative_order"), parent=self)
+                    return
+                inst.set_order(val)
+            except ValueError:
+                messagebox.showerror(t("app_title"), t("err_invalid_number"), parent=self)
+
+    def _on_options_auto_reconnect_toggled(self):
+        val = bool(self.auto_reconnect_var.get()) if hasattr(self, "auto_reconnect_var") else bool(settings_manager.get_setting("auto_reconnect", True))
+        settings_manager.set_setting("auto_reconnect", val)
+        settings_manager.set_setting("force_restart", val)
+        if hasattr(self, "force_restart_var"):
+            try:
+                self.force_restart_var.set(val)
+            except Exception:
+                pass
+        if not val:
+            for inst in self.instances:
+                inst._cancel_reconnect()
+        self.save_all()
+
+    def _on_force_restart_toggled(self):
+        self._on_options_auto_reconnect_toggled()
 
     # ── Proxies Tab & Pagination ──────────────────────────────
     def _build_proxies_tab(self):
@@ -1375,9 +2126,10 @@ class VlessApp(tk.Tk):
             inst = self.instances[i]
             frame = inst.build_tab_ui(self.sub_notebook)
             _, port = inst.get_listen()
-            name = extract_server_name(inst.cfg.get("url", ""))
+            name = inst.get_display_name()
+            order_str = format_order(inst.get_order())
             flag = inst.geo_info.get("flag", "🌐")
-            tab_label = f" {flag} #{i + 1} {name[:12]}:{port} "
+            tab_label = f" {flag} #{order_str} {name[:12]}:{port} "
             self.sub_notebook.add(frame, text=tab_label)
 
     # ── Options Tab (NEW) ─────────────────────────────────────
@@ -1459,7 +2211,7 @@ class VlessApp(tk.Tk):
             card4, text=f"  {t('opt_auto_reconnect_title')}", variable=self.auto_reconnect_var,
             font=("Segoe UI", 10, "bold"), fg=C["text"], bg=C["card"], selectcolor=C["overlay"],
             activebackground=C["card"], activeforeground=C["blue"],
-            command=lambda: settings_manager.set_setting("auto_reconnect", self.auto_reconnect_var.get()),
+            command=self._on_options_auto_reconnect_toggled,
         )
         cb4.pack(anchor="w", padx=12, pady=(10, 2))
         tk.Label(
@@ -1760,6 +2512,10 @@ class VlessApp(tk.Tk):
             self.stop_all()
             self._load_saved_data()
             self.current_page = 0
+            if hasattr(self, "force_restart_var"):
+                self.force_restart_var.set(settings_manager.get_setting("force_restart", True))
+            if hasattr(self, "auto_reconnect_var"):
+                self.auto_reconnect_var.set(settings_manager.get_setting("auto_reconnect", True))
             self.refresh_current_page_tabs()
             self.refresh_overview()
             self._update_header_stats()
@@ -1910,12 +2666,13 @@ class VlessApp(tk.Tk):
         started_count = 0
         for inst in self.instances:
             url = inst.cfg.get("url", "").strip()
-            if url.startswith("vless://") and not inst.running:
+            if (url.startswith("vless://") or url.startswith("socks5://") or url.startswith("socks://")) and not inst.running:
                 inst.start()
                 started_count += 1
         if started_count > 0:
             self.refresh_overview()
             self.update_tray_icon()
+            self._update_header_stats()
 
     def add_new_instance(self):
         """Add a new proxy instance."""
@@ -1932,9 +2689,20 @@ class VlessApp(tk.Tk):
         base["listen"] = f"127.0.0.1:{free_port}"
         base["url"] = ""
 
+        max_order = max([inst.get_order() for inst in self.instances], default=0.0)
+        next_order = float(int(max_order + 1.0)) if float(max_order + 1.0).is_integer() else (max_order + 1.0)
+        base["order"] = int(next_order) if next_order.is_integer() else next_order
+        base["name"] = f"Proxy {int(next_order)}" if next_order.is_integer() else f"Proxy {next_order}"
+
+        if free_port == 1015:
+            base["killswitch"] = True
+            base["name"] = "System Proxy"
+            base["order"] = 0
+
         new_id = len(self.instances)
         new_inst = ProxyInstance(self, base, new_id)
         self.instances.append(new_inst)
+        self.sort_instances()
 
         self.current_page = (len(self.instances) - 1) // PAGE_SIZE
         self.save_all()
@@ -1962,13 +2730,14 @@ class VlessApp(tk.Tk):
                 inst.start()
         self.refresh_overview()
         self.update_tray_icon()
+        self._update_header_stats()
 
     def stop_all(self):
         for inst in self.instances:
-            if inst.running:
-                inst.stop()
+            inst.stop()
         self.refresh_overview()
         self.update_tray_icon()
+        self._update_header_stats()
 
     def refresh_all_geo(self):
         for inst in self.instances:

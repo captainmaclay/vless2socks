@@ -268,5 +268,20 @@ class DescribeTest(unittest.TestCase):
         self.assertIn("fingerprint=edge", text)
 
 
+class SendThroughTest(unittest.TestCase):
+    def test_send_through_explicit_ip(self):
+        cfg = config_for(REALITY_URL, send_through="192.168.1.50")
+        built = build_xray_config(cfg)
+        self.assertEqual(built["outbounds"][0].get("sendThrough"), "192.168.1.50")
+
+    def test_send_through_auto(self):
+        cfg = config_for(REALITY_URL, send_through="auto")
+        built = build_xray_config(cfg)
+        # Should either be a valid IP or omitted if not detectable
+        val = built["outbounds"][0].get("sendThrough")
+        if val is not None:
+            self.assertRegex(val, r"^\d+\.\d+\.\d+\.\d+$")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,14 +7,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .url import ConfigError, VlessServer, parse_vless_url, server_from_mapping
+from .url import (
+    ConfigError,
+    SocksServer,
+    VlessServer,
+    parse_proxy_url,
+    parse_socks_url,
+    parse_vless_url,
+    server_from_mapping,
+)
 
 __all__ = ["AppConfig", "load_config", "ConfigError"]
 
 
 @dataclass
 class AppConfig:
-    server: VlessServer
+    server: VlessServer | SocksServer
     listen_host: str = "127.0.0.1"
     listen_port: int = 1081
     username: str = ""
@@ -30,6 +38,10 @@ class AppConfig:
     #: Писать outbound в старой форме (vnext) — для xray до версии 26.
     #: Обычно не нужно: при отказе формат подбирается автоматически.
     xray_legacy_config: bool = False
+    killswitch: bool = False
+    name: str = ""
+    order: float = 0.0
+    send_through: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -114,12 +126,12 @@ def load_config(
             raise ConfigError(f"{p}: ожидался объект JSON на верхнем уровне")
 
     if url:
-        server = parse_vless_url(url, strict=strict)
+        server = parse_proxy_url(url, strict=strict)
     elif data:
         server = server_from_mapping(data, strict=strict)
     else:
         raise ConfigError(
-            "не задан сервер: укажите --url 'vless://...' или -c config.json"
+            "не задан сервер: укажите --url 'vless://...' или 'socks5://...' или -c config.json"
         )
 
     host, port = _split_listen(
@@ -127,6 +139,14 @@ def load_config(
         "127.0.0.1",
         1081,
     )
+
+    default_ks = True if port == 1015 else False
+    default_name = "System Proxy" if port == 1015 else ""
+    try:
+        raw_order = data.get("order")
+        order_val = float(raw_order) if raw_order is not None else (0.0 if port == 1015 else 1.0)
+    except (ValueError, TypeError):
+        order_val = 0.0 if port == 1015 else 1.0
 
     return AppConfig(
         server=server,
@@ -145,4 +165,8 @@ def load_config(
             if xray_legacy_config is not None
             else data.get("xrayLegacyConfig", False)
         ),
+        killswitch=bool(data.get("killswitch", default_ks)),
+        name=str(data.get("name", default_name)),
+        order=order_val,
+        send_through=str(data.get("sendThrough") or data.get("send_through") or "").strip(),
     )

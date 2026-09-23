@@ -45,6 +45,17 @@ def resolve_backend(config: AppConfig) -> BackendChoice:
             f"backend={requested!r} — допустимо: {', '.join(VALID)}"
         )
 
+    from .url import SocksServer
+
+    if isinstance(config.server, SocksServer):
+        if requested == PYTHON:
+            raise ConfigError(
+                "backend=python не поддерживает SOCKS5 upstream. "
+                "Используйте backend=xray или auto."
+            )
+        path, version = _locate_xray(config, required=True)
+        return BackendChoice(XRAY, "SOCKS5 upstream через xray", path, version)
+
     unsupported = config.server.unsupported
     params = ", ".join(f"{u.param}={u.value}" for u in unsupported)
 

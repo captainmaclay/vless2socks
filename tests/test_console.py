@@ -27,7 +27,7 @@ from vless2socks.url import parse_vless_url
 UUID = str(uuid_mod.uuid4())
 FLAG = "\U0001F1EB\U0001F1EE"  # флаг Финляндии, как в реальной ссылке
 EMOJI_URL = (
-    f"vless://{UUID}@h.example:443?security=tls&type=tcp"
+    f"vless://{UUID}@127.0.0.1:443?security=tls&type=tcp"
     f"#{quote(FLAG + ' FINLAND 3 VLESS TCP')}"
 )
 

@@ -322,8 +322,10 @@ def wipe_all_sensitive_data(stop_all_callback: Optional[Callable[[], None]] = No
 
     default_instance = [
         {
+            "name": "System Proxy",
+            "order": 0,
             "url": "",
-            "listen": "127.0.0.1:1081",
+            "listen": "127.0.0.1:1015",
             "username": "",
             "password": "",
             "udp": True,
@@ -333,6 +335,7 @@ def wipe_all_sensitive_data(stop_all_callback: Optional[Callable[[], None]] = No
             "backend": "auto",
             "xrayPath": "",
             "xrayLegacyConfig": False,
+            "killswitch": True,
         }
     ]
     with open(INSTANCES_FILE, "w", encoding="utf-8") as f:

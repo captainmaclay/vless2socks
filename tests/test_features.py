@@ -44,9 +44,10 @@ def test_i18n():
 def test_options_settings():
     print("Testing settings_manager defaults and persistence...")
     # Verify defaults
-    defaults = settings_manager.load_settings()
+    defaults = settings_manager.DEFAULT_SETTINGS
     assert defaults.get("force_port_takeover") is True, "force_port_takeover should be True by default"
     assert defaults.get("autostart_proxies") is True, "autostart_proxies should be True by default"
+    assert defaults.get("force_restart") is True, "force_restart should be True by default"
     assert defaults.get("start_minimized_tray") is False, "start_minimized_tray should be False by default"
     assert defaults.get("auto_reconnect") is True, "auto_reconnect should be True by default"
     assert defaults.get("auto_backup_enabled") is False, "auto_backup_enabled should be False by default"
@@ -130,10 +131,24 @@ def test_pagination_logic():
     assert total_pages == 3, f"Expected 3 pages for 25 instances, got {total_pages}"
     print("pagination logic tests PASSED.")
 
+import unittest
+
+class FeaturesTest(unittest.TestCase):
+    def test_i18n(self):
+        test_i18n()
+
+    def test_options_settings(self):
+        test_options_settings()
+
+    def test_geo_ip(self):
+        test_geo_ip()
+
+    def test_backup_restore(self):
+        test_backup_restore()
+
+    def test_pagination_logic(self):
+        test_pagination_logic()
+
+
 if __name__ == "__main__":
-    test_i18n()
-    test_options_settings()
-    test_geo_ip()
-    test_backup_restore()
-    test_pagination_logic()
-    print("\nALL FEATURE & OPTIONS TESTS PASSED SUCCESSFULLY!")
+    unittest.main()
