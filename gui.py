@@ -1022,7 +1022,11 @@ class ProxyInstance:
             is_leak, direct_ip, tunnel_ip, msg = check_ip_leak(host, port)
 
             def on_done():
+                from vless2socks.ipcheck import is_system_tun_active
                 if is_leak:
+                    if is_system_tun_active():
+                        self._log(f"ℹ️ [KILLSWITCH] Обнаружен системный туннель (Throne). Выходной IP ({tunnel_ip}) совпадает с системным. Прокси продолжает безопасную работу.")
+                        return
                     self._log(f"⚠️ [KILLSWITCH ALERT] УТЕЧКА ОБНАРУЖЕНА! Реальный IP ({direct_ip}) == IP прокси ({tunnel_ip})")
                     self._log("🛡️ [KILLSWITCH] Немедленная остановка прокси для предотвращения утечки!")
                     self.stop()
