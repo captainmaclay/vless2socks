@@ -152,11 +152,27 @@ class KillswitchLeakCheckTest(unittest.IsolatedAsyncioTestCase):
             listen="127.0.0.1:1081",
         )
         with patch("vless2socks.ipcheck.compare_ip", return_value=mock_report):
-            is_leak, direct_ip, tunnel_ip, msg = await check_ip_leak_async("127.0.0.1", 1081)
-            self.assertTrue(is_leak)
-            self.assertEqual(direct_ip, "195.24.32.10")
-            self.assertEqual(tunnel_ip, "195.24.32.10")
-            self.assertIn("LEAK DETECTED", msg)
+            with patch("vless2socks.ipcheck.is_system_tun_active", return_value=False):
+                is_leak, direct_ip, tunnel_ip, msg = await check_ip_leak_async("127.0.0.1", 1081)
+                self.assertTrue(is_leak)
+                self.assertEqual(direct_ip, "195.24.32.10")
+                self.assertEqual(tunnel_ip, "195.24.32.10")
+                self.assertIn("LEAK DETECTED", msg)
+
+    async def test_detects_safe_when_system_tun_throne_active(self):
+        """Когда в системе активен TUN/Throne, одинаковые IP не считаются утечкой провайдеру."""
+        mock_report = IpReport(
+            direct="62.60.234.188",
+            tunnel="62.60.234.188",
+            service="api.ipify.org",
+            listen="127.0.0.1:1081",
+        )
+        with patch("vless2socks.ipcheck.compare_ip", return_value=mock_report):
+            with patch("vless2socks.ipcheck.is_system_tun_active", return_value=True):
+                is_leak, direct_ip, tunnel_ip, msg = await check_ip_leak_async("127.0.0.1", 1081)
+                self.assertFalse(is_leak)
+                self.assertIn("SAFE", msg)
+                self.assertIn("Throne", msg)
 
     async def test_detects_safe_when_direct_differs_from_tunnel(self):
         mock_report = IpReport(
@@ -220,13 +236,22 @@ class GuiKillswitchIntegrationTest(unittest.TestCase):
         self.assertTrue(inst.get_config()["killswitch"])
         app.save_all.assert_called()
 
-        # Mock leak detection stopping proxy
+        # Mock leak detection stopping proxy when no TUN is active
         inst.running = True
         inst.stop = MagicMock()
-        with patch("vless2socks.ipcheck.check_ip_leak", return_value=(True, "1.1.1.1", "1.1.1.1", "Leak!")):
-            with patch("gui.messagebox.showerror"):
+        with patch("vless2socks.ipcheck.is_system_tun_active", return_value=False):
+            with patch("vless2socks.ipcheck.check_ip_leak", return_value=(True, "1.1.1.1", "1.1.1.1", "Leak!")):
+                with patch("gui.messagebox.showerror"):
+                    inst.verify_killswitch(manual=False, sync=True)
+                    inst.stop.assert_called()
+
+        # When Throne/TUN is active on host, proxy must NOT be stopped!
+        inst.running = True
+        inst.stop = MagicMock()
+        with patch("vless2socks.ipcheck.is_system_tun_active", return_value=True):
+            with patch("vless2socks.ipcheck.check_ip_leak", return_value=(True, "62.60.234.188", "62.60.234.188", "Leak!")):
                 inst.verify_killswitch(manual=False, sync=True)
-                inst.stop.assert_called()
+                inst.stop.assert_not_called()
 
 
 if __name__ == "__main__":

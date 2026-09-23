@@ -18,7 +18,7 @@ from .socks_client import Socks5ClientError, http_get_via_socks5
 
 __all__ = ["IpReport", "Service", "DEFAULT_SERVICES", "fetch_ip_direct",
            "fetch_ip_via_socks5", "compare_ip", "format_ip_report",
-           "check_ip_leak", "check_ip_leak_async"]
+           "check_ip_leak", "check_ip_leak_async", "is_system_tun_active"]
 
 log = get_logger("vless2socks.ipcheck")
 
@@ -86,12 +86,40 @@ def _extract_ip(body: str) -> str:
         return ""
 
 
+def is_system_tun_active() -> bool:
+    """Определить, активен ли в Windows системный TUN-интерфейс (Throne, sing-tun, wintun)."""
+    import subprocess
+    import sys
+    if sys.platform == "win32":
+        try:
+            out = subprocess.check_output("route print 0.0.0.0", shell=True, text=True)
+            for line in out.splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 5 and parts[0] == "0.0.0.0":
+                    iface = parts[3]
+                    if iface.startswith("172.19.") or "sing-tun" in out.lower() or "wintun" in out.lower():
+                        return True
+        except Exception:
+            pass
+    return False
+
+
 async def _http_get_direct(
     service: Service, timeout: float
 ) -> tuple[str, str]:
-    reader, writer = await asyncio.wait_for(
-        asyncio.open_connection(service.host, service.port), timeout=timeout
-    )
+    from .xray.config_builder import get_physical_gateway_ip
+    phys_ip = get_physical_gateway_ip()
+    local_addr = (phys_ip, 0) if phys_ip else None
+
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(service.host, service.port, local_addr=local_addr),
+            timeout=timeout,
+        )
+    except (OSError, IOError):
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(service.host, service.port), timeout=timeout
+        )
     try:
         writer.write(
             (
@@ -294,6 +322,13 @@ async def check_ip_leak_async(
         services=services,
     )
     if report.substituted is False:
+        if is_system_tun_active():
+            return (
+                False,
+                report.direct,
+                report.tunnel,
+                f"SAFE (Throne/TUN active): Both system traffic and local proxy exit through {report.tunnel}.",
+            )
         return (
             True,
             report.direct,
