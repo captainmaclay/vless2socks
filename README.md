@@ -38,6 +38,7 @@
 | **Force Port Takeover** | Automatically kill processes occupying required ports |
 | **System Tray** | Minimize to tray with status indicator icons |
 | **Bilingual UI** | English (default) and Russian with instant hot-switch |
+| **WSL2 Isolation Guard** | Full Linux kernel network jail (nftables) locking WSL2 egress to SOCKS5 :1015 with remote DNS |
 | **Factory Reset** | One-click wipe of all proxies, configs, and credentials |
 
 ## Installation
@@ -132,7 +133,7 @@ first run from templates bundled inside the exe, so `dist/` ships as-is.
 
 ## GUI Overview
 
-The application has **5 main tabs**:
+The application has **6 main tabs**:
 
 ### 🏠 Overview
 Real-time dashboard showing all configured SOCKS5 proxies with their status, ports, country flags, and quick actions. Start/Stop All buttons and Refresh Geo for batch operations.
@@ -162,6 +163,14 @@ Persistent settings saved to `settings.json`:
 - **Backup Directory** — configurable folder with auto-scan of available snapshots
 - **Auto-Backup** — periodic background backups with configurable interval
 - **Factory Reset** — wipe all instances, configs, and credentials
+
+### 🛡️ WSL Isolation (WSL2 Network Isolation Guard)
+- **Kernel Firewall Jail:** Strict lockdown of WSL2 outbound traffic using `nftables` (with `iptables` fallback) — permits loopback (`lo`, `loopback0`) and rejects direct WAN/LAN connections (`counter reject`).
+- **Bypass Defense:** Explicitly drops bypass attempts to unauthorized local ports (e.g. `2080`).
+- **DNS Leak Protection:** Automatically configures `ALL_PROXY='socks5h://127.0.0.1:1015'` in `/etc/profile.d/` for remote DNS resolution (Zero DNS leaks).
+- **Live Audit & Diagnostics:** One-click streaming verification modal testing port handshake, kernel rules, direct IP leakage, and external IP routing.
+- **Proxy Port Selector:** Ability to lock WSL2 to port `1015` or any active SOCKS5 proxy running in vless2socks.
+- **Guaranteed Windows Direct IP:** Removes Windows Firewall interference so host tools (`node.exe`, browsers) retain direct internet.
 
 ### 🌐 Localization
 Switch between English and Russian with one click. All labels, buttons, and messages update instantly without restart.
@@ -231,6 +240,16 @@ vless2socks/
 ├── tests/                  # Unit tests
 │   └── test_features.py
 │
+├── wsl-proxy-isolation/    # WSL2 Fail-Safe Network Isolation & Gemini Skills
+│   ├── __init__.py
+│   ├── wsl_detector.py     # WSL installation & distribution detector
+│   ├── firewall_isolate.py # nftables/iptables kernel lockdown engine
+│   ├── isolation_tester.py # Multi-stage leak audit & verification suite
+│   ├── cli.py              # CLI tool for agents & automation
+│   ├── test_isolation_tool.py # Unit test suite
+│   ├── README.md           # Standalone isolation documentation
+│   └── SKILL.md            # Gemini / Antigravity Agent Skill definition
+│
 ├── bin/                    # Xray-core binary (auto-downloaded)
 └── runtime/                # Runtime data
 ```
@@ -258,6 +277,42 @@ Python standard library modules used: `tkinter`, `asyncio`, `subprocess`, `socke
 | File Format | `.hbak` with `HBAK\x01` magic header |
 | Contents | ZIP archive (instances.json, config.json, settings.json, .env) |
 
+## 🛡️ WSL2 Network Isolation & Gemini AI Skills
+
+### Integration with Gemini & Autonomous AI Agents
+The `wsl-proxy-isolation` module can be operated via the GUI, CLI, or by **Gemini / Antigravity AI agents** using the registered skill:
+- **Global Agent Skill:** `C:\Users\f\.gemini\config\skills\wsl-proxy-isolation\SKILL.md`
+- **Local Workspace Skill:** `wsl-proxy-isolation/SKILL.md`
+
+### Autonomous Agent Capabilities
+Gemini can autonomously:
+1. **Detect WSL2:** Check if WSL is installed and identify active Linux distributions (`Ubuntu`, etc.).
+2. **Enforce Isolation:** Apply kernel packet-filtering rules restricting all WSL2 traffic to the local SOCKS5 proxy (`127.0.0.1:1015` / `127.0.0.1:11015`) with persistent boot configuration in `/etc/wsl.conf` and `/etc/nftables.conf`.
+3. **Audit & Leak Verification:** Execute live verification tests inside WSL:
+   - TCP handshake latency
+   - Direct IP leak test (`curl --noproxy '*'`) -> must be rejected by kernel
+   - SOCKS5 remote DNS test (`curl --socks5-hostname`) -> verifies external tunnel IP
+   - Bypass protection test (`curl -x http://127.0.0.1:2080`) -> must be rejected
+4. **Safe De-isolation:** Revert to Direct IP mode upon request.
+
+### Quick CLI Usage for Agents & Scripts
+```powershell
+# Check WSL status
+python wsl-proxy-isolation/cli.py check-wsl
+
+# Apply isolation to port 1015
+python wsl-proxy-isolation/cli.py apply --port 1015
+
+# Run comprehensive diagnostic audit
+python wsl-proxy-isolation/cli.py test --port 1015
+
+# Automated pipeline: Check -> Apply -> Audit
+python wsl-proxy-isolation/cli.py full-setup
+
+# Restore direct IP access
+python wsl-proxy-isolation/cli.py remove
+```
+
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
@@ -284,6 +339,7 @@ MIT License. See [LICENSE](LICENSE) for details.
 | **Захват портов** | Автоматическое завершение процессов, занимающих нужные порты |
 | **Системный трей** | Сворачивание в трей с иконкой-индикатором |
 | **Локализация** | Английский (по умолчанию) и русский — мгновенное переключение |
+| **Изоляция WSL2** | Сетевая тюрьма ядра Linux (nftables): изоляция WSL2 на SOCKS5 :1015 без утечек DNS |
 | **Сброс настроек** | Полная очистка всех прокси, конфигов и учётных данных |
 
 ## Установка
@@ -379,6 +435,8 @@ dist/
 
 ## Вкладки GUI
 
+В приложении **6 основных вкладок**:
+
 ### 🏠 Обзор (Overview)
 Панель мониторинга со всеми настроенными прокси: статус, порты, флаги стран, кнопки управления. Групповые операции «Запустить все» / «Остановить все».
 
@@ -408,6 +466,14 @@ dist/
 - Авто-бэкап с настраиваемым интервалом (в часах)
 - Полный сброс (Factory Reset)
 
+### 🛡️ WSL Изоляция (WSL2 Isolation Guard)
+- **Сетевая тюрьма ядра Linux:** Жесткая блокировка исходящего трафика WSL2 через `nftables` (или `iptables`) — разрешен только loopback (`lo`, `loopback0`), весь прямой WAN/LAN трафик отсекается правилом `counter reject`.
+- **Защита от обходов:** Блокировка попыток выхода через сторонние сокеты (например, `127.0.0.1:2080`).
+- **Удаленный DNS (Zero Leaks):** Автоматическая настройка `ALL_PROXY='socks5h://127.0.0.1:1015'` в `/etc/profile.d/` — доменные имена разрешаются на стороне прокси, исключая утечки хостового DNS.
+- **Интерактивный аудит:** Проверка доступности портов, правил фильтрации ядра, теста утечки реального IP и удаленного DNS в реальном времени с цветным журналом.
+- **Синхронизация портов:** Привязка к порту `1015` или к любому активному SOCKS5 прокси из vless2socks в один клик.
+- **Свобода Windows-хоста:** Автоматическое удаление правил брандмауэра Windows — процессы Windows (`node.exe`, браузеры) сохраняют прямой доступ (Direct IP).
+
 ### 🌐 Локализация (Localization)
 Переключение между английским и русским одним кликом. Все элементы обновляются мгновенно.
 
@@ -433,6 +499,39 @@ dist/
 | Итерации PBKDF2 | 600 000 |
 | Формат файла | `.hbak` с магическим заголовком `HBAK\x01` |
 | Содержимое | ZIP-архив (instances.json, config.json, settings.json, .env) |
+
+## 🛡️ Сетевая изоляция WSL2 и скиллы для Gemini AI
+
+### Работа в связке с Gemini и автономными агентами
+Модуль `wsl-proxy-isolation` полностью совместим со стандартами скиллов Google Antigravity / Gemini:
+- **Глобальный системный скилл:** `C:\Users\f\.gemini\config\skills\wsl-proxy-isolation\SKILL.md`
+- **Локальный скилл в репозитории:** `wsl-proxy-isolation/SKILL.md`
+
+### Что умеет агент Gemini с этим скиллом:
+1. **Экспресс-проверка WSL2:** Автоматически проверяет установку `wsl.exe`, список дистрибутивов (`Ubuntu` и др.) и версию ядра.
+2. **Активация изоляции на сокет 1015:** В одну команду устанавливает правила `nftables`, блокирует сторонние порты (:2080), прописывает `socks5h://127.0.0.1:1015` и регистрирует персистентный автозапуск в `/etc/wsl.conf` и `/etc/nftables.conf`.
+3. **Глубокий аудит утечек:** Изнутри WSL2 агент выполняет тесты:
+   - Handshake локального сокета 1015/11015
+   - Тест утечки IP (`curl --noproxy '*'`) — должен быть отсечен ядром
+   - Тест удаленного DNS (`curl --socks5-hostname`) — подтверждает подмену внешнего IP
+   - Тест блокировки обхода (`curl -x http://127.0.0.1:2080`)
+4. **Быстрое управление через CLI:**
+```powershell
+# Проверить статус WSL
+python wsl-proxy-isolation/cli.py check-wsl
+
+# Применить правила изоляции на сокет 1015
+python wsl-proxy-isolation/cli.py apply --port 1015
+
+# Запустить комплексный аудит контура
+python wsl-proxy-isolation/cli.py test --port 1015
+
+# Полный конвейер: проверка -> настройка -> аудит
+python wsl-proxy-isolation/cli.py full-setup
+
+# Снять изоляцию (вернуть Direct IP)
+python wsl-proxy-isolation/cli.py remove
+```
 
 ## Лицензия
 

@@ -45,6 +45,19 @@ try:
 except ImportError:
     HAS_TRAY = False
 
+# ── WSL Proxy Isolation Integration ───────────────────────────
+_WSL_ISO_DIR = APP_DIR / "wsl-proxy-isolation"
+if str(_WSL_ISO_DIR) not in sys.path:
+    sys.path.insert(0, str(_WSL_ISO_DIR))
+
+try:
+    import wsl_detector
+    import firewall_isolate
+    import isolation_tester
+    HAS_WSL_ISO = True
+except Exception:
+    HAS_WSL_ISO = False
+
 # ── Paths ──────────────────────────────────────────────────────
 ROOT_DIR = APP_DIR
 CONFIG_FILE = ROOT_DIR / "config.json"
@@ -1835,7 +1848,12 @@ class VlessApp(tk.Tk):
         self.nav_notebook.add(self.backup_frame, text=t("nav_backup"))
         self._build_backup_tab()
 
-        # Tab 5: Localization
+        # Tab 5: WSL Isolation Guard
+        self.wsl_iso_frame = tk.Frame(self.nav_notebook, bg=C["bg"])
+        self.nav_notebook.add(self.wsl_iso_frame, text=t("nav_wsl_isolation"))
+        self._build_wsl_isolation_tab()
+
+        # Tab 6: Localization
         self.loc_frame = tk.Frame(self.nav_notebook, bg=C["bg"])
         self.nav_notebook.add(self.loc_frame, text=t("nav_localization"))
         self._build_localization_tab()
@@ -2596,6 +2614,271 @@ class VlessApp(tk.Tk):
         self._render_available_backups()
         messagebox.showinfo("vless2socks", t("danger_wiped_msg"))
 
+    # ── WSL Isolation Guard Tab ──────────────────────────────
+    def _build_wsl_isolation_tab(self):
+        bg = C["bg"]
+        px = 16
+
+        w_canvas = tk.Canvas(self.wsl_iso_frame, bg=bg, highlightthickness=0)
+        w_scrollbar = ttk.Scrollbar(self.wsl_iso_frame, orient="vertical", command=w_canvas.yview)
+        w_content = tk.Frame(w_canvas, bg=bg)
+
+        w_content.bind("<Configure>", lambda e: w_canvas.configure(scrollregion=w_canvas.bbox("all")))
+        w_canvas.create_window((0, 0), window=w_content, anchor="nw", width=760)
+        w_canvas.configure(yscrollcommand=w_scrollbar.set)
+
+        w_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=px, pady=10)
+        w_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        tk.Label(w_content, text=t("wsl_title"), font=("Segoe UI", 12, "bold"), fg=C["text"], bg=bg).pack(anchor="w", pady=(0, 2))
+        tk.Label(w_content, text=t("wsl_subtitle"), font=("Segoe UI", 9), fg=C["subtext"], bg=bg, wraplength=740, justify=tk.LEFT).pack(anchor="w", pady=(0, 10))
+
+        # Status and Controls Card
+        card = tk.LabelFrame(w_content, text="  Состояние и параметры сетевого контура  ", font=("Segoe UI", 9, "bold"), fg=C["blue"], bg=C["card"], relief=tk.GROOVE)
+        card.pack(fill=tk.X, pady=6, padx=2)
+
+        # Row 1: WSL status & Kernel status
+        r1 = tk.Frame(card, bg=C["card"])
+        r1.pack(fill=tk.X, padx=12, pady=6)
+
+        tk.Label(r1, text=t("wsl_lbl_status"), font=("Segoe UI", 9, "bold"), fg=C["subtext"], bg=C["card"]).pack(side=tk.LEFT)
+        self.wsl_status_lbl = tk.Label(r1, text="Проверка...", font=("Segoe UI", 9), fg=C["yellow"], bg=C["card"])
+        self.wsl_status_lbl.pack(side=tk.LEFT, padx=(6, 24))
+
+        tk.Label(r1, text=t("wsl_lbl_kernel"), font=("Segoe UI", 9, "bold"), fg=C["subtext"], bg=C["card"]).pack(side=tk.LEFT)
+        self.wsl_kernel_lbl = tk.Label(r1, text="Проверка...", font=("Segoe UI", 9), fg=C["yellow"], bg=C["card"])
+        self.wsl_kernel_lbl.pack(side=tk.LEFT, padx=(6, 0))
+
+        # Row 2: Port selector & reachability
+        r2 = tk.Frame(card, bg=C["card"])
+        r2.pack(fill=tk.X, padx=12, pady=6)
+
+        tk.Label(r2, text=t("wsl_lbl_port"), font=("Segoe UI", 9, "bold"), fg=C["subtext"], bg=C["card"]).pack(side=tk.LEFT)
+        self.wsl_port_var = tk.StringVar(value="1015")
+        self.wsl_port_ent = tk.Entry(r2, textvariable=self.wsl_port_var, font=("Consolas", 10), width=8, bg=C["overlay"], fg=C["text"], insertbackground=C["text"], relief=tk.FLAT)
+        self.wsl_port_ent.pack(side=tk.LEFT, padx=(6, 12))
+
+        tk.Label(r2, text=t("wsl_lbl_port_status"), font=("Segoe UI", 9, "bold"), fg=C["subtext"], bg=C["card"]).pack(side=tk.LEFT)
+        self.wsl_port_status_lbl = tk.Label(r2, text="—", font=("Segoe UI", 9), fg=C["muted"], bg=C["card"])
+        self.wsl_port_status_lbl.pack(side=tk.LEFT, padx=(6, 20))
+
+        tk.Button(
+            r2, text="Взять активный порт прокси", font=("Segoe UI", 8),
+            bg=C["overlay"], fg=C["text"], activebackground=C["hover"], relief=tk.FLAT, padx=6, pady=1,
+            command=self._wsl_pick_active_port,
+        ).pack(side=tk.LEFT)
+
+        # Row 3: DNS delegation & IP leak status
+        r3 = tk.Frame(card, bg=C["card"])
+        r3.pack(fill=tk.X, padx=12, pady=6)
+
+        tk.Label(r3, text=t("wsl_lbl_dns"), font=("Segoe UI", 9, "bold"), fg=C["subtext"], bg=C["card"]).pack(side=tk.LEFT)
+        self.wsl_dns_lbl = tk.Label(r3, text="—", font=("Segoe UI", 9), fg=C["muted"], bg=C["card"])
+        self.wsl_dns_lbl.pack(side=tk.LEFT, padx=(6, 24))
+
+        tk.Label(r3, text=t("wsl_lbl_leak"), font=("Segoe UI", 9, "bold"), fg=C["subtext"], bg=C["card"]).pack(side=tk.LEFT)
+        self.wsl_leak_lbl = tk.Label(r3, text="—", font=("Segoe UI", 9), fg=C["muted"], bg=C["card"])
+        self.wsl_leak_lbl.pack(side=tk.LEFT, padx=(6, 0))
+
+        # Action Buttons Bar
+        btn_bar = tk.Frame(w_content, bg=bg)
+        btn_bar.pack(fill=tk.X, pady=(10, 8))
+
+        self.wsl_btn_apply = tk.Button(
+            btn_bar, text=t("btn_wsl_apply"), font=("Segoe UI", 9, "bold"),
+            bg=C["green"], fg="#1e1e2e", activebackground=C["teal"], relief=tk.FLAT, padx=12, pady=5,
+            command=self._wsl_apply_isolation,
+        )
+        self.wsl_btn_apply.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.wsl_btn_test = tk.Button(
+            btn_bar, text=t("btn_wsl_test"), font=("Segoe UI", 9, "bold"),
+            bg=C["blue"], fg="#1e1e2e", activebackground=C["teal"], relief=tk.FLAT, padx=12, pady=5,
+            command=self._wsl_run_diagnostic,
+        )
+        self.wsl_btn_test.pack(side=tk.LEFT, padx=6)
+
+        self.wsl_btn_remove = tk.Button(
+            btn_bar, text=t("btn_wsl_remove"), font=("Segoe UI", 9),
+            bg=C["red"], fg="#1e1e2e", activebackground="#eba0ac", relief=tk.FLAT, padx=12, pady=5,
+            command=self._wsl_remove_isolation,
+        )
+        self.wsl_btn_remove.pack(side=tk.LEFT, padx=6)
+
+        self.wsl_btn_refresh = tk.Button(
+            btn_bar, text=t("btn_wsl_refresh"), font=("Segoe UI", 9),
+            bg=C["overlay"], fg=C["text"], activebackground=C["hover"], relief=tk.FLAT, padx=10, pady=5,
+            command=self._wsl_refresh_status,
+        )
+        self.wsl_btn_refresh.pack(side=tk.LEFT, padx=6)
+
+        # Audit Log Box
+        log_hdr = tk.Frame(w_content, bg=bg)
+        log_hdr.pack(fill=tk.X, pady=(8, 2))
+        tk.Label(log_hdr, text="Журнал аудита изоляции и сетевых проверок:", font=("Segoe UI", 9, "bold"), fg=C["text"], bg=bg).pack(side=tk.LEFT)
+        tk.Button(
+            log_hdr, text=t("btn_wsl_clear_log"), font=("Segoe UI", 8),
+            bg=C["overlay"], fg=C["subtext"], activebackground=C["hover"], relief=tk.FLAT, padx=6, pady=1,
+            command=self._wsl_clear_log,
+        ).pack(side=tk.RIGHT)
+
+        self.wsl_log_text = scrolledtext.ScrolledText(
+            w_content, height=13, font=("Consolas", 9),
+            bg="#11111b", fg=C["text"], insertbackground=C["text"],
+            relief=tk.FLAT, borderwidth=1,
+        )
+        self.wsl_log_text.pack(fill=tk.BOTH, expand=True, pady=(2, 10))
+
+        self.wsl_log_text.tag_config("SUCCESS", foreground=C["green"])
+        self.wsl_log_text.tag_config("ERROR", foreground=C["red"])
+        self.wsl_log_text.tag_config("WARN", foreground=C["yellow"])
+        self.wsl_log_text.tag_config("STEP", foreground=C["blue"])
+        self.wsl_log_text.tag_config("INFO", foreground=C["text"])
+        self.wsl_log_text.tag_config("TIMESTAMP", foreground=C["muted"])
+
+        # Initial refresh
+        self._wsl_refresh_status()
+
+    def _wsl_log(self, level: str, msg: str):
+        if not hasattr(self, "wsl_log_text") or not self.wsl_log_text:
+            return
+        def _append():
+            try:
+                self.wsl_log_text.insert(tk.END, f"[{level:<7}] {msg}\n", level)
+                self.wsl_log_text.see(tk.END)
+            except Exception:
+                pass
+        self.after(0, _append)
+
+    def _wsl_clear_log(self):
+        if hasattr(self, "wsl_log_text") and self.wsl_log_text:
+            self.wsl_log_text.delete("1.0", tk.END)
+
+    def _wsl_pick_active_port(self):
+        running_ports = []
+        for inst in getattr(self, "instances", []):
+            if inst.process and inst.process.poll() is None:
+                running_ports.append(inst.port)
+        if running_ports:
+            chosen = running_ports[0]
+            self.wsl_port_var.set(str(chosen))
+            self._wsl_log("INFO", f"Выбран активный порт SOCKS5 {chosen} из работающего профиля.")
+            self._wsl_refresh_status()
+        else:
+            messagebox.showinfo("vless2socks", "Нет активных запущенных прокси. Используется порт по умолчанию: 1015.")
+
+    def _wsl_refresh_status(self):
+        def _worker():
+            try:
+                if not HAS_WSL_ISO:
+                    self.after(0, lambda: self.wsl_status_lbl.config(text="Модуль не найден", fg=C["red"]))
+                    return
+
+                installed = wsl_detector.is_wsl_installed()
+                if not installed:
+                    self.after(0, lambda: self.wsl_status_lbl.config(text="Не установлен", fg=C["red"]))
+                    self.after(0, lambda: self.wsl_kernel_lbl.config(text="Н/Д", fg=C["muted"]))
+                    return
+
+                active_distro = wsl_detector.get_active_distro()
+                self.after(0, lambda: self.wsl_status_lbl.config(text=f"OK ({active_distro})", fg=C["green"]))
+
+                kernel_iso = firewall_isolate.check_wsl_isolation_active(distro=active_distro)
+                if kernel_iso:
+                    self.after(0, lambda: self.wsl_kernel_lbl.config(text="🟢 Активна (nftables)", fg=C["green"]))
+                else:
+                    self.after(0, lambda: self.wsl_kernel_lbl.config(text="⚪ Отключена (Direct IP)", fg=C["subtext"]))
+
+                try:
+                    port = int(self.wsl_port_var.get().strip())
+                except Exception:
+                    port = 1015
+
+                p_ok, lat = isolation_tester.check_port_accessible("127.0.0.1", port, timeout=0.3)
+                if p_ok:
+                    self.after(0, lambda: self.wsl_port_status_lbl.config(text=f"🟢 Доступен ({lat} ms)", fg=C["green"]))
+                else:
+                    self.after(0, lambda: self.wsl_port_status_lbl.config(text="🔴 Закрыт (Offline)", fg=C["red"]))
+            except Exception as e:
+                self._wsl_log("ERROR", f"Ошибка проверки статуса: {e}")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _wsl_apply_isolation(self):
+        try:
+            port = int(self.wsl_port_var.get().strip())
+        except ValueError:
+            messagebox.showerror("vless2socks", "Некорректный номер порта.")
+            return
+
+        def _worker():
+            self._wsl_log("STEP", f"=== Применение изоляции WSL2 на порт {port} ===")
+            if not HAS_WSL_ISO:
+                self._wsl_log("ERROR", "Модуль wsl-proxy-isolation недоступен.")
+                return
+            ok = firewall_isolate.apply_wsl_isolation(port=port)
+            if ok:
+                self._wsl_log("SUCCESS", f"✓ Сетевая тюрьма успешно активирована на порт {port}!")
+                self._wsl_log("SUCCESS", f"✓ Переменные окружения socks5h://127.0.0.1:{port} настроены.")
+                self.after(0, lambda: messagebox.showinfo("vless2socks", t("wsl_msg_applied")))
+            else:
+                self._wsl_log("ERROR", "✕ Ошибка применения правил изоляции ядра Linux.")
+                self.after(0, lambda: messagebox.showerror("vless2socks", "Ошибка применения правил изоляции."))
+            self._wsl_refresh_status()
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _wsl_run_diagnostic(self):
+        try:
+            port = int(self.wsl_port_var.get().strip())
+        except ValueError:
+            port = 1015
+
+        def _worker():
+            if not HAS_WSL_ISO:
+                self._wsl_log("ERROR", "Модуль wsl-proxy-isolation недоступен.")
+                return
+            self._wsl_log("TIMESTAMP", f"--- Запуск комплексного аудита изоляции (порт {port}) ---")
+            res = isolation_tester.run_isolation_audit(
+                host="127.0.0.1",
+                port=port,
+                log_callback=self._wsl_log,
+            )
+
+            def _update_ui():
+                if res["dns_leak_protected"]:
+                    self.wsl_dns_lbl.config(text="🟢 Защищен (socks5h)", fg=C["green"])
+                else:
+                    self.wsl_dns_lbl.config(text="⚠ Не защищен", fg=C["yellow"])
+
+                if res["direct_leak_detected"]:
+                    self.wsl_leak_lbl.config(text="✕ ОБНАРУЖЕНА УТЕЧКА!", fg=C["red"])
+                else:
+                    self.wsl_leak_lbl.config(text="🛡️ Заблокировано (Zero Leaks)", fg=C["green"])
+
+            self.after(0, _update_ui)
+            self._wsl_refresh_status()
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _wsl_remove_isolation(self):
+        if not messagebox.askyesno("vless2socks", t("wsl_msg_confirm_remove")):
+            return
+
+        def _worker():
+            self._wsl_log("STEP", "=== Снятие изоляции WSL2 (восстановление прямого доступа) ===")
+            if not HAS_WSL_ISO:
+                return
+            ok = firewall_isolate.remove_wsl_isolation()
+            if ok:
+                self._wsl_log("SUCCESS", "✓ Сетевая изоляция снята. Прямой доступ к интернету в WSL2 восстановлен.")
+                self.after(0, lambda: messagebox.showinfo("vless2socks", t("wsl_msg_removed")))
+            else:
+                self._wsl_log("ERROR", "✕ Ошибка при удалении правил.")
+            self._wsl_refresh_status()
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     # ── Localization Tab ──────────────────────────────────────
     def _build_localization_tab(self):
         bg = C["bg"]
@@ -2639,6 +2922,7 @@ class VlessApp(tk.Tk):
         self.nav_notebook.tab(self.proxies_frame, text=t("nav_proxies"))
         self.nav_notebook.tab(self.options_frame, text=t("nav_options"))
         self.nav_notebook.tab(self.backup_frame, text=t("nav_backup"))
+        self.nav_notebook.tab(self.wsl_iso_frame, text=t("nav_wsl_isolation"))
         self.nav_notebook.tab(self.loc_frame, text=t("nav_localization"))
 
         for widget in self.overview_frame.winfo_children():
@@ -2656,6 +2940,10 @@ class VlessApp(tk.Tk):
         for widget in self.backup_frame.winfo_children():
             widget.destroy()
         self._build_backup_tab()
+
+        for widget in self.wsl_iso_frame.winfo_children():
+            widget.destroy()
+        self._build_wsl_isolation_tab()
 
         for widget in self.loc_frame.winfo_children():
             widget.destroy()

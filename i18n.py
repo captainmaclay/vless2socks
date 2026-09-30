@@ -190,6 +190,25 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         # Single Instance Lock
         "already_running": "vless2socks is already running.",
 
+        # WSL Isolation Guard
+        "nav_wsl_isolation": "🛡️ WSL Isolation",
+        "wsl_title": "WSL2 Network Isolation Guard (Socket :1015 Strict Restriction)",
+        "wsl_subtitle": "Full Linux kernel network jail (nftables) locking WSL2 egress to SOCKS5/HTTP proxy with zero DNS leaks",
+        "wsl_lbl_status": "WSL Status:",
+        "wsl_lbl_kernel": "Kernel Firewall Jail:",
+        "wsl_lbl_port": "Proxy SOCKS5 Port:",
+        "wsl_lbl_port_status": "Port Reachability:",
+        "wsl_lbl_dns": "DNS Delegation:",
+        "wsl_lbl_leak": "Direct IP Leak:",
+        "btn_wsl_apply": "🚀 Apply Isolation",
+        "btn_wsl_test": "🧪 Run Leak & Audit Diagnostic",
+        "btn_wsl_remove": "🌐 Remove Isolation (Direct IP)",
+        "btn_wsl_refresh": "🔄 Refresh Status",
+        "btn_wsl_clear_log": "Clear Log",
+        "wsl_msg_applied": "WSL2 network isolation rules successfully applied!",
+        "wsl_msg_removed": "WSL2 network isolation removed. Direct internet restored.",
+        "wsl_msg_confirm_remove": "Are you sure you want to disable WSL2 network isolation? WSL2 will gain unrestricted direct internet access.",
+
         # System Tray
         "tray_show": "Show Window",
         "tray_exit": "Exit",
@@ -375,6 +394,25 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
 
         # Single Instance Lock
         "already_running": "vless2socks уже запущена.",
+
+        # WSL Isolation Guard
+        "nav_wsl_isolation": "🛡️ WSL Изоляция",
+        "wsl_title": "Сетевая изоляция WSL2 (Ограничение на сокет 1015)",
+        "wsl_subtitle": "Сетевая тюрьма ядра Linux (nftables): изоляция исходящего трафика WSL2 на сокет прокси без утечек DNS",
+        "wsl_lbl_status": "Статус WSL:",
+        "wsl_lbl_kernel": "Тюрьма ядра Linux:",
+        "wsl_lbl_port": "Порт SOCKS5 прокси:",
+        "wsl_lbl_port_status": "Доступность сокета:",
+        "wsl_lbl_dns": "Делегирование DNS:",
+        "wsl_lbl_leak": "Утечка прямого IP:",
+        "btn_wsl_apply": "🚀 Применить изоляцию",
+        "btn_wsl_test": "🧪 Провести аудит и тест утечек",
+        "btn_wsl_remove": "🌐 Снять изоляцию (Direct IP)",
+        "btn_wsl_refresh": "🔄 Обновить статус",
+        "btn_wsl_clear_log": "Очистить журнал",
+        "wsl_msg_applied": "Правила сетевой изоляции WSL2 успешно применены!",
+        "wsl_msg_removed": "Сетевая изоляция WSL2 снята. Прямой доступ к интернету восстановлен.",
+        "wsl_msg_confirm_remove": "Вы уверены, что хотите снять сетевую изоляцию WSL2? Подсистема Linux получит прямой доступ в сеть.",
 
         # System Tray
         "tray_show": "Показать окно",
