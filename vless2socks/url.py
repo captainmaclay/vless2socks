@@ -14,8 +14,10 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 __all__ = [
     "VlessServer",
     "SocksServer",
+    "WireGuardServer",
     "parse_vless_url",
     "parse_socks_url",
+    "parse_wireguard_url",
     "parse_proxy_url",
     "server_from_mapping",
     "ConfigError",
@@ -379,19 +381,168 @@ def parse_socks_url(url: str, *, strict: bool = True) -> SocksServer:
     )
 
 
-def parse_proxy_url(url: str, *, strict: bool = True) -> VlessServer | SocksServer:
-    """Универсальный парсер: определяет vless:// или socks5://."""
+@dataclass
+class WireGuardServer:
+    """Параметры удалённого WireGuard-сервера."""
+
+    address: str
+    port: int
+    secret_key: str
+    peer_public_key: str
+    local_address: list[str] = field(default_factory=lambda: ["10.0.0.2/32"])
+    preshared_key: str = ""
+    mtu: int = 1420
+    reserved: list[int] = field(default_factory=list)
+    remark: str = ""
+    strict: bool = True
+    unsupported: list[Any] = field(default_factory=list)
+    security: str = "none"
+    network: str = "udp"
+    alpn: tuple[str, ...] = ()
+    sni: str = ""
+
+    @property
+    def speaks_tls_on_the_wire(self) -> bool:
+        return False
+
+    @property
+    def allow_insecure(self) -> bool:
+        return False
+
+    def __post_init__(self) -> None:
+        self.address = str(self.address).strip().strip("[]")
+        if not self.address:
+            raise ConfigError("не указан адрес сервера")
+
+        try:
+            self.port = int(self.port)
+        except (TypeError, ValueError):
+            raise ConfigError(f"некорректный порт: {self.port!r}") from None
+        if not 1 <= self.port <= 65535:
+            raise ConfigError(f"порт вне диапазона 1..65535: {self.port}")
+
+        self.secret_key = str(self.secret_key or "").strip()
+        if not self.secret_key:
+            raise ConfigError("не указан закрытый ключ (secretKey / PrivateKey)")
+
+        self.peer_public_key = str(self.peer_public_key or "").strip()
+        if not self.peer_public_key:
+            raise ConfigError("не указан публичный ключ сервера (publicKey / PublicKey)")
+
+        if isinstance(self.local_address, str):
+            addrs = [a.strip() for a in self.local_address.split(",") if a.strip()]
+            self.local_address = addrs or ["10.0.0.2/32"]
+        elif not self.local_address:
+            self.local_address = ["10.0.0.2/32"]
+
+        try:
+            self.mtu = int(self.mtu or 1420)
+        except (TypeError, ValueError):
+            self.mtu = 1420
+
+        self.preshared_key = str(self.preshared_key or "").strip()
+        self.remark = str(self.remark or "").strip()
+
+    def describe(self) -> str:
+        tag = f" ({self.remark})" if self.remark else ""
+        return f"wireguard://{self.address}:{self.port}{tag}"
+
+    def to_url(self) -> str:
+        """Собрать ссылку вида wireguard://[address:port]?pk=...&peer_pk=..."""
+        from urllib.parse import quote
+        qparams = [
+            f"pk={quote(self.secret_key, safe='')}",
+            f"peer_pk={quote(self.peer_public_key, safe='')}",
+        ]
+        if self.local_address:
+            qparams.append(f"local_address={quote(','.join(self.local_address), safe='')}")
+        if self.preshared_key:
+            qparams.append(f"psk={quote(self.preshared_key, safe='')}")
+        if self.mtu and self.mtu != 1420:
+            qparams.append(f"mtu={self.mtu}")
+        if self.reserved:
+            qparams.append(f"reserved={','.join(map(str, self.reserved))}")
+
+        query_str = "&".join(qparams)
+        frag = f"#{quote(self.remark, safe='')}" if self.remark else ""
+        return f"wireguard://{self.address}:{self.port}/?{query_str}{frag}"
+
+
+def parse_wireguard_url(url: str, *, strict: bool = True) -> WireGuardServer:
+    """Разбор ссылки wireguard:// или wg://."""
+    url = str(url).strip()
+    lower = url.lower()
+    if not (lower.startswith("wireguard://") or lower.startswith("wg://")):
+        raise ConfigError("ссылка должна начинаться с wireguard:// или wg://")
+
+    # urlsplit
+    parts = urlsplit(url)
+    address = parts.hostname or ""
+    port = parts.port or 51820
+
+    params = {k.lower(): v for k, v in parse_qsl(parts.query, keep_blank_values=True)}
+    secret_key = (
+        params.get("pk")
+        or params.get("secretkey")
+        or params.get("privatekey")
+        or params.get("private_key")
+        or (unquote(parts.username) if parts.username else "")
+    )
+    peer_public_key = (
+        params.get("peer_pk")
+        or params.get("publickey")
+        or params.get("public_key")
+        or params.get("peer_public_key")
+        or (unquote(parts.password) if parts.password else "")
+    )
+    local_addr_str = (
+        params.get("local_address")
+        or params.get("address")
+        or params.get("ip")
+        or "10.0.0.2/32"
+    )
+    local_addrs = [a.strip() for a in local_addr_str.split(",") if a.strip()]
+
+    psk = params.get("psk") or params.get("preshared_key") or params.get("presharedkey") or ""
+    mtu = int(params.get("mtu", 1420)) if params.get("mtu", "").isdigit() else 1420
+    reserved = []
+    if params.get("reserved"):
+        try:
+            reserved = [int(x.strip()) for x in params["reserved"].split(",") if x.strip()]
+        except Exception:
+            reserved = []
+
+    remark = unquote(parts.fragment) if parts.fragment else ""
+
+    return WireGuardServer(
+        address=address,
+        port=port,
+        secret_key=secret_key,
+        peer_public_key=peer_public_key,
+        local_address=local_addrs,
+        preshared_key=psk,
+        mtu=mtu,
+        reserved=reserved,
+        remark=remark,
+        strict=strict,
+    )
+
+
+def parse_proxy_url(url: str, *, strict: bool = True) -> VlessServer | SocksServer | WireGuardServer:
+    """Универсальный парсер: определяет vless://, socks5:// или wireguard://."""
     url = str(url).strip()
     lower = url.lower()
     if lower.startswith("vless://"):
         return parse_vless_url(url, strict=strict)
     if lower.startswith(("socks5://", "socks://")):
         return parse_socks_url(url, strict=strict)
-    raise ConfigError("неподдерживаемый протокол: ожидается vless:// или socks5://")
+    if lower.startswith(("wireguard://", "wg://")):
+        return parse_wireguard_url(url, strict=strict)
+    raise ConfigError("неподдерживаемый протокол: ожидается vless://, socks5:// или wireguard://")
 
 
-def server_from_mapping(data: dict[str, Any], *, strict: bool = True) -> VlessServer | SocksServer:
-    """Собрать :class:`VlessServer` или :class:`SocksServer` из словаря config.json."""
+def server_from_mapping(data: dict[str, Any], *, strict: bool = True) -> VlessServer | SocksServer | WireGuardServer:
+    """Собрать :class:`VlessServer`, :class:`SocksServer` или :class:`WireGuardServer` из словаря config.json."""
     if "url" in data and data["url"]:
         url_str = str(data["url"]).strip()
         if url_str.lower().startswith(("socks5://", "socks://")):
@@ -404,6 +555,9 @@ def server_from_mapping(data: dict[str, Any], *, strict: bool = True) -> VlessSe
                 server.remark = str(data["remark"])
             return server
 
+        if url_str.lower().startswith(("wireguard://", "wg://")):
+            return parse_wireguard_url(url_str, strict=strict)
+
         server = parse_vless_url(url_str, strict=strict)
         # Явные поля конфига перекрывают то, что пришло из ссылки.
         if data.get("allowInsecure") is not None:
@@ -413,7 +567,21 @@ def server_from_mapping(data: dict[str, Any], *, strict: bool = True) -> VlessSe
         return server
 
     proto = str(data.get("protocol", "")).lower()
-    if proto in ("socks", "socks5") or ("uuid" not in data and "address" in data):
+    if proto in ("wireguard", "wg"):
+        return WireGuardServer(
+            address=str(data.get("address", "")),
+            port=int(data.get("port", 51820)),
+            secret_key=str(data.get("secretKey") or data.get("privateKey") or ""),
+            peer_public_key=str(data.get("publicKey") or data.get("peerPublicKey") or ""),
+            local_address=data.get("localAddress") or data.get("addressList") or ["10.0.0.2/32"],
+            preshared_key=str(data.get("presharedKey") or ""),
+            mtu=int(data.get("mtu", 1420)),
+            reserved=data.get("reserved") or [],
+            remark=str(data.get("remark") or data.get("name") or ""),
+            strict=strict,
+        )
+
+    if proto in ("socks", "socks5") or ("uuid" not in data and "address" in data and "secretKey" not in data and "privateKey" not in data):
         return SocksServer(
             address=str(data.get("address", "")),
             port=data.get("port", 1080),

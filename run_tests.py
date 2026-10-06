@@ -43,6 +43,7 @@ def run():
             "tests.test_force_restart",
             "tests.test_stop_and_indication",
             "tests.test_socks_support",
+            "tests.test_wireguard_support",
             "tests.test_features",
             "tests.test_config",
             "tests.test_url",

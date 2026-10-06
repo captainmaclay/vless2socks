@@ -14,7 +14,9 @@ from .url import (
     parse_proxy_url,
     parse_socks_url,
     parse_vless_url,
+    parse_wireguard_url,
     server_from_mapping,
+    WireGuardServer,
 )
 
 __all__ = ["AppConfig", "load_config", "ConfigError"]
@@ -22,7 +24,7 @@ __all__ = ["AppConfig", "load_config", "ConfigError"]
 
 @dataclass
 class AppConfig:
-    server: VlessServer | SocksServer
+    server: VlessServer | SocksServer | WireGuardServer
     listen_host: str = "127.0.0.1"
     listen_port: int = 1081
     username: str = ""

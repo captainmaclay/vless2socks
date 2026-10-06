@@ -94,9 +94,20 @@ def check_backend(config: AppConfig) -> tuple[CheckResult, str, str]:
 def check_parameters(config: AppConfig, backend: str = "") -> CheckResult:
     """Убедиться, что все параметры ссылки выбранный движок умеет."""
     from .backend import XRAY
-    from .url import SocksServer
+    from .url import SocksServer, WireGuardServer
 
     server = config.server
+    if isinstance(server, WireGuardServer):
+        notes = [
+            f"сервер:    {server.address}:{server.port}",
+            f"протокол:  wireguard",
+            f"адрес:     {', '.join(server.local_address)}",
+            f"peer key:  {_mask_secret(server.peer_public_key)}",
+        ]
+        if server.remark:
+            notes.insert(0, f"профиль:   {server.remark}")
+        return CheckResult("Параметры ссылки", Status.OK, "WireGuard сервер", notes=notes)
+
     if isinstance(server, SocksServer):
         notes = [
             f"сервер:    {server.address}:{server.port}",

@@ -45,7 +45,7 @@ def resolve_backend(config: AppConfig) -> BackendChoice:
             f"backend={requested!r} — допустимо: {', '.join(VALID)}"
         )
 
-    from .url import SocksServer
+    from .url import SocksServer, WireGuardServer
 
     if isinstance(config.server, SocksServer):
         if requested == PYTHON:
@@ -55,6 +55,15 @@ def resolve_backend(config: AppConfig) -> BackendChoice:
             )
         path, version = _locate_xray(config, required=True)
         return BackendChoice(XRAY, "SOCKS5 upstream через xray", path, version)
+
+    if isinstance(config.server, WireGuardServer):
+        if requested == PYTHON:
+            raise ConfigError(
+                "backend=python не поддерживает WireGuard протокол. "
+                "Используйте backend=xray или auto."
+            )
+        path, version = _locate_xray(config, required=True)
+        return BackendChoice(XRAY, "WireGuard через xray", path, version)
 
     unsupported = config.server.unsupported
     params = ", ".join(f"{u.param}={u.value}" for u in unsupported)

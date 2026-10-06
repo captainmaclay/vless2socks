@@ -12,7 +12,7 @@ import copy
 from typing import Any
 
 from ..config import AppConfig
-from ..url import SocksServer, VlessServer
+from ..url import SocksServer, VlessServer, WireGuardServer
 
 __all__ = ["build_xray_config", "describe_config", "redact_config"]
 
@@ -74,6 +74,8 @@ def build_xray_config(config: AppConfig, *, legacy_vnext: bool = False) -> dict[
     """
     if isinstance(config.server, SocksServer):
         primary_outbound = _socks_outbound(config.server)
+    elif isinstance(config.server, WireGuardServer):
+        primary_outbound = _wireguard_outbound(config.server)
     else:
         primary_outbound = _vless_outbound(config.server, legacy_vnext=legacy_vnext)
 
@@ -230,6 +232,32 @@ def _socks_outbound(server: SocksServer) -> dict[str, Any]:
     }
 
 
+def _wireguard_outbound(server: WireGuardServer) -> dict[str, Any]:
+    peer: dict[str, Any] = {
+        "publicKey": server.peer_public_key,
+        "endpoint": f"{server.address}:{int(server.port)}",
+    }
+    if server.preshared_key:
+        peer["preSharedKey"] = server.preshared_key
+
+    wg_settings: dict[str, Any] = {
+        "secretKey": server.secret_key,
+        "address": list(server.local_address),
+        "peers": [peer],
+        "noKernelTun": True,
+    }
+    if server.mtu:
+        wg_settings["mtu"] = int(server.mtu)
+    if server.reserved:
+        wg_settings["reserved"] = list(server.reserved)
+
+    return {
+        "tag": "proxy",
+        "protocol": "wireguard",
+        "settings": wg_settings,
+    }
+
+
 def _direct_outbound() -> dict[str, Any]:
     # Правил маршрутизации нет, поэтому весь трафик уходит в первый outbound.
     # Этот нужен только чтобы xray было куда отправить служебные соединения.
@@ -344,6 +372,12 @@ def redact_config(config: dict[str, Any]) -> dict[str, Any]:
             for user in server.get("users", []):
                 if user.get("pass"):
                     user["pass"] = "***"
+        if outbound.get("protocol") == "wireguard":
+            if settings.get("secretKey"):
+                settings["secretKey"] = _mask(settings["secretKey"])
+            for peer in settings.get("peers", []):
+                if peer.get("preSharedKey"):
+                    peer["preSharedKey"] = "***"
     for inbound in safe.get("inbounds", []):
         for account in inbound.get("settings", {}).get("accounts", []):
             if account.get("pass"):
@@ -366,6 +400,19 @@ def describe_config(config: dict[str, Any]) -> str:
     inbound = config["inbounds"][0]
     outbound = config["outbounds"][0]
     proto = outbound.get("protocol", "vless")
+
+    if proto == "wireguard":
+        settings = outbound.get("settings", {})
+        peers = settings.get("peers", [{}])
+        peer = peers[0] if peers else {}
+        lines = [
+            f"inbound:  socks {inbound['listen']}:{inbound['port']} "
+            f"({inbound['settings']['auth']}, udp={inbound['settings']['udp']})",
+            f"outbound: wireguard {peer.get('endpoint')} [address={','.join(settings.get('address', []))}]",
+        ]
+        if any(o.get("tag") == "block" and o.get("protocol") == "blackhole" for o in config.get("outbounds", [])):
+            lines.append("killswitch: активен (blackhole при утечке)")
+        return "\n".join(lines)
 
     if proto == "socks":
         servers = outbound.get("settings", {}).get("servers", [{}])

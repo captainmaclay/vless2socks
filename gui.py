@@ -135,9 +135,9 @@ def xray_required_but_missing(config_path: Path | str) -> bool:
     backend = (cfg.backend or "auto").lower()
     if backend == "python":
         return False
-    from vless2socks.url import SocksServer
-    if isinstance(cfg.server, SocksServer):
-        pass  # SOCKS5 upstream always requires xray
+    from vless2socks.url import SocksServer, WireGuardServer
+    if isinstance(cfg.server, (SocksServer, WireGuardServer)):
+        pass  # SOCKS5 upstream and WireGuard always require xray
     elif backend == "auto" and not getattr(cfg.server, "unsupported", None):
         return False
 
@@ -546,11 +546,13 @@ class ProxyInstance:
         self.eye_btn: Optional[tk.Button] = None
         self._url_revealed = False
 
-        # Protocol & SOCKS5 UI
+        # Protocol & Upstream UI
         self.proto_var: Optional[tk.StringVar] = None
         self.vless_container: Optional[tk.Frame] = None
         self.socks_container: Optional[tk.Frame] = None
         self.socks_summary_lbl: Optional[tk.Label] = None
+        self.wireguard_container: Optional[tk.Frame] = None
+        self.wireguard_summary_lbl: Optional[tk.Label] = None
 
         # Killswitch state & UI
         self.killswitch_var: Optional[tk.BooleanVar] = None
@@ -847,7 +849,9 @@ class ProxyInstance:
 
         current_url = self.cfg.get("url", "").strip()
         is_socks = current_url.startswith(("socks5://", "socks://"))
-        self.proto_var = tk.StringVar(value="socks5" if is_socks else "vless")
+        is_wg = current_url.startswith(("wireguard://", "wg://")) or self.cfg.get("protocol") in ("wireguard", "wg")
+        initial_proto = "wireguard" if is_wg else ("socks5" if is_socks else "vless")
+        self.proto_var = tk.StringVar(value=initial_proto)
 
         rb_vless = tk.Radiobutton(
             proto_row, text=t("proto_vless"), variable=self.proto_var, value="vless",
@@ -863,7 +867,15 @@ class ProxyInstance:
             selectcolor=C["card"], activebackground=bg, activeforeground=C["blue"],
             command=self._on_proto_changed,
         )
-        rb_socks.pack(side=tk.LEFT)
+        rb_socks.pack(side=tk.LEFT, padx=(0, 14))
+
+        rb_wg = tk.Radiobutton(
+            proto_row, text=t("proto_wireguard"), variable=self.proto_var, value="wireguard",
+            font=("Segoe UI", 9, "bold"), fg=C["text"], bg=bg,
+            selectcolor=C["card"], activebackground=bg, activeforeground=C["blue"],
+            command=self._on_proto_changed,
+        )
+        rb_wg.pack(side=tk.LEFT)
 
         # VLESS Container
         self.vless_container = tk.Frame(proto_frame, bg=bg)
@@ -880,7 +892,7 @@ class ProxyInstance:
             relief=tk.FLAT, borderwidth=5, show="•",
         )
         self.url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-        self.url_entry.insert(0, current_url if not is_socks else "")
+        self.url_entry.insert(0, current_url if (not is_socks and not is_wg) else "")
         attach_clipboard_and_context_menu(self.url_entry)
 
         self.eye_btn = tk.Button(
@@ -934,8 +946,47 @@ class ProxyInstance:
         )
         socks_copy_btn.pack(side=tk.LEFT)
 
+        # WireGuard Container
+        self.wireguard_container = tk.Frame(proto_frame, bg=bg)
+
+        wg_card = tk.Frame(self.wireguard_container, bg=C["card"], relief=tk.FLAT, borderwidth=1)
+        wg_card.pack(fill=tk.X, pady=(2, 4))
+
+        wg_info = tk.Frame(wg_card, bg=C["card"])
+        wg_info.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10, pady=8)
+
+        tk.Label(
+            wg_info, text=t("lbl_wireguard_summary"), font=("Segoe UI", 9, "bold"),
+            fg=C["blue"], bg=C["card"]
+        ).pack(anchor="w")
+
+        self.wireguard_summary_lbl = tk.Label(
+            wg_info, text=self._format_wireguard_summary(), font=("Consolas", 9),
+            fg=C["text"], bg=C["card"], justify=tk.LEFT, wraplength=480
+        )
+        self.wireguard_summary_lbl.pack(anchor="w", pady=(2, 0))
+
+        wg_btns = tk.Frame(wg_card, bg=C["card"])
+        wg_btns.pack(side=tk.RIGHT, padx=8, pady=8)
+
+        edit_wg_btn = tk.Button(
+            wg_btns, text=t("btn_edit_wireguard"), font=("Segoe UI", 9, "bold"),
+            bg=C["blue"], fg="#1e1e2e", activebackground=C["teal"],
+            relief=tk.FLAT, padx=10, pady=4, command=self.open_wireguard_dialog,
+        )
+        edit_wg_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        wg_copy_btn = tk.Button(
+            wg_btns, text="📋", font=("Segoe UI", 10),
+            bg=C["overlay"], fg=fg, activebackground=C["hover"],
+            relief=tk.FLAT, padx=8, pady=3, command=self.copy_url,
+        )
+        wg_copy_btn.pack(side=tk.LEFT)
+
         # Show active container
-        if is_socks:
+        if initial_proto == "wireguard":
+            self.wireguard_container.pack(fill=tk.X)
+        elif initial_proto == "socks5":
             self.socks_container.pack(fill=tk.X)
         else:
             self.vless_container.pack(fill=tk.X)
@@ -1074,11 +1125,44 @@ class ProxyInstance:
         worker_thread.start()
         return worker_thread
 
+    def _format_wireguard_summary(self) -> str:
+        url = self.cfg.get("url", "").strip()
+        if not (url.startswith(("wireguard://", "wg://")) or self.cfg.get("protocol") in ("wireguard", "wg")):
+            return t("wireguard_not_configured")
+        try:
+            from vless2socks.url import parse_wireguard_url, server_from_mapping
+            if url.startswith(("wireguard://", "wg://")):
+                srv = parse_wireguard_url(url)
+            else:
+                srv = server_from_mapping(self.cfg)
+            name_part = f"[{srv.remark}] " if srv.remark else ""
+            ip_part = f" • IP: {','.join(srv.local_address)}" if srv.local_address else ""
+            return f"{name_part}{srv.address}:{srv.port} (WireGuard{ip_part})"
+        except Exception:
+            return url
+
+    def _update_wireguard_summary(self):
+        if self.wireguard_summary_lbl:
+            self.wireguard_summary_lbl.config(text=self._format_wireguard_summary())
+
     def _on_proto_changed(self):
         val = self.proto_var.get() if self.proto_var else "vless"
-        if val == "socks5":
+        if val == "wireguard":
             if self.vless_container:
                 self.vless_container.pack_forget()
+            if self.socks_container:
+                self.socks_container.pack_forget()
+            if self.wireguard_container:
+                self.wireguard_container.pack(fill=tk.X)
+                self._update_wireguard_summary()
+            curr_url = self.cfg.get("url", "").strip()
+            if not (curr_url.startswith(("wireguard://", "wg://")) or self.cfg.get("protocol") in ("wireguard", "wg")):
+                self.open_wireguard_dialog()
+        elif val == "socks5":
+            if self.vless_container:
+                self.vless_container.pack_forget()
+            if self.wireguard_container:
+                self.wireguard_container.pack_forget()
             if self.socks_container:
                 self.socks_container.pack(fill=tk.X)
                 self._update_socks_summary()
@@ -1088,6 +1172,8 @@ class ProxyInstance:
         else:
             if self.socks_container:
                 self.socks_container.pack_forget()
+            if self.wireguard_container:
+                self.wireguard_container.pack_forget()
             if self.vless_container:
                 self.vless_container.pack(fill=tk.X)
 
@@ -1268,6 +1354,283 @@ class ProxyInstance:
         dlg.bind("<Escape>", lambda e: dlg.destroy())
         addr_ent.focus_set()
 
+    def open_wireguard_dialog(self):
+        """Open WireGuard configuration editor and .conf importer dialog."""
+        from vless2socks.url import parse_wireguard_url, WireGuardServer, server_from_mapping
+        import tkinter.filedialog as fd
+
+        url = self.cfg.get("url", "").strip()
+        init_name = self.cfg.get("name", "")
+        init_addr = ""
+        init_port = "51820"
+        init_priv = ""
+        init_peer_pub = ""
+        init_local_ip = "10.0.0.2/32"
+        init_psk = ""
+        init_mtu = "1420"
+
+        if url.startswith(("wireguard://", "wg://")):
+            try:
+                srv = parse_wireguard_url(url)
+                init_name = srv.remark or init_name
+                init_addr = srv.address
+                init_port = str(srv.port or 51820)
+                init_priv = srv.secret_key
+                init_peer_pub = srv.peer_public_key
+                init_local_ip = ",".join(srv.local_address) if srv.local_address else "10.0.0.2/32"
+                init_psk = srv.preshared_key
+                init_mtu = str(srv.mtu or 1420)
+            except Exception:
+                pass
+        elif self.cfg.get("protocol") in ("wireguard", "wg"):
+            try:
+                srv = server_from_mapping(self.cfg)
+                if isinstance(srv, WireGuardServer):
+                    init_name = srv.remark or init_name
+                    init_addr = srv.address
+                    init_port = str(srv.port or 51820)
+                    init_priv = srv.secret_key
+                    init_peer_pub = srv.peer_public_key
+                    init_local_ip = ",".join(srv.local_address) if srv.local_address else "10.0.0.2/32"
+                    init_psk = srv.preshared_key
+                    init_mtu = str(srv.mtu or 1420)
+            except Exception:
+                pass
+
+        dlg = tk.Toplevel(self.app)
+        dlg.title(t("dlg_wireguard_title"))
+        dlg.geometry("460x520")
+        dlg.resizable(False, False)
+        dlg.configure(bg=C["bg"])
+        dlg.transient(self.app)
+        dlg.grab_set()
+
+        try:
+            x = self.app.winfo_x() + (self.app.winfo_width() - 460) // 2
+            y = self.app.winfo_y() + (self.app.winfo_height() - 520) // 2
+            dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+
+        # ── Group: Interface (Local Client) ───────────────────────────
+        grp_iface = tk.LabelFrame(
+            dlg, text=f" {t('grp_wireguard_interface')} ", font=("Segoe UI", 9, "bold"),
+            bg=C["bg"], fg=C["text"], bd=1, relief=tk.GROOVE
+        )
+        grp_iface.pack(fill=tk.X, padx=14, pady=(10, 4))
+
+        tk.Label(grp_iface, text=t("lbl_private_key"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
+            row=0, column=0, sticky="w", padx=(10, 8), pady=(8, 3)
+        )
+        priv_ent = tk.Entry(grp_iface, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
+                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=32)
+        priv_ent.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=(8, 3))
+        priv_ent.insert(0, init_priv)
+        attach_clipboard_and_context_menu(priv_ent)
+
+        tk.Label(grp_iface, text=t("lbl_local_ip"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
+            row=1, column=0, sticky="w", padx=(10, 8), pady=3
+        )
+        lip_ent = tk.Entry(grp_iface, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
+                           insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=32)
+        lip_ent.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=3)
+        lip_ent.insert(0, init_local_ip)
+        attach_clipboard_and_context_menu(lip_ent)
+
+        tk.Label(grp_iface, text=t("lbl_mtu"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
+            row=2, column=0, sticky="w", padx=(10, 8), pady=(3, 8)
+        )
+        mtu_ent = tk.Entry(grp_iface, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
+                           insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=32)
+        mtu_ent.grid(row=2, column=1, sticky="ew", padx=(0, 10), pady=(3, 8))
+        mtu_ent.insert(0, init_mtu)
+        attach_clipboard_and_context_menu(mtu_ent)
+
+        # ── Group: Peer (WireGuard Server) ───────────────────────────
+        grp_peer = tk.LabelFrame(
+            dlg, text=f" {t('grp_wireguard_peer')} ", font=("Segoe UI", 9, "bold"),
+            bg=C["bg"], fg=C["text"], bd=1, relief=tk.GROOVE
+        )
+        grp_peer.pack(fill=tk.X, padx=14, pady=4)
+
+        tk.Label(grp_peer, text=t("lbl_peer_public_key"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
+            row=0, column=0, sticky="w", padx=(10, 8), pady=(8, 3)
+        )
+        pub_ent = tk.Entry(grp_peer, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
+                           insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=32)
+        pub_ent.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=(8, 3))
+        pub_ent.insert(0, init_peer_pub)
+        attach_clipboard_and_context_menu(pub_ent)
+
+        tk.Label(grp_peer, text=t("lbl_endpoint_address"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
+            row=1, column=0, sticky="w", padx=(10, 8), pady=3
+        )
+        addr_ent = tk.Entry(grp_peer, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
+                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=32)
+        addr_ent.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=3)
+        addr_ent.insert(0, init_addr)
+        attach_clipboard_and_context_menu(addr_ent)
+
+        tk.Label(grp_peer, text=t("lbl_endpoint_port"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
+            row=2, column=0, sticky="w", padx=(10, 8), pady=3
+        )
+        port_ent = tk.Entry(grp_peer, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
+                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=32)
+        port_ent.grid(row=2, column=1, sticky="ew", padx=(0, 10), pady=3)
+        port_ent.insert(0, init_port)
+        attach_clipboard_and_context_menu(port_ent)
+
+        tk.Label(grp_peer, text=t("lbl_preshared_key"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
+            row=3, column=0, sticky="w", padx=(10, 8), pady=(3, 8)
+        )
+        psk_ent = tk.Entry(grp_peer, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
+                           insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=32)
+        psk_ent.grid(row=3, column=1, sticky="ew", padx=(0, 10), pady=(3, 8))
+        psk_ent.insert(0, init_psk)
+        attach_clipboard_and_context_menu(psk_ent)
+
+        # ── Group: Common & Import ────────────────────────────────────
+        grp_cmn = tk.Frame(dlg, bg=C["bg"])
+        grp_cmn.pack(fill=tk.X, padx=14, pady=4)
+
+        tk.Label(grp_cmn, text=t("lbl_name"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).pack(side=tk.LEFT, padx=(4, 6))
+        name_ent = tk.Entry(grp_cmn, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
+                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=20)
+        name_ent.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        name_ent.insert(0, init_name)
+        attach_clipboard_and_context_menu(name_ent)
+
+        def import_conf():
+            file_path = fd.askopenfilename(
+                title="WireGuard .conf",
+                filetypes=[("WireGuard Config (*.conf)", "*.conf"), ("All files", "*.*")],
+                parent=dlg,
+            )
+            if not file_path:
+                return
+            try:
+                content = Path(file_path).read_text(encoding="utf-8", errors="ignore")
+                # Parse ini style
+                import configparser
+                cp = configparser.ConfigParser(strict=False)
+                cp.read_string(content)
+                if "Interface" in cp:
+                    if "PrivateKey" in cp["Interface"]:
+                        priv_ent.delete(0, tk.END)
+                        priv_ent.insert(0, cp["Interface"]["PrivateKey"].strip())
+                    if "Address" in cp["Interface"]:
+                        lip_ent.delete(0, tk.END)
+                        lip_ent.insert(0, cp["Interface"]["Address"].strip())
+                    if "MTU" in cp["Interface"]:
+                        mtu_ent.delete(0, tk.END)
+                        mtu_ent.insert(0, cp["Interface"]["MTU"].strip())
+                if "Peer" in cp:
+                    if "PublicKey" in cp["Peer"]:
+                        pub_ent.delete(0, tk.END)
+                        pub_ent.insert(0, cp["Peer"]["PublicKey"].strip())
+                    if "Endpoint" in cp["Peer"]:
+                        ep = cp["Peer"]["Endpoint"].strip()
+                        if ":" in ep:
+                            h, _, p = ep.rpartition(":")
+                            addr_ent.delete(0, tk.END)
+                            addr_ent.insert(0, h.strip("[]"))
+                            port_ent.delete(0, tk.END)
+                            port_ent.insert(0, p)
+                    if "PresharedKey" in cp["Peer"]:
+                        psk_ent.delete(0, tk.END)
+                        psk_ent.insert(0, cp["Peer"]["PresharedKey"].strip())
+                if not name_ent.get().strip():
+                    name_ent.insert(0, Path(file_path).stem)
+            except Exception as e:
+                messagebox.showerror("WireGuard", f"{t('msg_invalid_conf')}:\n{e}", parent=dlg)
+
+        imp_btn = tk.Button(
+            grp_cmn, text=t("btn_import_conf"), font=("Segoe UI", 9),
+            bg=C["card"], fg=C["text"], activebackground=C["hover"],
+            relief=tk.GROOVE, bd=1, padx=8, pady=2, command=import_conf,
+        )
+        imp_btn.pack(side=tk.RIGHT)
+
+        # ── Buttons: OK & Cancel ──────────────────────────────────────
+        btn_bar = tk.Frame(dlg, bg=C["bg"])
+        btn_bar.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=12)
+
+        def on_ok():
+            addr = addr_ent.get().strip()
+            p_val = port_ent.get().strip()
+            priv = priv_ent.get().strip()
+            pub = pub_ent.get().strip()
+            lip = lip_ent.get().strip()
+            psk = psk_ent.get().strip()
+            mtu_val = mtu_ent.get().strip()
+            name_val = name_ent.get().strip()
+
+            if not priv:
+                messagebox.showwarning("WireGuard", t("msg_private_key_required"), parent=dlg)
+                priv_ent.focus_set()
+                return
+            if not pub:
+                messagebox.showwarning("WireGuard", t("msg_public_key_required"), parent=dlg)
+                pub_ent.focus_set()
+                return
+            if not addr:
+                messagebox.showwarning("WireGuard", t("msg_addr_required"), parent=dlg)
+                addr_ent.focus_set()
+                return
+
+            try:
+                p_int = int(p_val)
+                if not (1 <= p_int <= 65535):
+                    raise ValueError()
+            except ValueError:
+                messagebox.showwarning("WireGuard", t("msg_port_required"), parent=dlg)
+                port_ent.focus_set()
+                return
+
+            mtu_int = int(mtu_val) if mtu_val.isdigit() else 1420
+            addrs = [a.strip() for a in lip.split(",") if a.strip()] or ["10.0.0.2/32"]
+
+            srv = WireGuardServer(
+                address=addr,
+                port=p_int,
+                secret_key=priv,
+                peer_public_key=pub,
+                local_address=addrs,
+                preshared_key=psk,
+                mtu=mtu_int,
+                remark=name_val,
+            )
+            wg_url = srv.to_url()
+            self.cfg["url"] = wg_url
+            if self.proto_var:
+                self.proto_var.set("wireguard")
+            self._update_wireguard_summary()
+            self._init_geo_from_url()
+            self.app.save_all()
+            self.app.refresh_current_page_tabs()
+            self.app.refresh_overview()
+            self._log(f"Configured WireGuard upstream: {srv.describe()}")
+            dlg.destroy()
+
+        cancel_btn = tk.Button(
+            btn_bar, text=t("btn_cancel"), font=("Segoe UI", 9),
+            bg=C["card"], fg=C["text"], activebackground=C["hover"],
+            relief=tk.GROOVE, bd=1, padx=16, pady=4, command=dlg.destroy,
+        )
+        cancel_btn.pack(side=tk.RIGHT, padx=(8, 0))
+
+        ok_btn = tk.Button(
+            btn_bar, text=t("btn_ok"), font=("Segoe UI", 9, "bold"),
+            bg=C["card"], fg=C["blue"], activebackground=C["hover"],
+            relief=tk.GROOVE, bd=2, highlightthickness=1, highlightbackground=C["blue"],
+            padx=20, pady=4, command=on_ok,
+        )
+        ok_btn.pack(side=tk.RIGHT)
+
+        dlg.bind("<Return>", lambda e: on_ok())
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+        priv_ent.focus_set()
+
     def toggle_url_visibility(self):
         if not self.url_entry:
             return
@@ -1362,7 +1725,7 @@ class ProxyInstance:
         if self.process and self.process.poll() is None:
             return
 
-        val = self.proto_var.get() if self.proto_var else ("socks5" if self.cfg.get("url", "").startswith(("socks5://", "socks://")) else "vless")
+        val = self.proto_var.get() if self.proto_var else ("wireguard" if self.cfg.get("url", "").startswith(("wireguard://", "wg://")) else ("socks5" if self.cfg.get("url", "").startswith(("socks5://", "socks://")) else "vless"))
         if val == "vless" and self.url_entry:
             url = self.url_entry.get().strip()
         else:
@@ -1376,7 +1739,7 @@ class ProxyInstance:
         if not url:
             messagebox.showwarning("vless2socks", t("msg_url_required"))
             return
-        if not (url.startswith("vless://") or url.startswith("socks5://") or url.startswith("socks://")):
+        if not (url.startswith("vless://") or url.startswith("socks5://") or url.startswith("socks://") or url.startswith("wireguard://") or url.startswith("wg://")):
             messagebox.showwarning("vless2socks", t("msg_url_prefix_any"))
             return
 
@@ -2967,7 +3330,7 @@ class VlessApp(tk.Tk):
         started_count = 0
         for inst in self.instances:
             url = inst.cfg.get("url", "").strip()
-            if (url.startswith("vless://") or url.startswith("socks5://") or url.startswith("socks://")) and not inst.running:
+            if (url.startswith("vless://") or url.startswith("socks5://") or url.startswith("socks://") or url.startswith("wireguard://") or url.startswith("wg://")) and not inst.running:
                 inst.start()
                 started_count += 1
         if started_count > 0:
