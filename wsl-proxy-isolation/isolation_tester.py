@@ -52,6 +52,7 @@ def exec_wsl_user(bash_cmd: str, distro: Optional[str] = None, timeout: float = 
             ["wsl.exe", "-d", d, "-e", "bash", "-c", bash_cmd],
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
             creationflags=CREATE_NO_WINDOW,
         )

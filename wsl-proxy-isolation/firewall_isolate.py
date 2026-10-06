@@ -46,6 +46,7 @@ def run_wsl_root_cmd(bash_cmd: str, distro: Optional[str] = None, timeout: float
             ["wsl.exe", "-d", d, "-u", "root", "-e", "bash", "-c", bash_cmd],
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
             creationflags=CREATE_NO_WINDOW,
         )
@@ -78,6 +79,7 @@ def remove_windows_firewall_rule() -> bool:
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
             capture_output=True,
             text=True,
+            errors="replace",
             creationflags=CREATE_NO_WINDOW,
         )
         return True

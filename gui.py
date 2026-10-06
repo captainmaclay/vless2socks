@@ -1504,6 +1504,15 @@ class ProxyInstance:
         except Exception as e:
             self._log(f"Port cleanup error: {e}")
 
+        # Очистка файла конфигурации xray в runtime для предотвращения коллизий
+        for cfg_name in (f"xray-config-{port}.json", "xray-config.json"):
+            cfg_p = ROOT_DIR / "runtime" / cfg_name
+            if cfg_p.exists():
+                try:
+                    cfg_p.unlink()
+                except Exception:
+                    pass
+
         # Сбрасываем кэш GeoIP и очищаем verified IP для данного порта
         geo_ip.invalidate_cache(h, port)
         self.geo_info["verified"] = False

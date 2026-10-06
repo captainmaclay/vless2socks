@@ -37,6 +37,7 @@ def get_wsl_distributions() -> List[Dict[str, Any]]:
                 ["wsl.exe", "-l", "-v"],
                 capture_output=True,
                 text=True,
+                errors="replace",
                 creationflags=CREATE_NO_WINDOW,
                 timeout=5.0,
             )

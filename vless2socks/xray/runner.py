@@ -58,7 +58,8 @@ def write_config(
     """
     target_dir = Path(directory)
     target_dir.mkdir(parents=True, exist_ok=True)
-    path = target_dir / "xray-config.json"
+    filename = f"xray-config-{config.listen_port}.json" if config.listen_port else "xray-config.json"
+    path = target_dir / filename
 
     data = build_xray_config(config, legacy_vnext=legacy_vnext)
     path.write_text(
@@ -255,6 +256,9 @@ class XrayProcess:
             if self._stopping:
                 return
             try:
+                self.config_path = write_config(
+                    self.config, self.runtime_dir, legacy_vnext=self.legacy_vnext
+                )
                 await self._spawn()
                 await self._wait_ready()
                 log.info("xray перезапущен")
@@ -294,6 +298,9 @@ class XrayProcess:
     async def stop(self) -> None:
         self._stopping = True
         await self._kill_process()
+        if self.config_path is not None and self.config_path.exists():
+            with contextlib.suppress(Exception):
+                self.config_path.unlink()
 
     async def __aenter__(self) -> "XrayProcess":
         await self.start()
