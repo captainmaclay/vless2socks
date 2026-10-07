@@ -18,6 +18,7 @@ __all__ = [
     "parse_vless_url",
     "parse_socks_url",
     "parse_wireguard_url",
+    "parse_wireguard_conf",
     "parse_proxy_url",
     "server_from_mapping",
     "ConfigError",
@@ -390,9 +391,12 @@ class WireGuardServer:
     secret_key: str
     peer_public_key: str
     local_address: list[str] = field(default_factory=lambda: ["10.0.0.2/32"])
+    allowed_ips: list[str] = field(default_factory=list)
     preshared_key: str = ""
     mtu: int = 1420
     reserved: list[int] = field(default_factory=list)
+    keep_alive: int = 0
+    dns: list[str] = field(default_factory=list)
     remark: str = ""
     strict: bool = True
     unsupported: list[Any] = field(default_factory=list)
@@ -435,10 +439,36 @@ class WireGuardServer:
         elif not self.local_address:
             self.local_address = ["10.0.0.2/32"]
 
+        if isinstance(self.allowed_ips, str):
+            raw_ips = [ip.strip() for ip in self.allowed_ips.split(",") if ip.strip()]
+        elif self.allowed_ips:
+            raw_ips = [str(ip).strip() for ip in self.allowed_ips if str(ip).strip()]
+        else:
+            raw_ips = []
+        seen_ips = set()
+        dedup_ips = []
+        for ip in raw_ips:
+            if ip not in seen_ips:
+                seen_ips.add(ip)
+                dedup_ips.append(ip)
+        self.allowed_ips = dedup_ips
+
         try:
             self.mtu = int(self.mtu or 1420)
         except (TypeError, ValueError):
             self.mtu = 1420
+
+        try:
+            self.keep_alive = int(self.keep_alive or 0)
+        except (TypeError, ValueError):
+            self.keep_alive = 0
+
+        if isinstance(self.dns, str):
+            self.dns = [d.strip() for d in self.dns.split(",") if d.strip()]
+        elif self.dns:
+            self.dns = [str(d).strip() for d in self.dns if str(d).strip()]
+        else:
+            self.dns = []
 
         self.preshared_key = str(self.preshared_key or "").strip()
         self.remark = str(self.remark or "").strip()
@@ -455,17 +485,61 @@ class WireGuardServer:
             f"peer_pk={quote(self.peer_public_key, safe='')}",
         ]
         if self.local_address:
-            qparams.append(f"local_address={quote(','.join(self.local_address), safe='')}")
+            if isinstance(self.local_address, str):
+                loc_list = [a.strip() for a in self.local_address.split(",") if a.strip()]
+            else:
+                loc_list = [str(a).strip() for a in self.local_address if str(a).strip()]
+            if loc_list:
+                qparams.append(f"local_address={quote(','.join(loc_list), safe='')}")
+        if self.allowed_ips:
+            if isinstance(self.allowed_ips, str):
+                al_list = [a.strip() for a in self.allowed_ips.split(",") if a.strip()]
+            else:
+                al_list = [str(a).strip() for a in self.allowed_ips if str(a).strip()]
+            if al_list:
+                qparams.append(f"allowed_ips={quote(','.join(al_list), safe='')}")
         if self.preshared_key:
             qparams.append(f"psk={quote(self.preshared_key, safe='')}")
         if self.mtu and self.mtu != 1420:
             qparams.append(f"mtu={self.mtu}")
+        if self.keep_alive:
+            qparams.append(f"keepalive={self.keep_alive}")
+        if self.dns:
+            if isinstance(self.dns, str):
+                dns_list = [d.strip() for d in self.dns.split(",") if d.strip()]
+            else:
+                dns_list = [str(d).strip() for d in self.dns if str(d).strip()]
+            if dns_list:
+                qparams.append(f"dns={quote(','.join(dns_list), safe='')}")
         if self.reserved:
             qparams.append(f"reserved={','.join(map(str, self.reserved))}")
 
         query_str = "&".join(qparams)
         frag = f"#{quote(self.remark, safe='')}" if self.remark else ""
         return f"wireguard://{self.address}:{self.port}/?{query_str}{frag}"
+
+    def to_conf(self) -> str:
+        """Сгенерировать стандартный текст конфигурационного файла WireGuard (.conf)."""
+        lines = [
+            "[Interface]",
+            f"PrivateKey = {self.secret_key}",
+            f"Address = {', '.join(self.local_address)}",
+        ]
+        if self.dns:
+            lines.append(f"DNS = {', '.join(self.dns)}")
+        if self.mtu and self.mtu != 1420:
+            lines.append(f"MTU = {self.mtu}")
+        lines.append("")
+        lines.append("[Peer]")
+        lines.append(f"PublicKey = {self.peer_public_key}")
+        if self.preshared_key:
+            lines.append(f"PresharedKey = {self.preshared_key}")
+        if self.allowed_ips:
+            lines.append(f"AllowedIPs = {', '.join(self.allowed_ips)}")
+        lines.append(f"Endpoint = {self.address}:{self.port}")
+        if self.keep_alive:
+            lines.append(f"PersistentKeepalive = {self.keep_alive}")
+        return "\n".join(lines) + "\n"
 
 
 def parse_wireguard_url(url: str, *, strict: bool = True) -> WireGuardServer:
@@ -503,8 +577,21 @@ def parse_wireguard_url(url: str, *, strict: bool = True) -> WireGuardServer:
     )
     local_addrs = [a.strip() for a in local_addr_str.split(",") if a.strip()]
 
+    allowed_ips_str = (
+        params.get("allowed_ips")
+        or params.get("allowedips")
+        or params.get("allowed_ip")
+        or params.get("allowedip")
+        or ""
+    )
+    allowed_ips = [a.strip() for a in allowed_ips_str.split(",") if a.strip()]
+
     psk = params.get("psk") or params.get("preshared_key") or params.get("presharedkey") or ""
     mtu = int(params.get("mtu", 1420)) if params.get("mtu", "").isdigit() else 1420
+    keepalive_val = params.get("keepalive") or params.get("persistentkeepalive") or params.get("keep_alive") or 0
+    keep_alive = int(keepalive_val) if str(keepalive_val).isdigit() else 0
+    dns_str = params.get("dns") or ""
+    dns = [d.strip() for d in dns_str.split(",") if d.strip()]
     reserved = []
     if params.get("reserved"):
         try:
@@ -520,25 +607,148 @@ def parse_wireguard_url(url: str, *, strict: bool = True) -> WireGuardServer:
         secret_key=secret_key,
         peer_public_key=peer_public_key,
         local_address=local_addrs,
+        allowed_ips=allowed_ips,
         preshared_key=psk,
         mtu=mtu,
+        keep_alive=keep_alive,
+        dns=dns,
         reserved=reserved,
         remark=remark,
         strict=strict,
     )
 
 
+def parse_wireguard_conf(
+    conf_or_path: str | Any,
+    *,
+    remark: str = "",
+    strict: bool = True,
+) -> WireGuardServer:
+    """Парсинг настроек WireGuard из файла .conf или сырого текста (raw INI)."""
+    import configparser
+    from pathlib import Path
+
+    text = ""
+    suggested_remark = remark
+    p = None
+    if isinstance(conf_or_path, Path):
+        p = conf_or_path
+    elif isinstance(conf_or_path, str) and ("\n" not in conf_or_path and "\r" not in conf_or_path):
+        candidate = Path(conf_or_path.strip().strip('"').strip("'"))
+        if candidate.exists() and candidate.is_file():
+            p = candidate
+
+    if p is not None:
+        if not suggested_remark:
+            suggested_remark = p.stem
+        try:
+            text = p.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            text = p.read_text(encoding="cp1251", errors="replace")
+    else:
+        text = str(conf_or_path)
+
+    # Очищаем комментарии (# и ;) для надежного разбора ConfigParser
+    cleaned_lines = []
+    for line in text.splitlines():
+        trimmed = line.strip()
+        if not trimmed or trimmed.startswith(("#", ";")):
+            continue
+        cleaned_lines.append(line)
+
+    cleaned_text = "\n".join(cleaned_lines)
+    cp = configparser.ConfigParser(strict=False)
+    try:
+        cp.read_string(cleaned_text)
+    except Exception as exc:
+        raise ConfigError(f"некорректный формат конфигурации WireGuard: {exc}") from None
+
+    if "Interface" not in cp:
+        raise ConfigError("в конфигурации WireGuard отсутствует секция [Interface]")
+    if "Peer" not in cp:
+        raise ConfigError("в конфигурации WireGuard отсутствует секция [Peer]")
+
+    iface = cp["Interface"]
+    peer = cp["Peer"]
+
+    secret_key = iface.get("privatekey", "").strip()
+    if not secret_key:
+        raise ConfigError("не указан PrivateKey в секции [Interface]")
+
+    peer_public_key = peer.get("publickey", "").strip()
+    if not peer_public_key:
+        raise ConfigError("не указан PublicKey в секции [Peer]")
+
+    endpoint = peer.get("endpoint", "").strip()
+    if not endpoint:
+        raise ConfigError("не указан Endpoint в секции [Peer]")
+
+    if ":" in endpoint:
+        host_part, _, port_part = endpoint.rpartition(":")
+        address = host_part.strip().strip("[]")
+        try:
+            port = int(port_part.strip())
+        except ValueError:
+            port = 51820
+    else:
+        address = endpoint.strip().strip("[]")
+        port = 51820
+
+    raw_addrs = iface.get("address", "").strip()
+    local_addrs = [a.strip() for a in raw_addrs.split(",") if a.strip()] or ["10.0.0.2/32"]
+
+    raw_allowed = peer.get("allowedips", "").strip()
+    allowed_ips = [a.strip() for a in raw_allowed.split(",") if a.strip()]
+
+    raw_dns = iface.get("dns", "").strip()
+    dns = [d.strip() for d in raw_dns.split(",") if d.strip()]
+
+    preshared_key = peer.get("presharedkey", "").strip()
+
+    try:
+        mtu = int(iface.get("mtu", 1420))
+    except (ValueError, TypeError):
+        mtu = 1420
+
+    try:
+        keepalive = int(peer.get("persistentkeepalive", peer.get("keepalive", 0)))
+    except (ValueError, TypeError):
+        keepalive = 0
+
+    return WireGuardServer(
+        address=address,
+        port=port,
+        secret_key=secret_key,
+        peer_public_key=peer_public_key,
+        local_address=local_addrs,
+        allowed_ips=allowed_ips,
+        preshared_key=preshared_key,
+        mtu=mtu,
+        keep_alive=keepalive,
+        dns=dns,
+        remark=suggested_remark,
+        strict=strict,
+    )
+
+
 def parse_proxy_url(url: str, *, strict: bool = True) -> VlessServer | SocksServer | WireGuardServer:
-    """Универсальный парсер: определяет vless://, socks5:// или wireguard://."""
+    """Универсальный парсер: определяет vless://, socks5://, wireguard://, сырой raw .conf текст или путь к .conf файлу."""
     url = str(url).strip()
     lower = url.lower()
+    if "[interface]" in lower:
+        return parse_wireguard_conf(url, strict=strict)
+    if (lower.endswith(".conf") or ".conf" in lower) and ("\n" not in url):
+        from pathlib import Path
+        p = Path(url.strip('"').strip("'"))
+        if p.exists() and p.is_file():
+            return parse_wireguard_conf(p, strict=strict)
     if lower.startswith("vless://"):
         return parse_vless_url(url, strict=strict)
     if lower.startswith(("socks5://", "socks://")):
         return parse_socks_url(url, strict=strict)
     if lower.startswith(("wireguard://", "wg://")):
         return parse_wireguard_url(url, strict=strict)
-    raise ConfigError("неподдерживаемый протокол: ожидается vless://, socks5:// или wireguard://")
+    raise ConfigError("неподдерживаемый протокол: ожидается vless://, socks5://, wireguard:// или .conf")
 
 
 def server_from_mapping(data: dict[str, Any], *, strict: bool = True) -> VlessServer | SocksServer | WireGuardServer:
@@ -556,7 +766,14 @@ def server_from_mapping(data: dict[str, Any], *, strict: bool = True) -> VlessSe
             return server
 
         if url_str.lower().startswith(("wireguard://", "wg://")):
-            return parse_wireguard_url(url_str, strict=strict)
+            server = parse_wireguard_url(url_str, strict=strict)
+            if data.get("allowed_ips") or data.get("allowedIPs"):
+                raw_al = data.get("allowed_ips") or data.get("allowedIPs")
+                if isinstance(raw_al, str):
+                    server.allowed_ips = [a.strip() for a in raw_al.split(",") if a.strip()]
+                elif isinstance(raw_al, (list, tuple)):
+                    server.allowed_ips = [str(a).strip() for a in raw_al if str(a).strip()]
+            return server
 
         server = parse_vless_url(url_str, strict=strict)
         # Явные поля конфига перекрывают то, что пришло из ссылки.
@@ -568,12 +785,18 @@ def server_from_mapping(data: dict[str, Any], *, strict: bool = True) -> VlessSe
 
     proto = str(data.get("protocol", "")).lower()
     if proto in ("wireguard", "wg"):
+        raw_al = data.get("allowed_ips") or data.get("allowedIPs") or []
+        if isinstance(raw_al, str):
+            allowed_ips = [a.strip() for a in raw_al.split(",") if a.strip()]
+        else:
+            allowed_ips = [str(a).strip() for a in raw_al if str(a).strip()]
         return WireGuardServer(
             address=str(data.get("address", "")),
             port=int(data.get("port", 51820)),
             secret_key=str(data.get("secretKey") or data.get("privateKey") or ""),
             peer_public_key=str(data.get("publicKey") or data.get("peerPublicKey") or ""),
             local_address=data.get("localAddress") or data.get("addressList") or ["10.0.0.2/32"],
+            allowed_ips=allowed_ips,
             preshared_key=str(data.get("presharedKey") or ""),
             mtu=int(data.get("mtu", 1420)),
             reserved=data.get("reserved") or [],

@@ -239,6 +239,8 @@ def _wireguard_outbound(server: WireGuardServer) -> dict[str, Any]:
     }
     if server.preshared_key:
         peer["preSharedKey"] = server.preshared_key
+    if getattr(server, "allowed_ips", None):
+        peer["allowedIPs"] = list(server.allowed_ips)
 
     wg_settings: dict[str, Any] = {
         "secretKey": server.secret_key,
@@ -405,10 +407,11 @@ def describe_config(config: dict[str, Any]) -> str:
         settings = outbound.get("settings", {})
         peers = settings.get("peers", [{}])
         peer = peers[0] if peers else {}
+        allowed_hint = f" [allowedIPs={len(peer['allowedIPs'])} subnets]" if peer.get("allowedIPs") else ""
         lines = [
             f"inbound:  socks {inbound['listen']}:{inbound['port']} "
             f"({inbound['settings']['auth']}, udp={inbound['settings']['udp']})",
-            f"outbound: wireguard {peer.get('endpoint')} [address={','.join(settings.get('address', []))}]",
+            f"outbound: wireguard {peer.get('endpoint')} [address={','.join(settings.get('address', []))}]{allowed_hint}",
         ]
         if any(o.get("tag") == "block" and o.get("protocol") == "blackhole" for o in config.get("outbounds", [])):
             lines.append("killswitch: активен (blackhole при утечке)")

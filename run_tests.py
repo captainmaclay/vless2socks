@@ -17,6 +17,11 @@ ROOT_DIR = Path(__file__).resolve().parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 def run():
     parser = argparse.ArgumentParser(description="Run vless2socks test suites.")
@@ -53,6 +58,8 @@ def run():
             "tests.test_xray_config",
             "tests.test_get_xray",
             "tests.test_isolation",
+            "tests.test_ink_automation",
+            "tests.test_gui_launchers_modal",
             "tests.test_e2e",
         ]
         for mod in modules:

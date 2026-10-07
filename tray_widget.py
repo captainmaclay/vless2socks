@@ -227,6 +227,8 @@ class VlessTrayApp:
             pystray.MenuItem("▶ Запустить", self._on_start, visible=lambda _: not self._running),
             pystray.MenuItem("⏹ Остановить", self._on_stop, visible=lambda _: self._running),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem("🔄 RestartServices", self._on_restart_services),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("📋 Показать лог", self._on_show_log),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("🚪 Выход", self._on_exit),
@@ -270,6 +272,34 @@ class VlessTrayApp:
         if not self._running:
             return
         self._stop_proxy()
+
+    def _on_restart_services(self, icon=None, item=None):
+        self._log("🔄 [RestartServices] Перезапуск сервисов из трея...")
+        def _worker():
+            try:
+                import settings_manager
+                flags = settings_manager.get_restart_services_flags()
+                if flags.get("wsl", True) and sys.platform == "win32":
+                    self._log("🔄 [RestartServices] Перезапуск WSL2...")
+                    kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW}
+                    subprocess.run(["wsl.exe", "--shutdown"], capture_output=True, timeout=15, **kwargs)
+                    time.sleep(1.0)
+                    subprocess.run(["wsl.exe", "-e", "true"], capture_output=True, timeout=10, **kwargs)
+                    self._log("✅ [RestartServices] WSL2 перезапущен.")
+
+                if flags.get("work_proxy", True) or flags.get("system_proxy", True):
+                    self._log("🔄 [RestartServices] Перезапуск прокси...")
+                    if self._running:
+                        self._stop_proxy()
+                        time.sleep(0.5)
+                        self._start_proxy()
+                    else:
+                        self._start_proxy()
+                self._log("✅ [RestartServices] Завершено.")
+            except Exception as e:
+                self._log(f"❌ [RestartServices] Ошибка: {e}")
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _on_show_log(self, icon=None, item=None):
         self._log_window.show()

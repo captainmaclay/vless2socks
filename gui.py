@@ -191,6 +191,7 @@ C = {
     "border":   "#45475a",
     "log_bg":   "#11111b",
     "log_fg":   "#a6adc8",
+    "orange":   "#ff7700",
 }
 
 
@@ -327,7 +328,7 @@ def format_order(val: Any) -> str:
 
 
 def ensure_system_proxy_1015(instances: list[dict]) -> list[dict]:
-    """Ensure that the default unfilled System Proxy on port 1015 (#0) exists with killswitch=True."""
+    """Ensure that the default unfilled System Proxy on port 1015 (#0) exists with killswitch=True and flags."""
     found_1015 = False
     for inst in instances:
         if not isinstance(inst, dict):
@@ -349,7 +350,19 @@ def ensure_system_proxy_1015(instances: list[dict]) -> list[dict]:
                 inst["order"] = 0
             if "killswitch" not in inst:
                 inst["killswitch"] = True
-            break
+            if "system_proxy" not in inst and "System_Proxy" not in inst:
+                inst["system_proxy"] = True
+                inst["System_Proxy"] = True
+            if "work_proxy" not in inst and "Work_Proxy" not in inst:
+                inst["work_proxy"] = False
+                inst["Work_Proxy"] = False
+        elif port == 1030 or "worproxy" in str(inst.get("name", "")).lower():
+            if "work_proxy" not in inst and "Work_Proxy" not in inst:
+                inst["work_proxy"] = True
+                inst["Work_Proxy"] = True
+            if "system_proxy" not in inst and "System_Proxy" not in inst:
+                inst["system_proxy"] = False
+                inst["System_Proxy"] = False
 
     if not found_1015:
         system_proxy = {
@@ -367,6 +380,10 @@ def ensure_system_proxy_1015(instances: list[dict]) -> list[dict]:
             "xrayPath": "",
             "xrayLegacyConfig": False,
             "killswitch": True,
+            "system_proxy": True,
+            "System_Proxy": True,
+            "work_proxy": False,
+            "Work_Proxy": False,
         }
         instances.insert(0, system_proxy)
 
@@ -396,6 +413,68 @@ def save_instances(instances: list[dict]) -> None:
     with open(INSTANCES_FILE, "w", encoding="utf-8") as f:
         json.dump(instances, f, indent=2, ensure_ascii=False)
         f.write("\n")
+
+
+def restart_wsl() -> tuple[bool, str]:
+    """Execute clean WSL restart:
+    1. Query currently running distros.
+    2. Explicitly terminate running distros (forces GUI/X11 apps to terminate).
+    3. Shutdown entire WSL microVM and WSLg subsystem.
+    4. Wait until verified stopped.
+    5. Clean wake-up probe.
+    """
+    if sys.platform != "win32":
+        return False, "WSL restart is only available on Windows"
+    try:
+        kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW}
+
+        # Step 1: Query currently running distros
+        running_distros: list[str] = []
+        try:
+            res = subprocess.run(["wsl.exe", "--list", "--verbose"], capture_output=True, timeout=5, **kwargs)
+            out = res.stdout.decode("utf-16le", errors="replace")
+            for line in out.strip().splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].strip() == "Running":
+                    name = parts[0].lstrip("*").strip()
+                    if name:
+                        running_distros.append(name)
+                elif len(parts) >= 3 and parts[0] == "*" and parts[2].strip() == "Running":
+                    name = parts[1].strip()
+                    if name:
+                        running_distros.append(name)
+        except Exception:
+            pass
+
+        # Step 2: Terminate active distros (drops GUI apps like Claude Desktop / Electron)
+        for distro in running_distros:
+            try:
+                subprocess.run(["wsl.exe", "--terminate", distro], capture_output=True, timeout=10, **kwargs)
+            except Exception:
+                pass
+
+        # Step 3: Shutdown entire WSL microVM and WSLg
+        subprocess.run(["wsl.exe", "--shutdown"], capture_output=True, timeout=15, **kwargs)
+
+        # Step 4: Wait until stopped (up to 5 seconds)
+        for _ in range(10):
+            time.sleep(0.5)
+            try:
+                chk = subprocess.run(["wsl.exe", "--list", "--verbose"], capture_output=True, timeout=3, **kwargs)
+                out = chk.stdout.decode("utf-16le", errors="replace")
+                if "Running" not in out:
+                    break
+            except Exception:
+                break
+
+        # Step 5: Clean wake-up probe
+        wake_cmd = ["wsl.exe", "-e", "/bin/true"]
+        if running_distros:
+            wake_cmd = ["wsl.exe", "-d", running_distros[0], "-e", "/bin/true"]
+        subprocess.run(wake_cmd, capture_output=True, timeout=15, **kwargs)
+        return True, "WSL successfully restarted"
+    except Exception as e:
+        return False, f"WSL restart failed: {e}"
 
 
 # ── Tray Icon ──────────────────────────────────────────────────
@@ -567,7 +646,11 @@ class ProxyInstance:
         self._reconnect_attempt = 0
         self._reconnect_timer_id: Optional[str] = None
 
-        # Ensure port 1015 defaults
+        # Flags: System_Proxy & Work_Proxy
+        self.system_proxy_var: Optional[tk.BooleanVar] = None
+        self.work_proxy_var: Optional[tk.BooleanVar] = None
+
+        # Ensure port 1015 / 1030 defaults
         _, port = self.get_listen()
         if str(port) == "1015":
             if "killswitch" not in self.cfg:
@@ -576,6 +659,75 @@ class ProxyInstance:
                 self.cfg["name"] = "System Proxy"
             if "order" not in self.cfg:
                 self.cfg["order"] = 0
+            if "system_proxy" not in self.cfg and "System_Proxy" not in self.cfg:
+                self.cfg["system_proxy"] = True
+                self.cfg["System_Proxy"] = True
+            if "work_proxy" not in self.cfg and "Work_Proxy" not in self.cfg:
+                self.cfg["work_proxy"] = False
+                self.cfg["Work_Proxy"] = False
+        elif str(port) == "1030" or "worproxy" in str(self.cfg.get("name", "")).lower():
+            if "work_proxy" not in self.cfg and "Work_Proxy" not in self.cfg:
+                self.cfg["work_proxy"] = True
+                self.cfg["Work_Proxy"] = True
+            if "system_proxy" not in self.cfg and "System_Proxy" not in self.cfg:
+                self.cfg["system_proxy"] = False
+                self.cfg["System_Proxy"] = False
+
+    def is_system_proxy(self) -> bool:
+        """Check if instance is flagged as System_Proxy."""
+        if self.system_proxy_var is not None:
+            return bool(self.system_proxy_var.get())
+        if "system_proxy" in self.cfg:
+            return bool(self.cfg["system_proxy"])
+        if "System_Proxy" in self.cfg:
+            return bool(self.cfg["System_Proxy"])
+        _, port = self.get_listen()
+        return str(port) == "1015"
+
+    def is_work_proxy(self) -> bool:
+        """Check if instance is flagged as Work_Proxy."""
+        if self.work_proxy_var is not None:
+            return bool(self.work_proxy_var.get())
+        if "work_proxy" in self.cfg:
+            return bool(self.cfg["work_proxy"])
+        if "Work_Proxy" in self.cfg:
+            return bool(self.cfg["Work_Proxy"])
+        _, port = self.get_listen()
+        return str(port) == "1030" or "worproxy" in str(self.cfg.get("name", "")).lower()
+
+    def set_system_proxy(self, val: bool) -> None:
+        """Dynamically set System_Proxy flag and persist."""
+        b = bool(val)
+        self.cfg["system_proxy"] = b
+        self.cfg["System_Proxy"] = b
+        if self.system_proxy_var is not None:
+            self.system_proxy_var.set(b)
+        self.app.save_all()
+        self.app.refresh_overview()
+
+    def set_work_proxy(self, val: bool) -> None:
+        """Dynamically set Work_Proxy flag and persist."""
+        b = bool(val)
+        self.cfg["work_proxy"] = b
+        self.cfg["Work_Proxy"] = b
+        if self.work_proxy_var is not None:
+            self.work_proxy_var.set(b)
+        self.app.save_all()
+        self.app.refresh_overview()
+
+    def _on_system_proxy_toggled(self) -> None:
+        val = bool(self.system_proxy_var.get() if self.system_proxy_var else False)
+        self.cfg["system_proxy"] = val
+        self.cfg["System_Proxy"] = val
+        self.app.save_all()
+        self.app.refresh_overview()
+
+    def _on_work_proxy_toggled(self) -> None:
+        val = bool(self.work_proxy_var.get() if self.work_proxy_var else False)
+        self.cfg["work_proxy"] = val
+        self.cfg["Work_Proxy"] = val
+        self.app.save_all()
+        self.app.refresh_overview()
 
     def get_order(self) -> float:
         """Return numeric order value (>= 0). Default is 0.0 for port 1015, or global_id for others."""
@@ -833,6 +985,33 @@ class ProxyInstance:
             relief=tk.FLAT, padx=8, pady=1, command=lambda: self.verify_killswitch(manual=True),
         )
         verify_ks_btn.pack(side=tk.LEFT)
+
+        # 3.6. Proxy Role Flags: System_Proxy, Work_Proxy
+        flags_frame = tk.Frame(self.frame, bg=bg)
+        flags_frame.pack(fill=tk.X, padx=px, pady=(2, 4))
+
+        tk.Label(
+            flags_frame, text=t("lbl_proxy_flags"), font=("Segoe UI", 9, "bold"),
+            fg=C["subtext"], bg=bg
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        self.system_proxy_var = tk.BooleanVar(value=self.is_system_proxy())
+        sp_chk = tk.Checkbutton(
+            flags_frame, text=f" {t('lbl_system_proxy')}", variable=self.system_proxy_var,
+            font=("Segoe UI", 9, "bold"), fg=C["yellow"], bg=bg,
+            selectcolor=C["card"], activebackground=bg, activeforeground=C["yellow"],
+            command=self._on_system_proxy_toggled,
+        )
+        sp_chk.pack(side=tk.LEFT, padx=(0, 12))
+
+        self.work_proxy_var = tk.BooleanVar(value=self.is_work_proxy())
+        wp_chk = tk.Checkbutton(
+            flags_frame, text=f" {t('lbl_work_proxy')}", variable=self.work_proxy_var,
+            font=("Segoe UI", 9, "bold"), fg=C["teal"], bg=bg,
+            selectcolor=C["card"], activebackground=bg, activeforeground=C["teal"],
+            command=self._on_work_proxy_toggled,
+        )
+        wp_chk.pack(side=tk.LEFT, padx=(0, 12))
 
         # 4. Upstream Protocol & Server Configuration
         proto_frame = tk.Frame(self.frame, bg=bg)
@@ -1137,7 +1316,9 @@ class ProxyInstance:
                 srv = server_from_mapping(self.cfg)
             name_part = f"[{srv.remark}] " if srv.remark else ""
             ip_part = f" • IP: {','.join(srv.local_address)}" if srv.local_address else ""
-            return f"{name_part}{srv.address}:{srv.port} (WireGuard{ip_part})"
+            al_count = len(srv.allowed_ips) if getattr(srv, "allowed_ips", None) else 0
+            al_part = f" • Allowed: {al_count} subnets" if al_count else ""
+            return f"{name_part}{srv.address}:{srv.port} (WireGuard{ip_part}{al_part})"
         except Exception:
             return url
 
@@ -1356,7 +1537,7 @@ class ProxyInstance:
 
     def open_wireguard_dialog(self):
         """Open WireGuard configuration editor and .conf importer dialog."""
-        from vless2socks.url import parse_wireguard_url, WireGuardServer, server_from_mapping
+        from vless2socks.url import parse_wireguard_url, parse_wireguard_conf, WireGuardServer, server_from_mapping
         import tkinter.filedialog as fd
 
         url = self.cfg.get("url", "").strip()
@@ -1366,6 +1547,9 @@ class ProxyInstance:
         init_priv = ""
         init_peer_pub = ""
         init_local_ip = "10.0.0.2/32"
+        init_allowed_ips = ""
+        init_keepalive = ""
+        init_dns = ""
         init_psk = ""
         init_mtu = "1420"
 
@@ -1378,6 +1562,25 @@ class ProxyInstance:
                 init_priv = srv.secret_key
                 init_peer_pub = srv.peer_public_key
                 init_local_ip = ",".join(srv.local_address) if srv.local_address else "10.0.0.2/32"
+                init_allowed_ips = ",".join(srv.allowed_ips) if srv.allowed_ips else ""
+                init_keepalive = str(srv.keep_alive) if srv.keep_alive else ""
+                init_dns = ",".join(srv.dns) if srv.dns else ""
+                init_psk = srv.preshared_key
+                init_mtu = str(srv.mtu or 1420)
+            except Exception:
+                pass
+        elif "[interface]" in url.lower():
+            try:
+                srv = parse_wireguard_conf(url)
+                init_name = srv.remark or init_name
+                init_addr = srv.address
+                init_port = str(srv.port or 51820)
+                init_priv = srv.secret_key
+                init_peer_pub = srv.peer_public_key
+                init_local_ip = ",".join(srv.local_address) if srv.local_address else "10.0.0.2/32"
+                init_allowed_ips = ",".join(srv.allowed_ips) if srv.allowed_ips else ""
+                init_keepalive = str(srv.keep_alive) if srv.keep_alive else ""
+                init_dns = ",".join(srv.dns) if srv.dns else ""
                 init_psk = srv.preshared_key
                 init_mtu = str(srv.mtu or 1420)
             except Exception:
@@ -1392,6 +1595,9 @@ class ProxyInstance:
                     init_priv = srv.secret_key
                     init_peer_pub = srv.peer_public_key
                     init_local_ip = ",".join(srv.local_address) if srv.local_address else "10.0.0.2/32"
+                    init_allowed_ips = ",".join(srv.allowed_ips) if getattr(srv, "allowed_ips", None) else ""
+                    init_keepalive = str(srv.keep_alive) if getattr(srv, "keep_alive", None) else ""
+                    init_dns = ",".join(srv.dns) if getattr(srv, "dns", None) else ""
                     init_psk = srv.preshared_key
                     init_mtu = str(srv.mtu or 1420)
             except Exception:
@@ -1399,15 +1605,15 @@ class ProxyInstance:
 
         dlg = tk.Toplevel(self.app)
         dlg.title(t("dlg_wireguard_title"))
-        dlg.geometry("460x520")
+        dlg.geometry("520x680")
         dlg.resizable(False, False)
         dlg.configure(bg=C["bg"])
         dlg.transient(self.app)
         dlg.grab_set()
 
         try:
-            x = self.app.winfo_x() + (self.app.winfo_width() - 460) // 2
-            y = self.app.winfo_y() + (self.app.winfo_height() - 520) // 2
+            x = self.app.winfo_x() + (self.app.winfo_width() - 520) // 2
+            y = self.app.winfo_y() + (self.app.winfo_height() - 680) // 2
             dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
         except Exception:
             pass
@@ -1420,29 +1626,38 @@ class ProxyInstance:
         grp_iface.pack(fill=tk.X, padx=14, pady=(10, 4))
 
         tk.Label(grp_iface, text=t("lbl_private_key"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
-            row=0, column=0, sticky="w", padx=(10, 8), pady=(8, 3)
+            row=0, column=0, sticky="w", padx=(10, 8), pady=(6, 2)
         )
         priv_ent = tk.Entry(grp_iface, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
-                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=32)
-        priv_ent.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=(8, 3))
+                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=34)
+        priv_ent.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=(6, 2))
         priv_ent.insert(0, init_priv)
         attach_clipboard_and_context_menu(priv_ent)
 
         tk.Label(grp_iface, text=t("lbl_local_ip"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
-            row=1, column=0, sticky="w", padx=(10, 8), pady=3
+            row=1, column=0, sticky="w", padx=(10, 8), pady=2
         )
         lip_ent = tk.Entry(grp_iface, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
-                           insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=32)
-        lip_ent.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=3)
+                           insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=34)
+        lip_ent.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=2)
         lip_ent.insert(0, init_local_ip)
         attach_clipboard_and_context_menu(lip_ent)
 
+        tk.Label(grp_iface, text=t("lbl_dns"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
+            row=2, column=0, sticky="w", padx=(10, 8), pady=2
+        )
+        dns_ent = tk.Entry(grp_iface, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
+                           insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=34)
+        dns_ent.grid(row=2, column=1, sticky="ew", padx=(0, 10), pady=2)
+        dns_ent.insert(0, init_dns)
+        attach_clipboard_and_context_menu(dns_ent)
+
         tk.Label(grp_iface, text=t("lbl_mtu"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
-            row=2, column=0, sticky="w", padx=(10, 8), pady=(3, 8)
+            row=3, column=0, sticky="w", padx=(10, 8), pady=(2, 6)
         )
         mtu_ent = tk.Entry(grp_iface, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
-                           insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=32)
-        mtu_ent.grid(row=2, column=1, sticky="ew", padx=(0, 10), pady=(3, 8))
+                           insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=34)
+        mtu_ent.grid(row=3, column=1, sticky="ew", padx=(0, 10), pady=(2, 6))
         mtu_ent.insert(0, init_mtu)
         attach_clipboard_and_context_menu(mtu_ent)
 
@@ -1454,51 +1669,137 @@ class ProxyInstance:
         grp_peer.pack(fill=tk.X, padx=14, pady=4)
 
         tk.Label(grp_peer, text=t("lbl_peer_public_key"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
-            row=0, column=0, sticky="w", padx=(10, 8), pady=(8, 3)
+            row=0, column=0, sticky="w", padx=(10, 8), pady=(6, 2)
         )
         pub_ent = tk.Entry(grp_peer, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
-                           insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=32)
-        pub_ent.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=(8, 3))
+                           insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=34)
+        pub_ent.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=(6, 2))
         pub_ent.insert(0, init_peer_pub)
         attach_clipboard_and_context_menu(pub_ent)
 
         tk.Label(grp_peer, text=t("lbl_endpoint_address"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
-            row=1, column=0, sticky="w", padx=(10, 8), pady=3
+            row=1, column=0, sticky="w", padx=(10, 8), pady=2
         )
         addr_ent = tk.Entry(grp_peer, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
-                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=32)
-        addr_ent.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=3)
+                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=34)
+        addr_ent.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=2)
         addr_ent.insert(0, init_addr)
         attach_clipboard_and_context_menu(addr_ent)
 
         tk.Label(grp_peer, text=t("lbl_endpoint_port"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
-            row=2, column=0, sticky="w", padx=(10, 8), pady=3
+            row=2, column=0, sticky="w", padx=(10, 8), pady=2
         )
         port_ent = tk.Entry(grp_peer, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
-                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=32)
-        port_ent.grid(row=2, column=1, sticky="ew", padx=(0, 10), pady=3)
+                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=34)
+        port_ent.grid(row=2, column=1, sticky="ew", padx=(0, 10), pady=2)
         port_ent.insert(0, init_port)
         attach_clipboard_and_context_menu(port_ent)
 
         tk.Label(grp_peer, text=t("lbl_preshared_key"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
-            row=3, column=0, sticky="w", padx=(10, 8), pady=(3, 8)
+            row=3, column=0, sticky="w", padx=(10, 8), pady=2
         )
         psk_ent = tk.Entry(grp_peer, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
-                           insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=32)
-        psk_ent.grid(row=3, column=1, sticky="ew", padx=(0, 10), pady=(3, 8))
+                           insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=34)
+        psk_ent.grid(row=3, column=1, sticky="ew", padx=(0, 10), pady=2)
         psk_ent.insert(0, init_psk)
         attach_clipboard_and_context_menu(psk_ent)
 
-        # ── Group: Common & Import ────────────────────────────────────
+        tk.Label(grp_peer, text=t("lbl_allowed_ips"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
+            row=4, column=0, sticky="w", padx=(10, 8), pady=2
+        )
+        allowed_ent = tk.Entry(grp_peer, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
+                               insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=34)
+        allowed_ent.grid(row=4, column=1, sticky="ew", padx=(0, 10), pady=2)
+        allowed_ent.insert(0, init_allowed_ips)
+        attach_clipboard_and_context_menu(allowed_ent)
+
+        tk.Label(grp_peer, text=t("lbl_persistent_keepalive"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).grid(
+            row=5, column=0, sticky="w", padx=(10, 8), pady=(2, 6)
+        )
+        keepalive_ent = tk.Entry(grp_peer, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
+                                 insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=34)
+        keepalive_ent.grid(row=5, column=1, sticky="ew", padx=(0, 10), pady=(2, 6))
+        keepalive_ent.insert(0, init_keepalive)
+        attach_clipboard_and_context_menu(keepalive_ent)
+
+        # ── Group: Common & Actions ────────────────────────────────────
         grp_cmn = tk.Frame(dlg, bg=C["bg"])
-        grp_cmn.pack(fill=tk.X, padx=14, pady=4)
+        grp_cmn.pack(fill=tk.X, padx=14, pady=(6, 2))
 
         tk.Label(grp_cmn, text=t("lbl_name"), font=("Segoe UI", 9), fg=C["subtext"], bg=C["bg"]).pack(side=tk.LEFT, padx=(4, 6))
         name_ent = tk.Entry(grp_cmn, font=("Consolas", 9), bg=C["overlay"], fg=C["text"],
-                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=20)
+                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=16)
         name_ent.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
         name_ent.insert(0, init_name)
         attach_clipboard_and_context_menu(name_ent)
+
+        def populate_from_srv(s: WireGuardServer):
+            if s.secret_key:
+                priv_ent.delete(0, tk.END)
+                priv_ent.insert(0, s.secret_key)
+            if s.local_address:
+                lip_ent.delete(0, tk.END)
+                lip_ent.insert(0, ",".join(s.local_address))
+            if getattr(s, "dns", None):
+                dns_ent.delete(0, tk.END)
+                dns_ent.insert(0, ",".join(s.dns))
+            if s.mtu:
+                mtu_ent.delete(0, tk.END)
+                mtu_ent.insert(0, str(s.mtu))
+            if s.peer_public_key:
+                pub_ent.delete(0, tk.END)
+                pub_ent.insert(0, s.peer_public_key)
+            if s.address:
+                addr_ent.delete(0, tk.END)
+                addr_ent.insert(0, s.address)
+            if s.port:
+                port_ent.delete(0, tk.END)
+                port_ent.insert(0, str(s.port))
+            if s.preshared_key:
+                psk_ent.delete(0, tk.END)
+                psk_ent.insert(0, s.preshared_key)
+            if getattr(s, "allowed_ips", None):
+                allowed_ent.delete(0, tk.END)
+                allowed_ent.insert(0, ",".join(s.allowed_ips))
+            if getattr(s, "keep_alive", None):
+                keepalive_ent.delete(0, tk.END)
+                keepalive_ent.insert(0, str(s.keep_alive))
+            if s.remark and not name_ent.get().strip():
+                name_ent.delete(0, tk.END)
+                name_ent.insert(0, s.remark)
+
+        def build_current_srv() -> WireGuardServer:
+            addr = addr_ent.get().strip()
+            p_val = port_ent.get().strip()
+            priv = priv_ent.get().strip()
+            pub = pub_ent.get().strip()
+            lip = lip_ent.get().strip()
+            psk = psk_ent.get().strip()
+            mtu_val = mtu_ent.get().strip()
+            keep_val = keepalive_ent.get().strip()
+            dns_val = dns_ent.get().strip()
+            name_val = name_ent.get().strip()
+
+            p_int = int(p_val) if p_val.isdigit() else 51820
+            mtu_int = int(mtu_val) if mtu_val.isdigit() else 1420
+            keep_int = int(keep_val) if keep_val.isdigit() else 0
+            addrs = [a.strip() for a in lip.split(",") if a.strip()] or ["10.0.0.2/32"]
+            allowed_list = [a.strip() for a in allowed_ent.get().strip().split(",") if a.strip()]
+            dns_list = [d.strip() for d in dns_val.split(",") if d.strip()]
+
+            return WireGuardServer(
+                address=addr,
+                port=p_int,
+                secret_key=priv,
+                peer_public_key=pub,
+                local_address=addrs,
+                allowed_ips=allowed_list,
+                preshared_key=psk,
+                mtu=mtu_int,
+                keep_alive=keep_int,
+                dns=dns_list,
+                remark=name_val,
+            )
 
         def import_conf():
             file_path = fd.askopenfilename(
@@ -1509,47 +1810,70 @@ class ProxyInstance:
             if not file_path:
                 return
             try:
-                content = Path(file_path).read_text(encoding="utf-8", errors="ignore")
-                # Parse ini style
-                import configparser
-                cp = configparser.ConfigParser(strict=False)
-                cp.read_string(content)
-                if "Interface" in cp:
-                    if "PrivateKey" in cp["Interface"]:
-                        priv_ent.delete(0, tk.END)
-                        priv_ent.insert(0, cp["Interface"]["PrivateKey"].strip())
-                    if "Address" in cp["Interface"]:
-                        lip_ent.delete(0, tk.END)
-                        lip_ent.insert(0, cp["Interface"]["Address"].strip())
-                    if "MTU" in cp["Interface"]:
-                        mtu_ent.delete(0, tk.END)
-                        mtu_ent.insert(0, cp["Interface"]["MTU"].strip())
-                if "Peer" in cp:
-                    if "PublicKey" in cp["Peer"]:
-                        pub_ent.delete(0, tk.END)
-                        pub_ent.insert(0, cp["Peer"]["PublicKey"].strip())
-                    if "Endpoint" in cp["Peer"]:
-                        ep = cp["Peer"]["Endpoint"].strip()
-                        if ":" in ep:
-                            h, _, p = ep.rpartition(":")
-                            addr_ent.delete(0, tk.END)
-                            addr_ent.insert(0, h.strip("[]"))
-                            port_ent.delete(0, tk.END)
-                            port_ent.insert(0, p)
-                    if "PresharedKey" in cp["Peer"]:
-                        psk_ent.delete(0, tk.END)
-                        psk_ent.insert(0, cp["Peer"]["PresharedKey"].strip())
+                s = parse_wireguard_conf(file_path, strict=False)
+                populate_from_srv(s)
                 if not name_ent.get().strip():
                     name_ent.insert(0, Path(file_path).stem)
             except Exception as e:
                 messagebox.showerror("WireGuard", f"{t('msg_invalid_conf')}:\n{e}", parent=dlg)
 
+        def paste_conf():
+            try:
+                raw_text = dlg.clipboard_get().strip()
+            except Exception:
+                messagebox.showwarning("WireGuard", "Буфер обмена пуст или недоступен", parent=dlg)
+                return
+            if not raw_text:
+                return
+            try:
+                if "[interface]" in raw_text.lower():
+                    s = parse_wireguard_conf(raw_text, strict=False)
+                elif raw_text.startswith(("wireguard://", "wg://")):
+                    s = parse_wireguard_url(raw_text, strict=False)
+                else:
+                    p = Path(raw_text.strip('"').strip("'"))
+                    if p.exists() and p.is_file():
+                        s = parse_wireguard_conf(p, strict=False)
+                    else:
+                        s = parse_wireguard_conf(raw_text, strict=False)
+                populate_from_srv(s)
+            except Exception as e:
+                messagebox.showerror("WireGuard", f"Не удалось разобрать конфигурацию:\n{e}", parent=dlg)
+
+        def export_conf():
+            try:
+                s = build_current_srv()
+                conf_text = s.to_conf()
+                dlg.clipboard_clear()
+                dlg.clipboard_append(conf_text)
+                messagebox.showinfo("WireGuard", "Конфигурация в формате WireGuard .conf скопирована в буфер обмена!", parent=dlg)
+            except Exception as e:
+                messagebox.showerror("WireGuard", f"Ошибка экспорта:\n{e}", parent=dlg)
+
+        # ── Toolbar: Import / Paste / Export ───────────────────────────
+        toolbar = tk.Frame(dlg, bg=C["bg"])
+        toolbar.pack(fill=tk.X, padx=14, pady=(4, 6))
+
         imp_btn = tk.Button(
-            grp_cmn, text=t("btn_import_conf"), font=("Segoe UI", 9),
+            toolbar, text=t("btn_import_conf"), font=("Segoe UI", 9),
             bg=C["card"], fg=C["text"], activebackground=C["hover"],
-            relief=tk.GROOVE, bd=1, padx=8, pady=2, command=import_conf,
+            relief=tk.GROOVE, bd=1, padx=8, pady=3, command=import_conf,
         )
-        imp_btn.pack(side=tk.RIGHT)
+        imp_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        paste_btn = tk.Button(
+            toolbar, text=t("btn_paste_conf"), font=("Segoe UI", 9),
+            bg=C["card"], fg=C["text"], activebackground=C["hover"],
+            relief=tk.GROOVE, bd=1, padx=8, pady=3, command=paste_conf,
+        )
+        paste_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        exp_btn = tk.Button(
+            toolbar, text=t("btn_export_conf"), font=("Segoe UI", 9),
+            bg=C["card"], fg=C["subtext"], activebackground=C["hover"],
+            relief=tk.GROOVE, bd=1, padx=8, pady=3, command=export_conf,
+        )
+        exp_btn.pack(side=tk.LEFT)
 
         # ── Buttons: OK & Cancel ──────────────────────────────────────
         btn_bar = tk.Frame(dlg, bg=C["bg"])
@@ -1563,6 +1887,8 @@ class ProxyInstance:
             lip = lip_ent.get().strip()
             psk = psk_ent.get().strip()
             mtu_val = mtu_ent.get().strip()
+            keep_val = keepalive_ent.get().strip()
+            dns_val = dns_ent.get().strip()
             name_val = name_ent.get().strip()
 
             if not priv:
@@ -1588,7 +1914,10 @@ class ProxyInstance:
                 return
 
             mtu_int = int(mtu_val) if mtu_val.isdigit() else 1420
+            keep_int = int(keep_val) if keep_val.isdigit() else 0
             addrs = [a.strip() for a in lip.split(",") if a.strip()] or ["10.0.0.2/32"]
+            allowed_list = [a.strip() for a in allowed_ent.get().strip().split(",") if a.strip()]
+            dns_list = [d.strip() for d in dns_val.split(",") if d.strip()]
 
             srv = WireGuardServer(
                 address=addr,
@@ -1596,8 +1925,11 @@ class ProxyInstance:
                 secret_key=priv,
                 peer_public_key=pub,
                 local_address=addrs,
+                allowed_ips=allowed_list,
                 preshared_key=psk,
                 mtu=mtu_int,
+                keep_alive=keep_int,
+                dns=dns_list,
                 remark=name_val,
             )
             wg_url = srv.to_url()
@@ -1895,10 +2227,41 @@ class ProxyInstance:
         self.app.refresh_overview()
         self.app._update_header_stats()
 
+    def restart(self):
+        """Cleanly restart this proxy instance."""
+        url = self.cfg.get("url", "").strip()
+        if not url:
+            try:
+                if self.url_entry and self.url_entry.winfo_exists():
+                    url = self.url_entry.get().strip()
+            except Exception:
+                pass
+        if not url:
+            return
+        if self.running or (self.process and self.process.poll() is None):
+            self.stop()
+            time.sleep(0.3)
+        self.start()
+
     def apply(self):
         val = self.proto_var.get() if self.proto_var else "vless"
         if val == "vless" and self.url_entry:
-            self.cfg["url"] = self.url_entry.get().strip()
+            raw_url = self.url_entry.get().strip()
+            if "[interface]" in raw_url.lower() or raw_url.startswith(("wireguard://", "wg://")) or (raw_url.lower().endswith(".conf") and "\n" not in raw_url):
+                try:
+                    from vless2socks.url import parse_proxy_url, WireGuardServer
+                    srv = parse_proxy_url(raw_url)
+                    if isinstance(srv, WireGuardServer):
+                        self.cfg["url"] = srv.to_url()
+                        if self.proto_var:
+                            self.proto_var.set("wireguard")
+                        self._on_proto_changed()
+                    else:
+                        self.cfg["url"] = raw_url
+                except Exception:
+                    self.cfg["url"] = raw_url
+            else:
+                self.cfg["url"] = raw_url
         if self.host_entry and self.port_entry:
             h = self.host_entry.get().strip() or "127.0.0.1"
             p = self.port_entry.get().strip() or "1081"
@@ -2047,6 +2410,12 @@ class ProxyInstance:
                     self.app._update_header_stats()
 
     def _set_state(self, state: str):
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                self.app.after(0, lambda s=state: self._set_state(s))
+            except Exception:
+                pass
+            return
         h, port = self.get_listen()
         http_port = self.get_http_port()
         states = {
@@ -2056,12 +2425,15 @@ class ProxyInstance:
             "error":    (C["red"],    t("status_error"), t("btn_on"),  C["green"]),
         }
         dot_color, label_text, btn_text, btn_color = states.get(state, states["stopped"])
-        if self.status_dot:
-            self.status_dot.config(fg=dot_color)
-        if self.status_label:
-            self.status_label.config(text=label_text)
-        if self.toggle_btn:
-            self.toggle_btn.config(text=btn_text, bg=btn_color)
+        try:
+            if self.status_dot and self.status_dot.winfo_exists():
+                self.status_dot.config(fg=dot_color)
+            if self.status_label and self.status_label.winfo_exists():
+                self.status_label.config(text=label_text)
+            if self.toggle_btn and self.toggle_btn.winfo_exists():
+                self.toggle_btn.config(text=btn_text, bg=btn_color)
+        except Exception:
+            pass
 
     def _update_status_ui(self):
         if self.running and self.healthy:
@@ -2103,6 +2475,32 @@ class ProxyInstance:
             cfg["listen"] = f"{h}:{p}"
         if self.killswitch_var is not None:
             cfg["killswitch"] = bool(self.killswitch_var.get())
+        if self.system_proxy_var is not None:
+            sp_val = bool(self.system_proxy_var.get())
+            cfg["system_proxy"] = sp_val
+            cfg["System_Proxy"] = sp_val
+        elif "system_proxy" in self.cfg or "System_Proxy" in self.cfg:
+            sp_val = bool(self.cfg.get("system_proxy", self.cfg.get("System_Proxy", False)))
+            cfg["system_proxy"] = sp_val
+            cfg["System_Proxy"] = sp_val
+        else:
+            sp_val = self.is_system_proxy()
+            cfg["system_proxy"] = sp_val
+            cfg["System_Proxy"] = sp_val
+
+        if self.work_proxy_var is not None:
+            wp_val = bool(self.work_proxy_var.get())
+            cfg["work_proxy"] = wp_val
+            cfg["Work_Proxy"] = wp_val
+        elif "work_proxy" in self.cfg or "Work_Proxy" in self.cfg:
+            wp_val = bool(self.cfg.get("work_proxy", self.cfg.get("Work_Proxy", False)))
+            cfg["work_proxy"] = wp_val
+            cfg["Work_Proxy"] = wp_val
+        else:
+            wp_val = self.is_work_proxy()
+            cfg["work_proxy"] = wp_val
+            cfg["Work_Proxy"] = wp_val
+
         if "name" in self.cfg:
             cfg["name"] = self.cfg["name"]
         if "order" in self.cfg:
@@ -2110,6 +2508,302 @@ class ProxyInstance:
         if "sendThrough" in self.cfg:
             cfg["sendThrough"] = self.cfg["sendThrough"]
         return cfg
+
+
+# ── Custom Styled Orange Checkbox ──────────────────────────────
+class OrangeCheckbox(tk.Canvas):
+    """Custom high-contrast checkbox widget with a bright orange checkmark."""
+
+    def __init__(
+        self,
+        parent,
+        variable: tk.BooleanVar,
+        command=None,
+        bg: str = "#252538",
+        orange_color: str = "#ff7700",
+        size: int = 18,
+    ):
+        super().__init__(
+            parent,
+            width=size,
+            height=size,
+            bg=bg,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self.variable = variable
+        self.command = command
+        self.orange_color = orange_color
+        self.bg_color = bg
+        self.size = size
+        self.bind("<Button-1>", self._toggle)
+        self.bind("<KeyPress-space>", self._toggle)
+        self.bind("<Return>", self._toggle)
+        self._trace_id = None
+        if hasattr(self.variable, "trace_add"):
+            try:
+                self._trace_id = self.variable.trace_add("write", lambda *_: self.redraw())
+            except Exception:
+                pass
+        self.redraw()
+
+    def _toggle(self, event=None):
+        try:
+            val = bool(self.variable.get())
+        except Exception:
+            val = False
+        self.variable.set(not val)
+        if self.command:
+            self.command()
+
+    def redraw(self):
+        if not self.winfo_exists():
+            return
+        self.delete("all")
+        try:
+            checked = bool(self.variable.get())
+        except Exception:
+            checked = False
+        s = self.size
+        # Outer box
+        box_outline = self.orange_color if checked else "#55556a"
+        inner_bg = "#181825"
+        self.create_rectangle(1, 1, s - 2, s - 2, outline=box_outline, fill=inner_bg, width=1.5)
+        if checked:
+            # Bright orange checkmark
+            self.create_line(
+                int(s * 0.22), int(s * 0.50),
+                int(s * 0.40), int(s * 0.72),
+                int(s * 0.74), int(s * 0.28),
+                fill=self.orange_color,
+                width=2.5,
+                capstyle=tk.ROUND,
+                joinstyle=tk.ROUND,
+            )
+
+    def destroy(self):
+        try:
+            if hasattr(self, "_trace_id") and self._trace_id and hasattr(self.variable, "trace_remove"):
+                self.variable.trace_remove("write", self._trace_id)
+        except Exception:
+            pass
+        super().destroy()
+
+
+# ── RestartServices Floating HUD / Log Window ─────────────────
+class RestartHUDWindow(tk.Toplevel):
+    """Semi-transparent floating log monitor for RestartServices in bottom-right corner.
+    Auto-closes after 20s unless pinned via the pin button (📌). Can also be closed by (✕).
+    """
+    AUTO_CLOSE_SEC: int = 20
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.app = parent
+        self.attributes("-topmost", True)
+        self.attributes("-alpha", 0.92)
+        self.overrideredirect(True)
+        self.configure(bg=C["border"])
+
+        self.is_pinned: bool = False
+        self.in_progress: bool = True
+        self.countdown_sec: int = self.AUTO_CLOSE_SEC
+        self._timer_id: Optional[str] = None
+        self._drag_start_x: int = 0
+        self._drag_start_y: int = 0
+
+        # Geometry & position in bottom-right corner of primary screen
+        target_w = 420
+        target_h = 220
+        try:
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x = max(10, sw - target_w - 20)
+            y = max(10, sh - target_h - 60)
+        except Exception:
+            x, y = 800, 500
+        self.geometry(f"{target_w}x{target_h}+{x}+{y}")
+
+        # Container with 1px accent border
+        border_frame = tk.Frame(self, bg=C["blue"], padx=1, pady=1)
+        border_frame.pack(fill=tk.BOTH, expand=True)
+
+        main_box = tk.Frame(border_frame, bg=C["card"])
+        main_box.pack(fill=tk.BOTH, expand=True)
+
+        # 1. Header (Draggable)
+        self.header = tk.Frame(main_box, bg=C["surface"], height=32, padx=8, pady=4)
+        self.header.pack(fill=tk.X)
+        self.header.bind("<Button-1>", self._start_drag)
+        self.header.bind("<B1-Motion>", self._do_drag)
+
+        # Title
+        self.title_lbl = tk.Label(
+            self.header,
+            text=f"🔄  {t('restart_hud_title')}",
+            font=("Segoe UI", 9, "bold"),
+            fg=C["text"],
+            bg=C["surface"],
+        )
+        self.title_lbl.pack(side=tk.LEFT)
+        self.title_lbl.bind("<Button-1>", self._start_drag)
+        self.title_lbl.bind("<B1-Motion>", self._do_drag)
+
+        # Right buttons: Close (✕), Pin (📌), Status Badge
+        self.close_btn = tk.Button(
+            self.header,
+            text="✕",
+            font=("Segoe UI", 9, "bold"),
+            fg=C["subtext"],
+            bg=C["surface"],
+            activeforeground=C["red"],
+            activebackground=C["overlay"],
+            relief=tk.FLAT,
+            bd=0,
+            padx=6,
+            cursor="hand2",
+            command=self.close,
+        )
+        self.close_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+        self.pin_btn = tk.Button(
+            self.header,
+            text="📌",
+            font=("Segoe UI", 9),
+            fg=C["subtext"],
+            bg=C["surface"],
+            activeforeground=C["orange"],
+            activebackground=C["overlay"],
+            relief=tk.FLAT,
+            bd=0,
+            padx=4,
+            cursor="hand2",
+            command=self.toggle_pin,
+        )
+        self.pin_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+        self.status_badge = tk.Label(
+            self.header,
+            text="🔄 ...",
+            font=("Segoe UI", 8),
+            fg=C["yellow"],
+            bg=C["surface"],
+        )
+        self.status_badge.pack(side=tk.RIGHT, padx=(0, 4))
+
+        # 2. Log Text Area
+        log_frame = tk.Frame(main_box, bg=C["log_bg"], padx=4, pady=4)
+        log_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.log_text = tk.Text(
+            log_frame,
+            font=("Consolas", 8),
+            bg=C["log_bg"],
+            fg=C["log_fg"],
+            relief=tk.FLAT,
+            bd=0,
+            wrap=tk.WORD,
+            state=tk.DISABLED,
+        )
+        self.log_scrollbar = tk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=self.log_scrollbar.set)
+        self.log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.log_text.tag_config("SUCCESS", foreground=C["green"])
+        self.log_text.tag_config("INFO", foreground=C["blue"])
+        self.log_text.tag_config("WARN", foreground=C["yellow"])
+        self.log_text.tag_config("ERROR", foreground=C["red"])
+        self.log_text.tag_config("TIME", foreground=C["muted"])
+
+        # Start countdown ticker
+        self._schedule_tick()
+
+    def _start_drag(self, event):
+        self._drag_start_x = event.x
+        self._drag_start_y = event.y
+
+    def _do_drag(self, event):
+        x = self.winfo_x() + (event.x - self._drag_start_x)
+        y = self.winfo_y() + (event.y - self._drag_start_y)
+        self.geometry(f"+{x}+{y}")
+
+    def toggle_pin(self):
+        self.is_pinned = not self.is_pinned
+        if self.is_pinned:
+            self.pin_btn.config(fg=C["orange"], bg=C["overlay"])
+            self.status_badge.config(text=f"📌 {t('restart_hud_pinned')}", fg=C["orange"])
+        else:
+            self.pin_btn.config(fg=C["subtext"], bg=C["surface"])
+            self.countdown_sec = self.AUTO_CLOSE_SEC
+            if not self.in_progress:
+                self.status_badge.config(text=f"⏱ {self.AUTO_CLOSE_SEC}s", fg=C["muted"])
+
+    def log(self, msg: str):
+        if not self.winfo_exists():
+            return
+        ts = time.strftime("%H:%M:%S")
+
+        tag = "INFO"
+        if "✅" in msg or "✓" in msg or "Finished" in msg or "successfully" in msg:
+            tag = "SUCCESS"
+        elif "⚠️" in msg or "Warn" in msg:
+            tag = "WARN"
+        elif "❌" in msg or "Error" in msg or "failed" in msg:
+            tag = "ERROR"
+
+        def _append():
+            try:
+                if not self.winfo_exists():
+                    return
+                self.log_text.config(state=tk.NORMAL)
+                self.log_text.insert(tk.END, f"[{ts}] ", "TIME")
+                self.log_text.insert(tk.END, f"{msg}\n", tag)
+                self.log_text.see(tk.END)
+                self.log_text.config(state=tk.DISABLED)
+            except Exception:
+                pass
+
+        if self.winfo_exists():
+            self.after(0, _append)
+
+    def set_finished(self, summary: str = ""):
+        self.in_progress = False
+        self.countdown_sec = self.AUTO_CLOSE_SEC
+        try:
+            if self.winfo_exists() and not self.is_pinned:
+                self.status_badge.config(text=f"⏱ {self.AUTO_CLOSE_SEC}s", fg=C["muted"])
+        except Exception:
+            pass
+
+    def _schedule_tick(self):
+        if not self.winfo_exists():
+            return
+        if not self.is_pinned and not self.in_progress:
+            self.countdown_sec -= 1
+            if self.countdown_sec <= 0:
+                self.close()
+                return
+            try:
+                self.status_badge.config(text=f"⏱ {self.countdown_sec}s", fg=C["muted"])
+            except Exception:
+                pass
+        self._timer_id = self.after(1000, self._schedule_tick)
+
+    def close(self):
+        if self._timer_id:
+            try:
+                self.after_cancel(self._timer_id)
+            except Exception:
+                pass
+            self._timer_id = None
+        if hasattr(self.app, "restart_hud_win") and self.app.restart_hud_win == self:
+            self.app.restart_hud_win = None
+        try:
+            if self.winfo_exists():
+                self.destroy()
+        except Exception:
+            pass
 
 
 # ── Main Application Window ───────────────────────────────────
@@ -2130,8 +2824,20 @@ class VlessApp(tk.Tk):
         self._tray_thread: Optional[threading.Thread] = None
         self._hidden = False
 
-        # Protocol
+        # RestartServices State & Checkbox Preferences
+        self._restart_menu_open = False
+        self.restart_menu_win: Optional[tk.Toplevel] = None
+        self.restart_hud_win: Optional[RestartHUDWindow] = None
+        self.btn_restart_services: Optional[tk.Button] = None
+        self.btn_restart_arrow: Optional[tk.Button] = None
+        self.restart_wsl_var = tk.BooleanVar(value=bool(settings_manager.get_setting("restart_wsl", True)))
+        self.restart_work_proxy_var = tk.BooleanVar(value=bool(settings_manager.get_setting("restart_work_proxy", True)))
+        self.restart_system_proxy_var = tk.BooleanVar(value=bool(settings_manager.get_setting("restart_system_proxy", True)))
+
+        # Protocols & Window State Handlers
         self.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
+        self.bind("<Unmap>", self._on_main_unmap, add="+")
+        self.bind("<Deactivate>", self._on_main_deactivate, add="+")
 
         self._load_saved_data()
         self._build_main_ui()
@@ -2159,7 +2865,7 @@ class VlessApp(tk.Tk):
             self.instances = [ProxyInstance(self, base, 0)]
 
     def _build_main_ui(self):
-        # 1. Top Header Bar
+        # 1. Top Header Bar (active and visible across all pages)
         self.top_bar = tk.Frame(self, bg=C["surface"], height=46)
         self.top_bar.pack(fill=tk.X)
 
@@ -2174,13 +2880,39 @@ class VlessApp(tk.Tk):
         )
         self.count_label.pack(side=tk.LEFT, padx=4)
 
-        # Quick Add Button in header
+        # Quick Add Button in header (far right)
         add_btn = tk.Button(
             self.top_bar, text=t("btn_new_tab"), font=("Segoe UI", 9, "bold"),
             bg=C["green"], fg="#1e1e2e", activebackground=C["teal"],
             relief=tk.FLAT, padx=12, pady=3, command=self.add_new_instance,
         )
-        add_btn.pack(side=tk.RIGHT, padx=10, pady=8)
+        add_btn.pack(side=tk.RIGHT, padx=(4, 10), pady=8)
+
+        # RestartServices Split-Button Container (directly adjacent to Add Button)
+        self.restart_container = tk.Frame(self.top_bar, bg=C["surface"])
+        self.restart_container.pack(side=tk.RIGHT, padx=(0, 6), pady=8)
+
+        # 1. Main Action Button: [ 🔄 RestartServices ]
+        self.btn_restart_services = tk.Button(
+            self.restart_container,
+            text=f"🔄 {t('btn_restart_services')}",
+            font=("Segoe UI", 9, "bold"),
+            bg=C["blue"], fg="#1e1e2e", activebackground=C["teal"],
+            relief=tk.FLAT, padx=10, pady=3, cursor="hand2",
+            command=self.execute_restart_services,
+        )
+        self.btn_restart_services.pack(side=tk.LEFT)
+
+        # 2. Adjacent Arrow Button: [ ▼ ] with slide-down menu
+        self.btn_restart_arrow = tk.Button(
+            self.restart_container,
+            text="▼",
+            font=("Segoe UI", 8, "bold"),
+            bg=C["overlay"], fg=C["text"], activebackground=C["hover"], activeforeground=C["blue"],
+            relief=tk.FLAT, padx=6, pady=4, cursor="hand2",
+            command=self.toggle_restart_services_menu,
+        )
+        self.btn_restart_arrow.pack(side=tk.LEFT, padx=(1, 0))
 
         # 2. Main Navigation Notebook
         style = ttk.Style()
@@ -2289,8 +3021,27 @@ class VlessApp(tk.Tk):
 
     def refresh_overview(self):
         """Redraw all proxy cards in the overview content frame."""
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                self.after(0, self.refresh_overview)
+            except Exception:
+                pass
+            return
+
+        if not hasattr(self, "overview_content") or not self.overview_content:
+            return
+        try:
+            if not self.overview_content.winfo_exists():
+                return
+        except Exception:
+            return
+
         for widget in self.overview_content.winfo_children():
-            widget.destroy()
+            try:
+                if widget.winfo_exists():
+                    widget.destroy()
+            except Exception:
+                pass
 
         if not self.instances:
             tk.Label(
@@ -2350,6 +3101,18 @@ class VlessApp(tk.Tk):
                 tk.Label(
                     title_row, text=" 🛡️ KS ", font=("Segoe UI", 7, "bold"),
                     bg=C["hover"], fg=C["green"], padx=4, pady=1
+                ).pack(side=tk.LEFT, padx=(6, 0))
+
+            if inst.is_system_proxy():
+                tk.Label(
+                    title_row, text=f" {t('badge_system_proxy')} ", font=("Segoe UI", 7, "bold"),
+                    bg=C["hover"], fg=C["yellow"], padx=4, pady=1
+                ).pack(side=tk.LEFT, padx=(6, 0))
+
+            if inst.is_work_proxy():
+                tk.Label(
+                    title_row, text=f" {t('badge_work_proxy')} ", font=("Segoe UI", 7, "bold"),
+                    bg=C["hover"], fg=C["teal"], padx=4, pady=1
                 ).pack(side=tk.LEFT, padx=(6, 0))
 
             detail_row = tk.Frame(info, bg=C["card"])
@@ -2545,6 +3308,42 @@ class VlessApp(tk.Tk):
         tk.Label(opt_content, text=t("options_title"), font=("Segoe UI", 12, "bold"), fg=C["text"], bg=bg).pack(anchor="w", pady=(0, 2))
         tk.Label(opt_content, text=t("options_subtitle"), font=("Segoe UI", 9), fg=C["subtext"], bg=bg).pack(anchor="w", pady=(0, 14))
 
+        # 0. Proxy Launchers & Shortcuts Automation (FIRST ITEM)
+        card_launchers = tk.Frame(opt_content, bg=C["card"], relief=tk.FLAT, borderwidth=1)
+        card_launchers.pack(fill=tk.X, pady=(0, 8), padx=2)
+
+        launchers_top = tk.Frame(card_launchers, bg=C["card"])
+        launchers_top.pack(fill=tk.X, padx=12, pady=(10, 4))
+
+        tk.Label(
+            launchers_top, text=f"  {t('lbl_launchers_guide_title')}",
+            font=("Segoe UI", 10, "bold"), fg=C["text"], bg=C["card"]
+        ).pack(side=tk.LEFT, anchor="w")
+
+        btn_box = tk.Frame(launchers_top, bg=C["card"])
+        btn_box.pack(side=tk.RIGHT)
+
+        btn_guide = tk.Button(
+            btn_box, text=t("btn_launchers_guide"), font=("Segoe UI", 9, "bold"),
+            bg=C["blue"], fg="#1e1e2e", activebackground=C["teal"],
+            relief=tk.FLAT, padx=12, pady=4, cursor="hand2",
+            command=self.open_launchers_guide_modal,
+        )
+        btn_guide.pack(side=tk.LEFT, padx=(0, 6))
+
+        btn_quick = tk.Button(
+            btn_box, text=t("btn_quick_generate_launchers"), font=("Segoe UI", 9),
+            bg=C["overlay"], fg=C["text"], activebackground=C["hover"],
+            relief=tk.FLAT, padx=10, pady=4, cursor="hand2",
+            command=lambda: self.run_quick_launcher_generation(),
+        )
+        btn_quick.pack(side=tk.LEFT)
+
+        tk.Label(
+            card_launchers, text=t("lbl_launchers_guide_desc"), font=("Segoe UI", 8),
+            fg=C["subtext"], bg=C["card"], wraplength=700, justify=tk.LEFT,
+        ).pack(anchor="w", padx=36, pady=(0, 10))
+
         # 1. Force Port Takeover
         card1 = tk.Frame(opt_content, bg=C["card"], relief=tk.FLAT, borderwidth=1)
         card1.pack(fill=tk.X, pady=6, padx=2)
@@ -2660,6 +3459,252 @@ class VlessApp(tk.Tk):
             opt_content, text=t("opt_saved_hint"), font=("Segoe UI", 9, "bold"),
             fg=C["green"], bg=bg,
         ).pack(anchor="w", pady=(14, 4), padx=4)
+
+    def run_quick_launcher_generation(self, status_lbl=None):
+        """Execute launcher generation in background thread."""
+        def _task():
+            try:
+                from vless2socks.ink import generate_proxy_workspace
+                target_proxy_dir = r"C:\MyFiles\Proxy"
+                res = generate_proxy_workspace(
+                    target_dir=target_proxy_dir,
+                    instances_path=INSTANCES_FILE if INSTANCES_FILE.exists() else None,
+                    include_xshell=True,
+                    xshell_port=1030,
+                    update_desktop=False,
+                )
+                msg = t("launchers_generated_success", path=res.get("proxy_dir", target_proxy_dir))
+                def _update_ok():
+                    try:
+                        if status_lbl and status_lbl.winfo_exists():
+                            status_lbl.config(text=f"✅ {msg}", fg=C["green"])
+                    except Exception:
+                        pass
+                def _safe_after(callback):
+                    try:
+                        self.after(0, callback)
+                    except Exception:
+                        pass
+
+                _safe_after(_update_ok)
+                _safe_after(lambda: messagebox.showinfo("vless2socks", msg, parent=self))
+            except Exception as e:
+                err_msg = f"Ошибка генерации: {e}"
+                def _update_err():
+                    try:
+                        if status_lbl and status_lbl.winfo_exists():
+                            status_lbl.config(text=f"❌ {err_msg}", fg=C["red"])
+                    except Exception:
+                        pass
+                def _safe_after_err(callback):
+                    try:
+                        self.after(0, callback)
+                    except Exception:
+                        pass
+
+                _safe_after_err(_update_err)
+                _safe_after_err(lambda: messagebox.showerror("vless2socks", err_msg, parent=self))
+
+        if status_lbl and status_lbl.winfo_exists():
+            status_lbl.config(text=f"⏳ {t('launchers_generating')}", fg=C["yellow"])
+        threading.Thread(target=_task, daemon=True).start()
+
+    def open_launchers_guide_modal(self):
+        """Open modal window with instructions, Antigravity prompts, and automation."""
+        dlg = tk.Toplevel(self)
+        dlg.title(t("dlg_launchers_title"))
+        dlg.geometry("780x740")
+        dlg.minsize(680, 560)
+        dlg.configure(bg=C["bg"])
+        dlg.transient(self)
+        dlg.grab_set()
+
+        try:
+            x = self.winfo_x() + (self.winfo_width() - 780) // 2
+            y = self.winfo_y() + (self.winfo_height() - 740) // 2
+            dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+
+        # Top Action Bar inside dialog
+        top_bar = tk.Frame(dlg, bg=C["surface"], padx=16, pady=12)
+        top_bar.pack(fill=tk.X)
+
+        title_lbl = tk.Label(
+            top_bar, text="🛠️ Как создать батники и ярлыки (.bat / .lnk / .ico)",
+            font=("Segoe UI", 12, "bold"), fg=C["text"], bg=C["surface"]
+        )
+        title_lbl.pack(anchor="w")
+
+        sub_lbl = tk.Label(
+            top_bar,
+            text="Иерархия Proxy (bat, ico, ink), модуль vless2socks.ink и скилл proxy-launcher-generator для Antigravity",
+            font=("Segoe UI", 8), fg=C["subtext"], bg=C["surface"]
+        )
+        sub_lbl.pack(anchor="w", pady=(2, 0))
+
+        # Bottom control bar
+        bottom_bar = tk.Frame(dlg, bg=C["surface"], padx=16, pady=10)
+        bottom_bar.pack(fill=tk.X, side=tk.BOTTOM)
+
+        status_lbl = tk.Label(bottom_bar, text="", font=("Segoe UI", 8), fg=C["subtext"], bg=C["surface"])
+        status_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        def _open_folder():
+            folder = r"C:\MyFiles\Proxy"
+            Path(folder).mkdir(parents=True, exist_ok=True)
+            try:
+                subprocess.Popen(["explorer", folder])
+            except Exception as e:
+                messagebox.showerror("Error", f"Не удалось открыть папку: {e}", parent=dlg)
+
+        open_folder_btn = tk.Button(
+            bottom_bar, text=t("btn_open_proxy_dir"), font=("Segoe UI", 9),
+            bg=C["overlay"], fg=C["text"], activebackground=C["hover"],
+            relief=tk.FLAT, padx=10, pady=4, cursor="hand2", command=_open_folder
+        )
+        open_folder_btn.pack(side=tk.RIGHT, padx=(8, 0))
+
+        gen_btn = tk.Button(
+            bottom_bar, text=t("btn_quick_generate_launchers"), font=("Segoe UI", 9, "bold"),
+            bg=C["green"], fg="#1e1e2e", activebackground=C["teal"],
+            relief=tk.FLAT, padx=12, pady=4, cursor="hand2",
+            command=lambda: self.run_quick_launcher_generation(status_lbl=status_lbl)
+        )
+        gen_btn.pack(side=tk.RIGHT, padx=(8, 0))
+
+        close_btn = tk.Button(
+            bottom_bar, text="Закрыть", font=("Segoe UI", 9),
+            bg=C["overlay"], fg=C["subtext"], activebackground=C["hover"], activeforeground=C["text"],
+            relief=tk.FLAT, padx=10, pady=4, cursor="hand2", command=dlg.destroy
+        )
+        close_btn.pack(side=tk.RIGHT)
+
+        # Scrollable container for instructions and prompts
+        canvas = tk.Canvas(dlg, bg=C["bg"], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(dlg, orient="vertical", command=canvas.yview)
+        scroll_content = tk.Frame(canvas, bg=C["bg"])
+
+        scroll_content.bind(
+            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas_window = canvas.create_window((0, 0), window=scroll_content, anchor="nw", width=744)
+
+        def _on_canvas_configure(e):
+            canvas.itemconfig(canvas_window, width=e.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        dlg.bind_all("<MouseWheel>", _on_mousewheel)
+        dlg.protocol("WM_DELETE_WINDOW", lambda: (dlg.unbind_all("<MouseWheel>"), dlg.destroy()))
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=12, pady=8)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Section 1: Архитектура и правила
+        sec1 = tk.Frame(scroll_content, bg=C["card"], padx=14, pady=12, relief=tk.FLAT)
+        sec1.pack(fill=tk.X, pady=(4, 10))
+
+        tk.Label(
+            sec1, text="📁 Архитектура папки C:\\MyFiles\\Proxy",
+            font=("Segoe UI", 10, "bold"), fg=C["blue"], bg=C["card"]
+        ).pack(anchor="w")
+
+        arch_text = (
+            "• Корневая папка (Proxy): содержит исполняемые .bat файлы (Chrome_Socket_<PORT>.bat, Xshell_Socket_<PORT>.bat).\n"
+            "• Подпапка ico/: содержит цветные многослойные иконки (256, 128, 64, 48, 32, 24, 16 px) без смазывания и искажений масштаба Windows.\n"
+            "• Подпапка ink/: содержит Windows-ярлыки (.lnk) с привязкой к батникам и цветным иконкам.\n"
+            "• Алиасы link и lnk: символические связи (NTFS Junctions) на ink, чтобы исключить опечатки.\n"
+            "• Изоляция профилей Chrome: ключ --user-data-dir гарантирует, что вкладка откроется в отдельной сессии под своим прокси."
+        )
+        tk.Label(
+            sec1, text=arch_text, font=("Segoe UI", 9), fg=C["text"], bg=C["card"],
+            justify=tk.LEFT, wraplength=700
+        ).pack(anchor="w", pady=(6, 0))
+
+        # Section 2: Последовательность запросов к Antigravity
+        sec2_header = tk.Frame(scroll_content, bg=C["bg"])
+        sec2_header.pack(fill=tk.X, pady=(6, 4))
+        tk.Label(
+            sec2_header, text="🤖 Последовательность запросов (промптов) к Antigravity",
+            font=("Segoe UI", 11, "bold"), fg=C["text"], bg=C["bg"]
+        ).pack(anchor="w")
+        tk.Label(
+            sec2_header,
+            text="Скопируйте нужный промпт одной кнопкой. Промпты учитывают наличие модуля vless2socks.ink и скилла proxy-launcher-generator.",
+            font=("Segoe UI", 8), fg=C["subtext"], bg=C["bg"]
+        ).pack(anchor="w")
+
+        prompts = [
+            (
+                "Шаг 1: Полная генерация батников и ярлыков для всех прокси",
+                "Генерирует батники и цветные multi-res иконки для всех профилей из vless2socks (Chrome + Xshell) и размещает ярлыки в ink/ с алиасами link/lnk.",
+                "Используй скилл proxy-launcher-generator и модуль vless2socks.ink: сгенерируй батники для всех сокетов из C:\\MyFiles\\vless2socks\\instances.json в папку C:\\MyFiles\\Proxy, извлеки и перекрась оригинальные multi-res иконки в ico/, создай ярлыки в ink/ с алиасами link и lnk, и добавь лаунчер Xshell на порт 1030."
+            ),
+            (
+                "Шаг 2: Добавление нового сокета или лаунчера под отдельный порт",
+                "Если вы создали новый прокси-профиль в vless2socks и хотите сгенерировать под него отдельный батник и ярлык нужного цвета.",
+                "Используй модуль vless2socks.ink: создай батник и ярлык для сокета 1084 с бирюзовой иконкой в папке C:\\MyFiles\\Proxy (ярлык в ink/) с помощью функций build_chrome_bat и generate_app_icon."
+            ),
+            (
+                "Шаг 3: Настройка запуска Xshell через сокет 1030 с бирюзовой иконкой",
+                "Создает батник запуска Xshell 8 через сокет 1030, перекрашивает оранжевую иконку в бирюзовую и обновляет SOCKS5 конфигурацию в документах NetSarang.",
+                "Настрой Xshell через сокет 1030 с помощью модуля vless2socks.ink: создай Xshell_Socket_1030.bat в C:\\MyFiles\\Proxy, бирюзовую иконку xshell_cyan.ico в ico/, ярлык в ink/ и обнови Socket1030.ini в документах NetSarang."
+            ),
+            (
+                "Шаг 4: Вынос ярлыков на рабочий стол Windows (Desktop)",
+                "Отправляет готовые ярлыки из подпапки ink на рабочий стол с обновлением системного кэша иконок проводника Windows.",
+                "Скопируй ярлыки Chrome Socket 1015 и Xshell Socket 1030 из C:\\MyFiles\\Proxy\\ink на рабочий стол Windows (Desktop) и выполни сброс кэша иконок через ie4uinit.exe -show."
+            ),
+        ]
+
+        for step_title, step_desc, prompt_text in prompts:
+            p_card = tk.Frame(scroll_content, bg=C["card"], padx=12, pady=10, relief=tk.FLAT)
+            p_card.pack(fill=tk.X, pady=4)
+
+            p_top = tk.Frame(p_card, bg=C["card"])
+            p_top.pack(fill=tk.X)
+
+            tk.Label(
+                p_top, text=step_title, font=("Segoe UI", 9, "bold"),
+                fg=C["blue"], bg=C["card"]
+            ).pack(side=tk.LEFT, anchor="w")
+
+            def _make_copy_cmd(txt, btn_ref):
+                def _copy():
+                    try:
+                        self.clipboard_clear()
+                        self.clipboard_append(txt)
+                        orig_text = btn_ref.cget("text")
+                        btn_ref.config(text=t("btn_prompt_copied"), bg=C["green"], fg="#1e1e2e")
+                        self.after(1800, lambda: btn_ref.config(text=orig_text, bg=C["overlay"], fg=C["text"]))
+                    except Exception as ex:
+                        messagebox.showerror("Clipboard", f"Ошибка копирования: {ex}", parent=dlg)
+                return _copy
+
+            copy_btn = tk.Button(
+                p_top, text=t("btn_copy_prompt"), font=("Segoe UI", 8, "bold"),
+                bg=C["overlay"], fg=C["text"], activebackground=C["hover"],
+                relief=tk.FLAT, padx=10, pady=2, cursor="hand2"
+            )
+            copy_btn.pack(side=tk.RIGHT)
+            copy_btn.config(command=_make_copy_cmd(prompt_text, copy_btn))
+
+            tk.Label(
+                p_card, text=step_desc, font=("Segoe UI", 8),
+                fg=C["subtext"], bg=C["card"], wraplength=700, justify=tk.LEFT
+            ).pack(anchor="w", pady=(2, 4))
+
+            # Prompt text box
+            box = tk.Frame(p_card, bg=C["surface"], padx=8, pady=6)
+            box.pack(fill=tk.X)
+            prompt_lbl = tk.Label(
+                box, text=prompt_text, font=("Consolas", 8),
+                fg=C["teal"], bg=C["surface"], justify=tk.LEFT, wraplength=680
+            )
+            prompt_lbl.pack(anchor="w")
 
     # ── Backup & Security Tab ─────────────────────────────────
     def _build_backup_tab(self):
@@ -3167,10 +4212,14 @@ class VlessApp(tk.Tk):
                     port = 1015
 
                 p_ok, lat = isolation_tester.check_port_accessible("127.0.0.1", port, timeout=0.3)
+                if not self.winfo_exists():
+                    return
                 if p_ok:
                     self.after(0, lambda: self.wsl_port_status_lbl.config(text=f"🟢 Доступен ({lat} ms)", fg=C["green"]))
                 else:
                     self.after(0, lambda: self.wsl_port_status_lbl.config(text="🔴 Закрыт (Offline)", fg=C["red"]))
+            except (RuntimeError, tk.TclError):
+                pass
             except Exception as e:
                 self._wsl_log("ERROR", f"Ошибка проверки статуса: {e}")
 
@@ -3322,6 +4371,10 @@ class VlessApp(tk.Tk):
         self._build_localization_tab()
 
         self._update_header_stats()
+        if hasattr(self, "btn_restart_services") and self.btn_restart_services and self.btn_restart_services.winfo_exists():
+            self.btn_restart_services.config(text=f"🔄 {t('btn_restart_services')}")
+        if HAS_TRAY and hasattr(self, "_tray_icon") and self._tray_icon:
+            self._tray_icon.menu = self._build_tray_menu()
         self.update_tray_icon()
 
     # ── Global Actions & Startup Routines ─────────────────────
@@ -3412,20 +4465,380 @@ class VlessApp(tk.Tk):
         save_instances(data)
 
     def _update_header_stats(self):
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                self.after(0, self._update_header_stats)
+            except Exception:
+                pass
+            return
         running = sum(1 for inst in self.instances if inst.running)
         total = len(self.instances)
-        self.count_label.config(text=t("count_summary", total=total, running=running))
+        try:
+            if hasattr(self, "count_label") and self.count_label and self.count_label.winfo_exists():
+                self.count_label.config(text=t("count_summary", total=total, running=running))
+        except Exception:
+            pass
+
+    # ── RestartServices Feature & Dropdown Menu ───────────────
+    def toggle_restart_services_menu(self):
+        """Toggle slide-down context menu with RestartServices settings."""
+        if self._restart_menu_open:
+            self.close_restart_services_menu()
+        else:
+            self.open_restart_services_menu()
+
+    def open_restart_services_menu(self):
+        """Open sleek slide-down dropdown menu containing checkboxes for RestartServices."""
+        if self._restart_menu_open:
+            return
+
+        if self.restart_menu_win and self.restart_menu_win.winfo_exists():
+            try:
+                self.restart_menu_win.destroy()
+            except Exception:
+                pass
+
+        self._restart_menu_open = True
+        if hasattr(self, "btn_restart_arrow") and self.btn_restart_arrow and self.btn_restart_arrow.winfo_exists():
+            self.btn_restart_arrow.config(text="▲")
+
+        # Create borderless toplevel popup
+        self.restart_menu_win = tk.Toplevel(self)
+        self.restart_menu_win.overrideredirect(True)
+        self.restart_menu_win.attributes("-topmost", True)
+        self.restart_menu_win.configure(bg=C["border"])
+
+        # Border frame (accent outline)
+        border_frame = tk.Frame(self.restart_menu_win, bg=C["blue"], padx=1, pady=1)
+        border_frame.pack(fill=tk.BOTH, expand=True)
+
+        inner = tk.Frame(border_frame, bg=C["card"], padx=12, pady=10)
+        inner.pack(fill=tk.BOTH, expand=True)
+
+        # 1. Title / Header
+        header = tk.Frame(inner, bg=C["card"])
+        header.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(
+            header, text=f"⚙️  {t('restart_menu_title')}",
+            font=("Segoe UI", 9, "bold"), fg=C["text"], bg=C["card"]
+        ).pack(side=tk.LEFT)
+
+        # Separator line
+        sep = tk.Frame(inner, bg=C["overlay"], height=1)
+        sep.pack(fill=tk.X, pady=(0, 8))
+
+        # Checkboxes: WSL, WorkProxy, SystemProxy
+        chk_opts = [
+            (f"🐧  {t('lbl_restart_wsl')}", self.restart_wsl_var, C["yellow"]),
+            (f"💼  {t('lbl_restart_work_proxy')}", self.restart_work_proxy_var, C["teal"]),
+            (f"⚙️  {t('lbl_restart_system_proxy')}", self.restart_system_proxy_var, C["blue"]),
+        ]
+
+        for label_text, var, accent_color in chk_opts:
+            row = tk.Frame(inner, bg=C["card"], cursor="hand2")
+            row.pack(fill=tk.X, pady=3)
+
+            lbl = tk.Label(
+                row, text=label_text, font=("Segoe UI", 9, "bold"),
+                fg=accent_color, bg=C["card"], cursor="hand2",
+            )
+            lbl.pack(side=tk.LEFT)
+
+            cb = OrangeCheckbox(
+                row, variable=var,
+                bg=C["card"],
+                orange_color=C["orange"],
+                size=18,
+                command=self._on_restart_flags_changed,
+            )
+            cb.pack(side=tk.RIGHT)
+
+            # Clicking the row or label also toggles the checkbox
+            lbl.bind("<Button-1>", lambda e, c=cb: c._toggle())
+            row.bind("<Button-1>", lambda e, c=cb: c._toggle())
+
+        # Footer Hint
+        hint_lbl = tk.Label(
+            inner, text=t("restart_menu_hint"),
+            font=("Segoe UI", 7), fg=C["subtext"], bg=C["card"]
+        )
+        hint_lbl.pack(anchor="w", pady=(8, 0))
+
+        # Geometry & Coordinates positioning
+        self.update_idletasks()
+        try:
+            arrow_rx = self.btn_restart_arrow.winfo_rootx()
+            arrow_rw = self.btn_restart_arrow.winfo_width()
+            main_ry = self.btn_restart_services.winfo_rooty()
+            main_h = self.btn_restart_services.winfo_height()
+
+            target_w = 245
+            target_h = 168
+            popup_x = (arrow_rx + arrow_rw) - target_w
+            popup_y = main_ry + main_h + 3
+        except Exception:
+            popup_x = self.winfo_rootx() + 300
+            popup_y = self.winfo_rooty() + 50
+            target_w = 245
+            target_h = 168
+
+        # Smooth slide-down unfolding animation
+        self.restart_menu_win.geometry(f"{target_w}x4+{popup_x}+{popup_y}")
+        self.restart_menu_win.deiconify()
+
+        def _slide_step(step=1, total_steps=7):
+            if not self._restart_menu_open or not self.restart_menu_win or not self.restart_menu_win.winfo_exists():
+                return
+            h = int(target_h * (step / total_steps))
+            self.restart_menu_win.geometry(f"{target_w}x{h}+{popup_x}+{popup_y}")
+            if step < total_steps:
+                self.after(12, lambda: _slide_step(step + 1, total_steps))
+
+        _slide_step()
+
+        # Auto-dismiss watcher if parent window state is not normal (e.g. iconic / minimized / hidden)
+        def _check_parent_state():
+            if not getattr(self, "_restart_menu_open", False):
+                return
+            if not self.restart_menu_win or not self.restart_menu_win.winfo_exists():
+                return
+            try:
+                if self.state() != "normal":
+                    self.close_restart_services_menu()
+                    return
+            except Exception:
+                self.close_restart_services_menu()
+                return
+            self.after(150, _check_parent_state)
+
+        _check_parent_state()
+
+        # Dismiss when clicked outside
+        def _on_global_click(event):
+            if not self._restart_menu_open or not self.restart_menu_win or not self.restart_menu_win.winfo_exists():
+                return
+            try:
+                wx, wy = event.x_root, event.y_root
+                px, py = self.restart_menu_win.winfo_rootx(), self.restart_menu_win.winfo_rooty()
+                pw, ph = self.restart_menu_win.winfo_width(), self.restart_menu_win.winfo_height()
+                ax, ay = self.btn_restart_arrow.winfo_rootx(), self.btn_restart_arrow.winfo_rooty()
+                aw, ah = self.btn_restart_arrow.winfo_width(), self.btn_restart_arrow.winfo_height()
+
+                if (px <= wx <= px + pw and py <= wy <= py + ph) or (ax <= wx <= ax + aw and ay <= wy <= ay + ah):
+                    return
+                self.close_restart_services_menu()
+            except Exception:
+                self.close_restart_services_menu()
+
+        self.bind_all("<Button-1>", _on_global_click, add="+")
+
+    def close_restart_services_menu(self):
+        """Close slide-down context menu."""
+        self._restart_menu_open = False
+        if hasattr(self, "btn_restart_arrow") and self.btn_restart_arrow and self.btn_restart_arrow.winfo_exists():
+            try:
+                self.btn_restart_arrow.config(text="▼")
+            except Exception:
+                pass
+        if hasattr(self, "restart_menu_win") and self.restart_menu_win:
+            try:
+                if self.restart_menu_win.winfo_exists():
+                    self.restart_menu_win.destroy()
+            except Exception:
+                pass
+        self.restart_menu_win = None
+
+    def _on_main_unmap(self, event=None):
+        """Dismiss dropdown context menu if main window is unmapped / minimized."""
+        if event is None or event.widget == self:
+            if getattr(self, "_restart_menu_open", False):
+                self.close_restart_services_menu()
+
+    def _on_main_deactivate(self, event=None):
+        """Dismiss dropdown context menu if application loses focus to another window."""
+        if getattr(self, "_restart_menu_open", False):
+            self.close_restart_services_menu()
+
+    def _on_restart_flags_changed(self):
+        """Persist checkbox choices when modified by user."""
+        wsl = bool(self.restart_wsl_var.get())
+        work = bool(self.restart_work_proxy_var.get())
+        sys_p = bool(self.restart_system_proxy_var.get())
+        settings_manager.set_restart_services_flags(wsl, work, sys_p)
+
+    def execute_restart_services(self):
+        """Restart all services whose checkboxes are currently checked (WSL, WorkProxy, SystemProxy)."""
+        wsl = bool(self.restart_wsl_var.get())
+        work = bool(self.restart_work_proxy_var.get())
+        sys_p = bool(self.restart_system_proxy_var.get())
+
+        if not (wsl or work or sys_p):
+            messagebox.showinfo(
+                "RestartServices",
+                t("msg_restart_no_selection"),
+                parent=self,
+            )
+            return
+
+        # Open / bring up the transparent HUD monitor in bottom-right corner
+        def _ensure_hud():
+            if not getattr(self, "restart_hud_win", None) or not self.restart_hud_win.winfo_exists():
+                self.restart_hud_win = RestartHUDWindow(self)
+            else:
+                try:
+                    self.restart_hud_win.deiconify()
+                    self.restart_hud_win.lift()
+                    self.restart_hud_win.in_progress = True
+                    self.restart_hud_win.countdown_sec = RestartHUDWindow.AUTO_CLOSE_SEC
+                    self.restart_hud_win.status_badge.config(text="🔄 ...", fg=C["yellow"])
+                except Exception:
+                    pass
+
+        self.after(0, _ensure_hud)
+
+        def _worker():
+            self._set_restart_button_busy(True)
+            restarted_items = []
+            try:
+                # 1. WSL
+                if wsl:
+                    self._log("🔄 [RestartServices] Restarting WSL...")
+                    ok, msg = restart_wsl()
+                    if ok:
+                        restarted_items.append("WSL")
+                        self._log("✅ [RestartServices] WSL successfully restarted.")
+                    else:
+                        self._log(f"⚠️ [RestartServices] {msg}")
+
+                # 2. WorkProxy instances
+                restarted_proxies = set()
+                if work:
+                    self._log("🔄 [RestartServices] Restarting WorkProxy instances...")
+                    cnt = 0
+                    for inst in self.instances:
+                        if inst.is_work_proxy():
+                            try:
+                                inst.restart()
+                            except Exception as err:
+                                self._log(f"⚠️ [RestartServices] WorkProxy restart warning: {err}")
+                            restarted_proxies.add(inst)
+                            cnt += 1
+                    restarted_items.append(f"WorkProxy ({cnt})")
+                    self._log(f"✅ [RestartServices] Restarted {cnt} WorkProxy instance(s).")
+
+                # 3. SystemProxy instances
+                if sys_p:
+                    self._log("🔄 [RestartServices] Restarting SystemProxy instances...")
+                    cnt = 0
+                    for inst in self.instances:
+                        if inst.is_system_proxy():
+                            if inst not in restarted_proxies:
+                                try:
+                                    inst.restart()
+                                except Exception as err:
+                                    self._log(f"⚠️ [RestartServices] SystemProxy restart warning: {err}")
+                                restarted_proxies.add(inst)
+                            cnt += 1
+                    restarted_items.append(f"SystemProxy ({cnt})")
+                    self._log(f"✅ [RestartServices] Restarted {cnt} SystemProxy instance(s).")
+
+                self.after(500, self.refresh_overview)
+                self.after(500, self._update_header_stats)
+                summary_str = ", ".join(restarted_items) if restarted_items else "Done"
+                self._log(f"🎉 [RestartServices] Finished restarting: {summary_str}.")
+                self.after(0, lambda: self._set_restart_button_success(summary_str))
+                if getattr(self, "restart_hud_win", None) and self.restart_hud_win.winfo_exists():
+                    self.restart_hud_win.set_finished(summary_str)
+            except Exception as e:
+                self._log(f"❌ [RestartServices] Error: {e}")
+                self.after(0, lambda: self._set_restart_button_busy(False))
+                if getattr(self, "restart_hud_win", None) and self.restart_hud_win.winfo_exists():
+                    self.restart_hud_win.set_finished("Error")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _log(self, msg: str):
+        """Application-level logger for background service operations."""
+        ts = time.strftime("%H:%M:%S")
+        print(f"[{ts}] {msg}", flush=True)
+        try:
+            if hasattr(self, "_wsl_log"):
+                self._wsl_log("INFO", msg)
+        except Exception:
+            pass
+        try:
+            if getattr(self, "restart_hud_win", None) and self.restart_hud_win.winfo_exists():
+                self.restart_hud_win.log(msg)
+        except Exception:
+            pass
+
+    def _set_restart_button_busy(self, busy: bool):
+        """Update button state during background restart operations."""
+        if not hasattr(self, "btn_restart_services") or not self.btn_restart_services or not self.btn_restart_services.winfo_exists():
+            return
+        if busy:
+            self.btn_restart_services.config(
+                text=f"⏳ {t('msg_restart_in_progress')}",
+                state=tk.DISABLED,
+                bg=C["overlay"],
+                fg=C["text"],
+            )
+        else:
+            self.btn_restart_services.config(
+                text=f"🔄 {t('btn_restart_services')}",
+                state=tk.NORMAL,
+                bg=C["blue"],
+                fg="#1e1e2e",
+            )
+
+    def _set_restart_button_success(self, text: str):
+        """Briefly show success badge on button before reverting to normal."""
+        if not hasattr(self, "btn_restart_services") or not self.btn_restart_services or not self.btn_restart_services.winfo_exists():
+            return
+        self.btn_restart_services.config(
+            text=f"✅ {text}",
+            state=tk.NORMAL,
+            bg=C["green"],
+            fg="#1e1e2e",
+        )
+        self.after(2500, lambda: self._set_restart_button_busy(False))
 
     # ── System Tray ───────────────────────────────────────────
+    def _build_tray_menu(self):
+        """Build tray context menu with RestartServices and its settings submenu."""
+        return pystray.Menu(
+            pystray.MenuItem(t("tray_show"), self._show_from_tray, default=True),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(f"🔄 {t('btn_restart_services')}", self._tray_restart_services),
+            pystray.MenuItem(
+                f"⚙️ {t('restart_menu_title')}",
+                pystray.Menu(
+                    pystray.MenuItem(
+                        f"🐧 {t('lbl_restart_wsl')}",
+                        self._tray_toggle_wsl,
+                        checked=lambda _: bool(settings_manager.get_setting("restart_wsl", True)),
+                    ),
+                    pystray.MenuItem(
+                        f"💼 {t('lbl_restart_work_proxy')}",
+                        self._tray_toggle_work_proxy,
+                        checked=lambda _: bool(settings_manager.get_setting("restart_work_proxy", True)),
+                    ),
+                    pystray.MenuItem(
+                        f"⚙️ {t('lbl_restart_system_proxy')}",
+                        self._tray_toggle_system_proxy,
+                        checked=lambda _: bool(settings_manager.get_setting("restart_system_proxy", True)),
+                    ),
+                ),
+            ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(t("tray_exit"), self._exit_from_tray),
+        )
+
     def _setup_tray(self):
         if not HAS_TRAY:
             return
 
-        menu = pystray.Menu(
-            pystray.MenuItem(t("tray_show"), self._show_from_tray, default=True),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem(t("tray_exit"), self._exit_from_tray),
-        )
+        menu = self._build_tray_menu()
         self._tray_icon = pystray.Icon(
             "vless2socks",
             icon=make_tray_icon("gray"),
@@ -3435,7 +4848,41 @@ class VlessApp(tk.Tk):
         self._tray_thread = threading.Thread(target=self._tray_icon.run, daemon=True)
         self._tray_thread.start()
 
+    def _tray_restart_services(self, icon=None, item=None):
+        """Trigger RestartServices from system tray context menu."""
+        self.after(0, self.execute_restart_services)
+
+    def _tray_toggle_wsl(self, icon=None, item=None):
+        cur = bool(settings_manager.get_setting("restart_wsl", True))
+        new_val = not cur
+        settings_manager.set_setting("restart_wsl", new_val)
+        self.restart_wsl_var.set(new_val)
+        if self._tray_icon:
+            self._tray_icon.update_menu()
+
+    def _tray_toggle_work_proxy(self, icon=None, item=None):
+        cur = bool(settings_manager.get_setting("restart_work_proxy", True))
+        new_val = not cur
+        settings_manager.set_setting("restart_work_proxy", new_val)
+        self.restart_work_proxy_var.set(new_val)
+        if self._tray_icon:
+            self._tray_icon.update_menu()
+
+    def _tray_toggle_system_proxy(self, icon=None, item=None):
+        cur = bool(settings_manager.get_setting("restart_system_proxy", True))
+        new_val = not cur
+        settings_manager.set_setting("restart_system_proxy", new_val)
+        self.restart_system_proxy_var.set(new_val)
+        if self._tray_icon:
+            self._tray_icon.update_menu()
+
     def update_tray_icon(self):
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                self.after(0, self.update_tray_icon)
+            except Exception:
+                pass
+            return
         if not self._tray_icon:
             return
         running = sum(1 for inst in self.instances if inst.running and inst.healthy)
@@ -3452,6 +4899,7 @@ class VlessApp(tk.Tk):
         self._update_header_stats()
 
     def _hide_to_tray(self):
+        self.close_restart_services_menu()
         if HAS_TRAY and self._tray_icon:
             self.withdraw()
             self._hidden = True
@@ -3471,6 +4919,11 @@ class VlessApp(tk.Tk):
         self.after(0, self._exit)
 
     def _exit(self):
+        if getattr(self, "restart_hud_win", None):
+            try:
+                self.restart_hud_win.close()
+            except Exception:
+                pass
         for inst in self.instances:
             inst.destroy()
         self.save_all()

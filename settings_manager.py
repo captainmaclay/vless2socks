@@ -42,6 +42,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "backup_dir": DEFAULT_BACKUP_DIR,
     "last_backup_time": "-",
     "backup_password": "",
+    "system_proxy": "127.0.0.1:1015",
+    "work_proxy": "127.0.0.1:1030",
+    "System_Proxy": True,
+    "Work_Proxy": True,
+    "restart_wsl": True,
+    "restart_work_proxy": True,
+    "restart_system_proxy": True,
 }
 
 
@@ -100,4 +107,42 @@ def set_setting(key: str, value: Any) -> None:
     """Update and persist a single setting value."""
     cfg = load_settings()
     cfg[key] = value
+    save_settings(cfg)
+
+
+def get_system_proxy_target() -> str:
+    """Get configured endpoint for System_Proxy, default 127.0.0.1:1015."""
+    return str(get_setting("system_proxy", "127.0.0.1:1015"))
+
+
+def get_work_proxy_target() -> str:
+    """Get configured endpoint for Work_Proxy, default 127.0.0.1:1030."""
+    return str(get_setting("work_proxy", "127.0.0.1:1030"))
+
+
+def is_system_proxy_enabled() -> bool:
+    """Check if System_Proxy flag is active."""
+    return bool(get_setting("System_Proxy", get_setting("system_proxy_flag", True)))
+
+
+def is_work_proxy_enabled() -> bool:
+    """Check if Work_Proxy flag is active."""
+    return bool(get_setting("Work_Proxy", get_setting("work_proxy_flag", True)))
+
+
+def get_restart_services_flags() -> dict[str, bool]:
+    """Get active flags for RestartServices."""
+    return {
+        "wsl": bool(get_setting("restart_wsl", True)),
+        "work_proxy": bool(get_setting("restart_work_proxy", True)),
+        "system_proxy": bool(get_setting("restart_system_proxy", True)),
+    }
+
+
+def set_restart_services_flags(wsl: bool, work_proxy: bool, system_proxy: bool) -> None:
+    """Persist user checkbox choices for RestartServices."""
+    cfg = load_settings()
+    cfg["restart_wsl"] = bool(wsl)
+    cfg["restart_work_proxy"] = bool(work_proxy)
+    cfg["restart_system_proxy"] = bool(system_proxy)
     save_settings(cfg)

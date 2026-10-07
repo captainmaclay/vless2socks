@@ -15,6 +15,7 @@ from .url import (
     parse_socks_url,
     parse_vless_url,
     parse_wireguard_url,
+    parse_wireguard_conf,
     server_from_mapping,
     WireGuardServer,
 )
@@ -44,7 +45,17 @@ class AppConfig:
     name: str = ""
     order: float = 0.0
     send_through: str = ""
+    system_proxy: bool = False
+    work_proxy: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def System_Proxy(self) -> bool:
+        return self.system_proxy
+
+    @property
+    def Work_Proxy(self) -> bool:
+        return self.work_proxy
 
     @property
     def auth_required(self) -> bool:
@@ -115,25 +126,37 @@ def load_config(
         (нужно режиму ``--doctor``, который должен дойти до сетевых проверок).
     """
     data: dict[str, Any] = {}
+    server_from_file: WireGuardServer | None = None
 
     if path is not None:
         p = Path(path)
         if not p.exists():
             raise ConfigError(f"файл конфигурации не найден: {p}")
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ConfigError(f"{p}: некорректный JSON — {exc}") from None
-        if not isinstance(data, dict):
-            raise ConfigError(f"{p}: ожидался объект JSON на верхнем уровне")
+        if p.suffix.lower() == ".conf":
+            server_from_file = parse_wireguard_conf(p, strict=strict)
+            data = {"url": server_from_file.to_url(), "name": server_from_file.remark or p.stem}
+        else:
+            raw_text = p.read_text(encoding="utf-8", errors="replace")
+            if "[interface]" in raw_text.lower():
+                server_from_file = parse_wireguard_conf(raw_text, remark=p.stem, strict=strict)
+                data = {"url": server_from_file.to_url(), "name": server_from_file.remark or p.stem}
+            else:
+                try:
+                    data = json.loads(raw_text)
+                except json.JSONDecodeError as exc:
+                    raise ConfigError(f"{p}: некорректный JSON — {exc}") from None
+                if not isinstance(data, dict):
+                    raise ConfigError(f"{p}: ожидался объект JSON на верхнем уровне")
 
     if url:
         server = parse_proxy_url(url, strict=strict)
+    elif server_from_file is not None:
+        server = server_from_file
     elif data:
         server = server_from_mapping(data, strict=strict)
     else:
         raise ConfigError(
-            "не задан сервер: укажите --url 'vless://...' или 'socks5://...' или -c config.json"
+            "не задан сервер: укажите --url 'vless://...' или 'socks5://...' или -c config.json / .conf"
         )
 
     host, port = _split_listen(
@@ -149,6 +172,16 @@ def load_config(
         order_val = float(raw_order) if raw_order is not None else (0.0 if port == 1015 else 1.0)
     except (ValueError, TypeError):
         order_val = 0.0 if port == 1015 else 1.0
+
+    raw_sp = data.get("system_proxy")
+    if raw_sp is None:
+        raw_sp = data.get("System_Proxy")
+    is_sp = (port == 1015) if raw_sp is None else bool(raw_sp)
+
+    raw_wp = data.get("work_proxy")
+    if raw_wp is None:
+        raw_wp = data.get("Work_Proxy")
+    is_wp = (port == 1030 or "worproxy" in str(data.get("name", "")).lower()) if raw_wp is None else bool(raw_wp)
 
     return AppConfig(
         server=server,
@@ -171,4 +204,6 @@ def load_config(
         name=str(data.get("name", default_name)),
         order=order_val,
         send_through=str(data.get("sendThrough") or data.get("send_through") or "").strip(),
+        system_proxy=is_sp,
+        work_proxy=is_wp,
     )

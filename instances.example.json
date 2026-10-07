@@ -13,7 +13,11 @@
     "backend": "auto",
     "xrayPath": "",
     "xrayLegacyConfig": false,
-    "killswitch": true
+    "killswitch": true,
+    "system_proxy": true,
+    "System_Proxy": true,
+    "work_proxy": false,
+    "Work_Proxy": false
   },
   {
     "name": "Proxy 1",
@@ -29,6 +33,10 @@
     "backend": "auto",
     "xrayPath": "",
     "xrayLegacyConfig": false,
-    "killswitch": false
+    "killswitch": false,
+    "system_proxy": false,
+    "System_Proxy": false,
+    "work_proxy": false,
+    "Work_Proxy": false
   }
 ]
