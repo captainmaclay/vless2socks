@@ -206,7 +206,7 @@ def is_port_free(port: int, host: str = "127.0.0.1") -> bool:
         return False
 
 
-def is_port_alive(host: str, port: int, timeout: float = 1.5) -> bool:
+def is_port_alive(host: str, port: int, timeout: float = 0.8) -> bool:
     """Check if port is responding via TCP connect."""
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -592,6 +592,10 @@ def attach_clipboard_and_context_menu(widget: tk.Entry) -> None:
 # ── Proxy Instance Controller ──────────────────────────────────
 class ProxyInstance:
     """Manages the background execution, state, and UI binding for a single SOCKS5 proxy."""
+    process: Optional[subprocess.Popen] = None
+    running: bool = False
+    healthy: bool = False
+    is_transitioning: bool = False
 
     def __init__(self, app: "VlessApp", cfg: dict, global_id: int):
         self.app = app
@@ -600,6 +604,7 @@ class ProxyInstance:
         self.process: Optional[subprocess.Popen] = None
         self.running = False
         self.healthy = False
+        self.is_transitioning = False
         self.log_lines: deque[str] = deque(maxlen=500)
         self.config_path = ROOT_DIR / f".instance_{global_id}.json"
 
@@ -865,7 +870,7 @@ class ProxyInstance:
         self.toggle_btn = tk.Button(
             top, text=t("btn_on"), font=("Segoe UI", 10, "bold"),
             bg=C["green"], fg="#1e1e2e", activebackground=C["teal"],
-            relief=tk.FLAT, padx=14, pady=3, command=self.toggle,
+            relief=tk.FLAT, padx=14, pady=3, command=self.toggle_async,
         )
         self.toggle_btn.pack(side=tk.RIGHT, padx=(8, 0))
 
@@ -2023,11 +2028,35 @@ class ProxyInstance:
 
         geo_ip.fetch_geo_async(host, port, _on_result, fallback_url=url)
 
-    def toggle(self):
-        if self.running:
-            self.stop()
+    def _dispatch_ui(self, fn):
+        """Safely schedule a function on the main thread, or invoke directly if not in Tk mainloop or test environment."""
+        try:
+            self.app.after(0, fn)
+        except Exception:
+            try:
+                fn()
+            except Exception:
+                pass
+
+    def _safe_log(self, msg: str):
+        self._dispatch_ui(lambda: self._log(msg))
+
+    def toggle(self, blocking: bool = True):
+        if blocking:
+            if self.running or (self.process and self.process.poll() is None):
+                self.stop(blocking=True)
+            else:
+                self.start(blocking=True)
         else:
-            self.start()
+            self.toggle_async()
+
+    def toggle_async(self):
+        if self.is_transitioning:
+            return
+        if self.running or (self.process and self.process.poll() is None):
+            self.stop_async()
+        else:
+            self.start_async()
 
     def free_port(self):
         port_str = self.port_entry.get().strip() if self.port_entry else self.get_listen()[1]
@@ -2038,7 +2067,7 @@ class ProxyInstance:
             return
 
         if self.running:
-            self.stop()
+            self.stop(blocking=True)
 
         self._log(t("port_freeing", port=port, http_port=port + 10000))
         ok, msg = kill_processes_on_port(port)
@@ -2050,7 +2079,14 @@ class ProxyInstance:
         else:
             messagebox.showwarning("vless2socks", msg)
 
-    def start(self):
+    def start(self, blocking: bool = True):
+        """Start proxy instance. If blocking=True, executes synchronously (test compatible)."""
+        if not blocking:
+            self.start_async()
+            return
+        self._start_internal()
+
+    def _start_internal(self):
         self._manual_stop = False
         self._cancel_reconnect()
 
@@ -2101,7 +2137,6 @@ class ProxyInstance:
         self._log(f"Starting proxy on {host}:{port}...")
         self._set_state("starting")
 
-        # Профиль на reality / xtls / ws без xray не поднимется — доставим сами.
         if not _xray_fetch_failed and xray_required_but_missing(self.config_path):
             self._fetch_xray_then_start()
             return
@@ -2119,6 +2154,7 @@ class ProxyInstance:
             return
 
         self.running = True
+        self.is_transitioning = False
         self._log(f"Started (PID {self.process.pid})")
         self.app.save_all()
         self.app.update_tray_icon()
@@ -2127,19 +2163,131 @@ class ProxyInstance:
         threading.Thread(target=self._reader, daemon=True).start()
         threading.Thread(target=self._watcher, daemon=True).start()
 
-        # Auto-check Geo IP shortly after startup
         self.app.after(3000, self.check_geo_now)
 
-        # If killswitch is active, schedule leak verification
         if self.cfg.get("killswitch", False):
             self._log("🛡️ [KILLSWITCH] Активен: весь трафик привязан к прокси, проверка утечек запущена...")
             self.app.after(3500, lambda: self.verify_killswitch(manual=False))
+
+    def start_async(self, callback: callable = None):
+        """Asynchronously start proxy in a worker thread without blocking the GUI event loop."""
+        if self.is_transitioning:
+            return
+        if self.process and self.process.poll() is None:
+            return
+
+        self._manual_stop = False
+        self._cancel_reconnect()
+
+        # Gather inputs safely on the main thread
+        val = self.proto_var.get() if self.proto_var else ("wireguard" if self.cfg.get("url", "").startswith(("wireguard://", "wg://")) else ("socks5" if self.cfg.get("url", "").startswith(("socks5://", "socks://")) else "vless"))
+        if val == "vless" and self.url_entry:
+            url = self.url_entry.get().strip()
+        else:
+            url = self.cfg.get("url", "").strip()
+
+        host = self.host_entry.get().strip() if self.host_entry else self.get_listen()[0]
+        port = self.port_entry.get().strip() if self.port_entry else self.get_listen()[1]
+        host = host or "127.0.0.1"
+        port = port or "1081"
+
+        if not url:
+            messagebox.showwarning("vless2socks", t("msg_url_required"))
+            return
+        if not (url.startswith("vless://") or url.startswith("socks5://") or url.startswith("socks://") or url.startswith("wireguard://") or url.startswith("wg://")):
+            messagebox.showwarning("vless2socks", t("msg_url_prefix_any"))
+            return
+
+        self.cfg["url"] = url
+        self.cfg["listen"] = f"{host}:{port}"
+        if self.killswitch_var is not None:
+            self.cfg["killswitch"] = bool(self.killswitch_var.get())
+        self._init_geo_from_url()
+
+        self.is_transitioning = True
+        self._set_state("starting")
+        self.app.update_overview_card(self)
+        self._log(f"Starting proxy on {host}:{port}...")
+
+        def _bg_worker():
+            try:
+                # Force Port Takeover if enabled in Options
+                if settings_manager.get_setting("force_port_takeover", True):
+                    try:
+                        p_int = int(port)
+                        http_p_int = self.get_http_port()
+                        if not is_port_free(p_int, host) or not is_port_free(http_p_int, host):
+                            self._safe_log(f"Force takeover: reclaiming busy ports {p_int} & {http_p_int}...")
+                            kill_processes_on_port(p_int)
+                            kill_processes_on_port(http_p_int)
+                            time.sleep(0.3)
+                    except Exception as e:
+                        self._safe_log(f"Takeover error: {e}")
+
+                # Write instance config
+                with open(self.config_path, "w", encoding="utf-8") as f:
+                    json.dump(self.cfg, f, indent=2, ensure_ascii=False)
+
+                global _xray_fetch_failed
+                if not _xray_fetch_failed and xray_required_but_missing(self.config_path):
+                    self._safe_log("xray-core required, fetching in background...")
+                    emit = lambda msg: self._safe_log(msg)
+                    if not download_xray(emit):
+                        raise RuntimeError("Failed to download xray-core")
+
+                cmd = proxy_command(self.config_path)
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    cwd=str(ROOT_DIR),
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                )
+                self._dispatch_ui(lambda: self._on_start_success(proc, callback))
+            except Exception as e:
+                self._dispatch_ui(lambda: self._on_start_failed(e, callback))
+
+        threading.Thread(target=_bg_worker, daemon=True).start()
+
+    def _on_start_success(self, proc, callback=None):
+        self.process = proc
+        self.running = True
+        self.healthy = False
+        self.is_transitioning = False
+        self._log(f"Started (PID {proc.pid})")
+        self.app.save_all()
+        self.app.update_tray_icon()
+        self.app.refresh_overview()
+        self.app._update_header_stats()
+
+        threading.Thread(target=self._reader, daemon=True).start()
+        threading.Thread(target=self._watcher, daemon=True).start()
+
+        self.app.after(3000, self.check_geo_now)
+        if self.cfg.get("killswitch", False):
+            self._log("🛡️ [KILLSWITCH] Активен: весь трафик привязан к прокси, проверка утечек запущена...")
+            self.app.after(3500, lambda: self.verify_killswitch(manual=False))
+
+        if callback:
+            try:
+                callback(True)
+            except Exception:
+                pass
+
+    def _on_start_failed(self, err, callback=None):
+        self.is_transitioning = False
+        self._log(f"Launch error: {err}")
+        self._set_state("error")
+        self.app.refresh_overview()
+        if callback:
+            try:
+                callback(False)
+            except Exception:
+                pass
 
     def _fetch_xray_then_start(self):
         """Скачать xray-core в фоне и повторить запуск, когда он появится."""
         if not _xray_fetch_lock.acquire(blocking=False):
             self._log("xray-core уже скачивается — повторю через 5 с.")
-            self.app.after(5000, self.start)
+            self.app.after(5000, self.start_async)
             return
 
         self._set_state("starting")
@@ -2151,15 +2299,21 @@ class ProxyInstance:
                 ok = download_xray(emit)
             finally:
                 _xray_fetch_lock.release()
-            self.app.after(0, self.start if ok else lambda: self._set_state("error"))
+            self.app.after(0, self.start_async if ok else lambda: self._set_state("error"))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def stop(self):
+    def stop(self, blocking: bool = True):
+        """Stop proxy instance. If blocking=True, executes synchronously (test compatible)."""
+        if not blocking:
+            self.stop_async()
+            return
+        self._stop_internal()
+
+    def _stop_internal(self):
         self._manual_stop = True
         self._cancel_reconnect()
         self._reconnect_attempt = 0
-
         self._log("Stopping...")
 
         h, port_str = self.get_listen()
@@ -2173,9 +2327,6 @@ class ProxyInstance:
         proc = self.process
         if proc is not None:
             try:
-                # На Windows proc.terminate() убивает только родительский процесс Python,
-                # оставляя дочерний xray.exe висеть зомби-процессом на порту!
-                # Принудительно уничтожаем всё дерево процессов через taskkill /F /T
                 if sys.platform == "win32":
                     subprocess.run(
                         ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
@@ -2192,14 +2343,12 @@ class ProxyInstance:
             except Exception as e:
                 self._log(f"Stop error: {e}")
 
-        # Гарантированное завершение любых процессов (xray/socks), удерживающих порты SOCKS5 и HTTP CONNECT
         try:
             kill_processes_on_port(port)
             kill_processes_on_port(http_port)
         except Exception as e:
             self._log(f"Port cleanup error: {e}")
 
-        # Очистка файла конфигурации xray в runtime для предотвращения коллизий
         for cfg_name in (f"xray-config-{port}.json", "xray-config.json"):
             cfg_p = ROOT_DIR / "runtime" / cfg_name
             if cfg_p.exists():
@@ -2208,7 +2357,6 @@ class ProxyInstance:
                 except Exception:
                     pass
 
-        # Сбрасываем кэш GeoIP и очищаем verified IP для данного порта
         geo_ip.invalidate_cache(h, port)
         self.geo_info["verified"] = False
         self.geo_info["ip"] = ""
@@ -2221,27 +2369,135 @@ class ProxyInstance:
         self.process = None
         self.running = False
         self.healthy = False
+        self.is_transitioning = False
         self._set_state("stopped")
         self._log("Stopped")
         self.app.update_tray_icon()
         self.app.refresh_overview()
         self.app._update_header_stats()
 
-    def restart(self):
-        """Cleanly restart this proxy instance."""
-        url = self.cfg.get("url", "").strip()
-        if not url:
+    def stop_async(self, callback: callable = None):
+        """Asynchronously stop proxy in a worker thread without blocking the GUI event loop."""
+        if self.is_transitioning:
+            return
+        if not self.running and not self.process:
+            if callback:
+                try:
+                    callback()
+                except Exception:
+                    pass
+            return
+
+        self._manual_stop = True
+        self._cancel_reconnect()
+        self._reconnect_attempt = 0
+        self.is_transitioning = True
+        self._set_state("stopping")
+        self._log("Stopping...")
+        self.app.refresh_overview()
+
+        proc = self.process
+        self.process = None
+        h, port_str = self.get_listen()
+        try:
+            port = int(port_str)
+            http_port = self.get_http_port()
+        except ValueError:
+            port = 1081
+            http_port = 11081
+
+        def _bg_worker():
+            if proc is not None:
+                try:
+                    if sys.platform == "win32":
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                        )
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=1)
+                except Exception as e:
+                    self._safe_log(f"Stop error: {e}")
+
             try:
-                if self.url_entry and self.url_entry.winfo_exists():
+                kill_processes_on_port(port)
+                kill_processes_on_port(http_port)
+            except Exception as e:
+                self._safe_log(f"Port cleanup error: {e}")
+
+            for cfg_name in (f"xray-config-{port}.json", "xray-config.json"):
+                cfg_p = ROOT_DIR / "runtime" / cfg_name
+                if cfg_p.exists():
+                    try:
+                        cfg_p.unlink()
+                    except Exception:
+                        pass
+
+            geo_ip.invalidate_cache(h, port)
+            self._dispatch_ui(lambda: self._on_stop_success(h, port, callback))
+
+        threading.Thread(target=_bg_worker, daemon=True).start()
+
+    def _on_stop_success(self, host, port, callback=None):
+        self.running = False
+        self.healthy = False
+        self.is_transitioning = False
+        self.geo_info["verified"] = False
+        self.geo_info["ip"] = ""
+        if self.frame and self.geo_card_label:
+            try:
+                self.geo_card_label.config(text=self._format_geo_text())
+            except Exception:
+                pass
+        self._set_state("stopped")
+        self._log("Stopped")
+        self.app.update_tray_icon()
+        self.app.refresh_overview()
+        self.app._update_header_stats()
+        if callback:
+            try:
+                callback()
+            except Exception:
+                pass
+
+    def restart(self, blocking: bool = True):
+        """Cleanly restart this proxy instance."""
+        if blocking:
+            url = self.cfg.get("url", "").strip()
+            if not url and self.url_entry:
+                try:
                     url = self.url_entry.get().strip()
+                except Exception:
+                    pass
+            if not url:
+                return
+            if self.running or (self.process and self.process.poll() is None):
+                self.stop(blocking=True)
+                time.sleep(0.3)
+            self.start(blocking=True)
+        else:
+            self.restart_async()
+
+    def restart_async(self, callback: callable = None):
+        """Asynchronously and cleanly restart this proxy instance."""
+        url = self.cfg.get("url", "").strip()
+        if not url and self.url_entry:
+            try:
+                url = self.url_entry.get().strip()
             except Exception:
                 pass
         if not url:
             return
         if self.running or (self.process and self.process.poll() is None):
-            self.stop()
-            time.sleep(0.3)
-        self.start()
+            self.stop_async(callback=lambda: self.start_async(callback=callback))
+        else:
+            self.start_async(callback=callback)
 
     def apply(self):
         val = self.proto_var.get() if self.proto_var else "vless"
@@ -2284,10 +2540,9 @@ class ProxyInstance:
 
         if self.running:
             self._log("Restarting proxy...")
-            self.stop()
-            self.app.after(500, self.start)
+            self.restart_async()
         else:
-            self.start()
+            self.start_async()
 
     def close_instance(self):
         if len(self.app.instances) <= 1:
@@ -2356,22 +2611,28 @@ class ProxyInstance:
         except Exception:
             pass
 
-    def poll_health(self):
+    def check_health_sync(self, timeout: float = 0.6) -> bool:
+        """Non-UI health check method safe to run in a background worker thread."""
         h, p_str = self.get_listen()
         try:
             p = int(p_str)
         except ValueError:
-            return
-        alive = is_port_alive(h, p)
+            return False
+        return is_port_alive(h, p, timeout=timeout)
 
+    def apply_health_status(self, alive: bool) -> bool:
+        """Apply health status on main thread. Returns True if status changed."""
+        if self.is_transitioning:
+            return False
+
+        changed = False
         if self.running:
             if alive and not self.healthy:
                 self.healthy = True
                 self._reconnect_attempt = 0
                 self._set_state("running")
-                self.app.update_tray_icon()
                 self.app.refresh_overview()
-                self.app._update_header_stats()
+                changed = True
             elif not alive and self.healthy:
                 self.healthy = False
                 if self.process and self.process.poll() is None:
@@ -2380,58 +2641,68 @@ class ProxyInstance:
                     self._set_state("error")
                     if not self._manual_stop and self.is_auto_reconnect_enabled():
                         self._schedule_reconnect()
-                self.app.update_tray_icon()
                 self.app.refresh_overview()
-                self.app._update_header_stats()
+                changed = True
         else:
             if alive:
                 if self._manual_stop:
                     # User stopped proxy, but an orphan process is still holding the port
-                    kill_processes_on_port(p)
-                    kill_processes_on_port(self.get_http_port())
-                    geo_ip.invalidate_cache(h, p)
+                    h, port_str = self.get_listen()
+                    try:
+                        p = int(port_str)
+                        threading.Thread(
+                            target=lambda: (kill_processes_on_port(p), kill_processes_on_port(self.get_http_port()), geo_ip.invalidate_cache(h, p)),
+                            daemon=True
+                        ).start()
+                    except Exception:
+                        pass
                 elif self._reconnect_timer_id is not None:
-                    # Reconnect in progress, do not mark running prematurely
                     pass
                 else:
                     # Preexisting process detected on port
                     self.running = True
                     self.healthy = True
                     self._set_state("running")
-                    self.app.update_tray_icon()
                     self.app.refresh_overview()
-                    self.app._update_header_stats()
+                    changed = True
             else:
                 if self.healthy:
                     self.healthy = False
                     self._set_state("stopped")
-                    self.app.update_tray_icon()
                     self.app.refresh_overview()
-                    self.app._update_header_stats()
+                    changed = True
+        return changed
+
+    def poll_health(self):
+        """Synchronous poll method for backwards compatibility."""
+        alive = self.check_health_sync()
+        if self.apply_health_status(alive):
+            self.app.update_tray_icon()
+            self.app.refresh_overview()
+            self.app._update_header_stats()
 
     def _set_state(self, state: str):
         if threading.current_thread() is not threading.main_thread():
-            try:
-                self.app.after(0, lambda s=state: self._set_state(s))
-            except Exception:
-                pass
+            self._dispatch_ui(lambda s=state: self._set_state(s))
             return
         h, port = self.get_listen()
         http_port = self.get_http_port()
         states = {
             "stopped":  (C["red"],    t("status_stopped"), t("btn_on"),  C["green"]),
-            "starting": (C["yellow"], t("status_starting"), t("btn_off"), C["red"]),
+            "starting": (C["yellow"], t("status_starting"), "⏳ ...",    C["yellow"]),
             "running":  (C["green"],  t("status_running", port=port, http_port=http_port), t("btn_off"), C["red"]),
-            "error":    (C["red"],    t("status_error"), t("btn_on"),  C["green"]),
+            "stopping": (C["yellow"], "Остановка...",      "⏳ ...",    C["yellow"]),
+            "error":    (C["red"],    t("status_error"),   t("btn_on"),  C["green"]),
         }
         dot_color, label_text, btn_text, btn_color = states.get(state, states["stopped"])
+        btn_state = tk.DISABLED if state in ("starting", "stopping") else tk.NORMAL
         try:
             if self.status_dot and self.status_dot.winfo_exists():
                 self.status_dot.config(fg=dot_color)
             if self.status_label and self.status_label.winfo_exists():
                 self.status_label.config(text=label_text)
             if self.toggle_btn and self.toggle_btn.winfo_exists():
-                self.toggle_btn.config(text=btn_text, bg=btn_color)
+                self.toggle_btn.config(text=btn_text, bg=btn_color, state=btn_state)
         except Exception:
             pass
 
@@ -2855,6 +3126,7 @@ class VlessApp(tk.Tk):
     def sort_instances(self):
         """Sort instances ascending by numeric order (>= 0), then by global_id."""
         self.instances.sort(key=lambda inst: (inst.get_order(), inst.global_id))
+        self._cached_instances_signature = None
 
     def _load_saved_data(self):
         raw_instances = load_instances()
@@ -3011,16 +3283,137 @@ class VlessApp(tk.Tk):
         self.overview_content.bind(
             "<Configure>", lambda e: self.overview_canvas.configure(scrollregion=self.overview_canvas.bbox("all"))
         )
-        self.overview_canvas.create_window((0, 0), window=self.overview_content, anchor="nw", width=780)
+        self.overview_canvas_window = self.overview_canvas.create_window((0, 0), window=self.overview_content, anchor="nw", width=780)
         self.overview_canvas.configure(yscrollcommand=self.overview_scrollbar.set)
+
+        def _on_canvas_resize(e):
+            if hasattr(self, "overview_canvas_window") and self.overview_canvas.winfo_exists():
+                self.overview_canvas.itemconfig(self.overview_canvas_window, width=e.width)
+        self.overview_canvas.bind("<Configure>", _on_canvas_resize)
+
+        # Smooth mousewheel handling
+        def _on_overview_mousewheel(event):
+            try:
+                if self.overview_canvas.winfo_exists():
+                    self.overview_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception:
+                pass
+
+        def _bind_overview_wheel(e):
+            self.overview_canvas.bind_all("<MouseWheel>", _on_overview_mousewheel)
+
+        def _unbind_overview_wheel(e):
+            self.overview_canvas.unbind_all("<MouseWheel>")
+
+        self.overview_canvas.bind("<Enter>", _bind_overview_wheel)
+        self.overview_canvas.bind("<Leave>", _unbind_overview_wheel)
+        self.overview_content.bind("<Enter>", _bind_overview_wheel)
+        self.overview_content.bind("<Leave>", _unbind_overview_wheel)
 
         self.overview_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.overview_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.refresh_overview()
 
+    def update_overview_card(self, inst: ProxyInstance):
+        """Update a single proxy card in-place without touching any other widgets."""
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                self.after(0, lambda: self.update_overview_card(inst))
+            except Exception:
+                pass
+            return
+        if not hasattr(self, "_overview_cards"):
+            self._overview_cards = {}
+        data = self._overview_cards.get(inst)
+        if data and data.get("card") and data["card"].winfo_exists():
+            self._update_overview_card_widgets(inst, data)
+        else:
+            self.refresh_overview()
+
+    def _update_overview_card_widgets(self, inst: ProxyInstance, data: dict):
+        try:
+            h, port = inst.get_listen()
+            http_port = inst.get_http_port()
+            display_name = inst.get_display_name()
+            order_str = format_order(inst.get_order())
+
+            flag = inst.geo_info.get("flag", "🌐")
+            country = inst.geo_info.get("country", "Unknown")
+            ip = inst.geo_info.get("ip", "")
+
+            # Dot indicator color
+            if inst.is_transitioning:
+                dot_color = C["yellow"]
+            elif inst.running and inst.healthy:
+                dot_color = C["green"]
+            elif inst.running:
+                dot_color = C["yellow"]
+            else:
+                dot_color = C["red"]
+
+            if data.get("dot") and data["dot"].winfo_exists():
+                data["dot"].config(fg=dot_color)
+
+            if data.get("order_btn") and data["order_btn"].winfo_exists():
+                data["order_btn"].config(text=f"#{order_str}")
+
+            if data.get("name_lbl") and data["name_lbl"].winfo_exists():
+                data["name_lbl"].config(text=display_name)
+
+            # Badges
+            if data.get("ks_badge") and data["ks_badge"].winfo_exists():
+                if inst.cfg.get("killswitch", False):
+                    if not data["ks_badge"].winfo_ismapped():
+                        data["ks_badge"].pack(side=tk.LEFT, padx=(6, 0))
+                else:
+                    if data["ks_badge"].winfo_ismapped():
+                        data["ks_badge"].pack_forget()
+
+            if data.get("system_badge") and data["system_badge"].winfo_exists():
+                if inst.is_system_proxy():
+                    if not data["system_badge"].winfo_ismapped():
+                        data["system_badge"].pack(side=tk.LEFT, padx=(6, 0))
+                else:
+                    if data["system_badge"].winfo_ismapped():
+                        data["system_badge"].pack_forget()
+
+            if data.get("work_badge") and data["work_badge"].winfo_exists():
+                if inst.is_work_proxy():
+                    if not data["work_badge"].winfo_ismapped():
+                        data["work_badge"].pack(side=tk.LEFT, padx=(6, 0))
+                else:
+                    if data["work_badge"].winfo_ismapped():
+                        data["work_badge"].pack_forget()
+
+            if data.get("ports_lbl") and data["ports_lbl"].winfo_exists():
+                data["ports_lbl"].config(text=f"SOCKS5: {h}:{port}  |  HTTP: {h}:{http_port}")
+
+            geo_str = f"{flag} {country}" + (f" ({ip})" if ip else "")
+            geo_color = C["yellow"] if country != "Unknown" else C["muted"]
+            if data.get("geo_lbl") and data["geo_lbl"].winfo_exists():
+                data["geo_lbl"].config(text=geo_str, fg=geo_color)
+
+            # Toggle button
+            if data.get("toggle_btn") and data["toggle_btn"].winfo_exists():
+                if inst.is_transitioning:
+                    btn_text = "⏳ ..."
+                    btn_bg = C["yellow"]
+                    btn_state = tk.DISABLED
+                elif inst.running:
+                    btn_text = t("btn_off")
+                    btn_bg = C["red"]
+                    btn_state = tk.NORMAL
+                else:
+                    btn_text = t("btn_on")
+                    btn_bg = C["green"]
+                    btn_state = tk.NORMAL
+                data["toggle_btn"].config(text=btn_text, bg=btn_bg, state=btn_state)
+        except Exception:
+            pass
+
     def refresh_overview(self):
-        """Redraw all proxy cards in the overview content frame."""
+        """Render or update all proxy cards in the overview content frame."""
         if threading.current_thread() is not threading.main_thread():
             try:
                 self.after(0, self.refresh_overview)
@@ -3035,6 +3428,26 @@ class VlessApp(tk.Tk):
                 return
         except Exception:
             return
+
+        if not hasattr(self, "_overview_cards"):
+            self._overview_cards = {}
+
+        current_instances_signature = [id(inst) for inst in self.instances]
+        # In-place differential updates without tearing down the DOM or resetting scroll position
+        if getattr(self, "_cached_instances_signature", None) == current_instances_signature:
+            all_valid = True
+            for inst in self.instances:
+                data = self._overview_cards.get(inst)
+                if not (data and data.get("card") and data["card"].winfo_exists()):
+                    all_valid = False
+                    break
+                self._update_overview_card_widgets(inst, data)
+            if all_valid:
+                return
+
+        # Structure or count changed: full rebuild of overview cards
+        self._cached_instances_signature = current_instances_signature
+        self._overview_cards.clear()
 
         for widget in self.overview_content.winfo_children():
             try:
@@ -3069,7 +3482,8 @@ class VlessApp(tk.Tk):
             left_badge.pack(side=tk.LEFT, padx=(10, 6), pady=8)
 
             dot_color = C["green"] if inst.running and inst.healthy else (C["yellow"] if inst.running else C["red"])
-            tk.Label(left_badge, text="●", font=("Segoe UI", 14), fg=dot_color, bg=C["card"]).pack(side=tk.LEFT, padx=(0, 4))
+            dot_lbl = tk.Label(left_badge, text="●", font=("Segoe UI", 14), fg=dot_color, bg=C["card"])
+            dot_lbl.pack(side=tk.LEFT, padx=(0, 4))
             
             # Interactive order badge (click to change order)
             order_btn = tk.Button(
@@ -3087,7 +3501,8 @@ class VlessApp(tk.Tk):
             title_row = tk.Frame(info, bg=C["card"])
             title_row.pack(anchor="w")
 
-            tk.Label(title_row, text=display_name, font=("Segoe UI", 10, "bold"), fg=C["text"], bg=C["card"]).pack(side=tk.LEFT)
+            name_lbl = tk.Label(title_row, text=display_name, font=("Segoe UI", 10, "bold"), fg=C["text"], bg=C["card"])
+            name_lbl.pack(side=tk.LEFT)
 
             # Pencil rename button
             rename_btn = tk.Button(
@@ -3097,39 +3512,45 @@ class VlessApp(tk.Tk):
                 command=lambda i=inst: self.prompt_rename_proxy(i),
             )
             rename_btn.pack(side=tk.LEFT, padx=(4, 0))
+
+            ks_badge = tk.Label(
+                title_row, text=" 🛡️ KS ", font=("Segoe UI", 7, "bold"),
+                bg=C["hover"], fg=C["green"], padx=4, pady=1
+            )
             if inst.cfg.get("killswitch", False):
-                tk.Label(
-                    title_row, text=" 🛡️ KS ", font=("Segoe UI", 7, "bold"),
-                    bg=C["hover"], fg=C["green"], padx=4, pady=1
-                ).pack(side=tk.LEFT, padx=(6, 0))
+                ks_badge.pack(side=tk.LEFT, padx=(6, 0))
 
+            system_badge = tk.Label(
+                title_row, text=f" {t('badge_system_proxy')} ", font=("Segoe UI", 7, "bold"),
+                bg=C["hover"], fg=C["yellow"], padx=4, pady=1
+            )
             if inst.is_system_proxy():
-                tk.Label(
-                    title_row, text=f" {t('badge_system_proxy')} ", font=("Segoe UI", 7, "bold"),
-                    bg=C["hover"], fg=C["yellow"], padx=4, pady=1
-                ).pack(side=tk.LEFT, padx=(6, 0))
+                system_badge.pack(side=tk.LEFT, padx=(6, 0))
 
+            work_badge = tk.Label(
+                title_row, text=f" {t('badge_work_proxy')} ", font=("Segoe UI", 7, "bold"),
+                bg=C["hover"], fg=C["teal"], padx=4, pady=1
+            )
             if inst.is_work_proxy():
-                tk.Label(
-                    title_row, text=f" {t('badge_work_proxy')} ", font=("Segoe UI", 7, "bold"),
-                    bg=C["hover"], fg=C["teal"], padx=4, pady=1
-                ).pack(side=tk.LEFT, padx=(6, 0))
+                work_badge.pack(side=tk.LEFT, padx=(6, 0))
 
             detail_row = tk.Frame(info, bg=C["card"])
             detail_row.pack(anchor="w", pady=(2, 0))
 
-            tk.Label(
+            ports_lbl = tk.Label(
                 detail_row,
                 text=f"SOCKS5: {h}:{port}  |  HTTP: {h}:{http_port}",
                 font=("Consolas", 9), fg=C["subtext"], bg=C["card"]
-            ).pack(side=tk.LEFT, padx=(0, 12))
+            )
+            ports_lbl.pack(side=tk.LEFT, padx=(0, 12))
 
             geo_str = f"{flag} {country}" + (f" ({ip})" if ip else "")
-            tk.Label(
+            geo_lbl = tk.Label(
                 detail_row,
                 text=geo_str,
                 font=("Segoe UI", 9, "bold"), fg=C["yellow"] if country != "Unknown" else C["muted"], bg=C["card"]
-            ).pack(side=tk.LEFT)
+            )
+            geo_lbl.pack(side=tk.LEFT)
 
             # Right action buttons
             actions = tk.Frame(card, bg=C["card"])
@@ -3138,25 +3559,44 @@ class VlessApp(tk.Tk):
             # Start/Stop toggle
             toggle_btn_text = t("btn_off") if inst.running else t("btn_on")
             toggle_btn_bg = C["red"] if inst.running else C["green"]
-            tk.Button(
+            toggle_btn = tk.Button(
                 actions, text=toggle_btn_text, font=("Segoe UI", 9, "bold"),
                 bg=toggle_btn_bg, fg="#1e1e2e", relief=tk.FLAT, padx=8, pady=2,
-                command=lambda i=inst: (i.toggle(), self.refresh_overview()),
-            ).pack(side=tk.LEFT, padx=3)
+                command=lambda i=inst: i.toggle_async(),
+            )
+            toggle_btn.pack(side=tk.LEFT, padx=3)
 
             # Check Geo button
-            tk.Button(
+            geo_btn = tk.Button(
                 actions, text="🔍", font=("Segoe UI", 9),
                 bg=C["overlay"], fg=C["text"], activebackground=C["hover"], relief=tk.FLAT, padx=6, pady=2,
                 command=lambda i=inst: i.check_geo_now(),
-            ).pack(side=tk.LEFT, padx=3)
+            )
+            geo_btn.pack(side=tk.LEFT, padx=3)
 
             # Jump to Account tab button
-            tk.Button(
+            view_btn = tk.Button(
                 actions, text=t("btn_view_tab"), font=("Segoe UI", 9),
                 bg=C["overlay"], fg=C["text"], activebackground=C["hover"], relief=tk.FLAT, padx=8, pady=2,
                 command=lambda idx=idx: self._jump_to_instance(idx),
-            ).pack(side=tk.LEFT, padx=3)
+            )
+            view_btn.pack(side=tk.LEFT, padx=3)
+
+            self._overview_cards[inst] = {
+                "card": card,
+                "dot": dot_lbl,
+                "order_btn": order_btn,
+                "name_lbl": name_lbl,
+                "ks_badge": ks_badge,
+                "system_badge": system_badge,
+                "work_badge": work_badge,
+                "ports_lbl": ports_lbl,
+                "geo_lbl": geo_lbl,
+                "toggle_btn": toggle_btn,
+                "geo_btn": geo_btn,
+                "view_btn": view_btn,
+                "idx": idx,
+            }
 
     def _jump_to_instance(self, global_idx: int):
         target_page = global_idx // PAGE_SIZE
@@ -3299,8 +3739,30 @@ class VlessApp(tk.Tk):
         opt_content = tk.Frame(opt_canvas, bg=bg)
 
         opt_content.bind("<Configure>", lambda e: opt_canvas.configure(scrollregion=opt_canvas.bbox("all")))
-        opt_canvas.create_window((0, 0), window=opt_content, anchor="nw", width=760)
+        self.opt_canvas_window = opt_canvas.create_window((0, 0), window=opt_content, anchor="nw")
+        def _on_opt_canvas_configure(e):
+            opt_canvas.itemconfig(self.opt_canvas_window, width=e.width)
+        opt_canvas.bind("<Configure>", _on_opt_canvas_configure)
         opt_canvas.configure(yscrollcommand=opt_scrollbar.set)
+
+        def _on_opt_mousewheel(event):
+            try:
+                delta = int(-1 * (event.delta / 120)) if event.delta else 0
+                if delta != 0:
+                    opt_canvas.yview_scroll(delta, "units")
+            except Exception:
+                pass
+
+        def _bind_opt_wheel(e):
+            opt_canvas.bind_all("<MouseWheel>", _on_opt_mousewheel)
+
+        def _unbind_opt_wheel(e):
+            opt_canvas.unbind_all("<MouseWheel>")
+
+        opt_canvas.bind("<Enter>", _bind_opt_wheel)
+        opt_canvas.bind("<Leave>", _unbind_opt_wheel)
+        opt_content.bind("<Enter>", _bind_opt_wheel)
+        opt_content.bind("<Leave>", _unbind_opt_wheel)
 
         opt_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=px, pady=10)
         opt_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -3677,9 +4139,13 @@ class VlessApp(tk.Tk):
                     try:
                         self.clipboard_clear()
                         self.clipboard_append(txt)
-                        orig_text = btn_ref.cget("text")
-                        btn_ref.config(text=t("btn_prompt_copied"), bg=C["green"], fg="#1e1e2e")
-                        self.after(1800, lambda: btn_ref.config(text=orig_text, bg=C["overlay"], fg=C["text"]))
+                        def _revert(b=btn_ref, ot=orig_text):
+                            try:
+                                if b.winfo_exists():
+                                    b.config(text=ot, bg=C["overlay"], fg=C["text"])
+                            except Exception:
+                                pass
+                        self.after(1800, _revert)
                     except Exception as ex:
                         messagebox.showerror("Clipboard", f"Ошибка копирования: {ex}", parent=dlg)
                 return _copy
@@ -4423,6 +4889,7 @@ class VlessApp(tk.Tk):
 
         self.current_page = (len(self.instances) - 1) // PAGE_SIZE
         self.save_all()
+        self._cached_instances_signature = None
         self.refresh_current_page_tabs()
         self.refresh_overview()
         self._update_header_stats()
@@ -4436,23 +4903,25 @@ class VlessApp(tk.Tk):
         if inst in self.instances:
             self.instances.remove(inst)
         self.save_all()
+        self._cached_instances_signature = None
         self.refresh_current_page_tabs()
         self.refresh_overview()
         self._update_header_stats()
         self.update_tray_icon()
 
     def start_all(self):
+        """Asynchronously start all proxies that are not running without blocking GUI."""
         for inst in self.instances:
-            if not inst.running:
-                inst.start()
-        self.refresh_overview()
+            if not inst.running and not inst.is_transitioning:
+                inst.start_async()
         self.update_tray_icon()
         self._update_header_stats()
 
     def stop_all(self):
+        """Asynchronously stop all proxies that are running without blocking GUI."""
         for inst in self.instances:
-            inst.stop()
-        self.refresh_overview()
+            if (inst.running or inst.process) and not inst.is_transitioning:
+                inst.stop_async()
         self.update_tray_icon()
         self._update_header_stats()
 
@@ -4935,23 +5404,51 @@ class VlessApp(tk.Tk):
         self.destroy()
 
     # ── Background Poll Loop ──────────────────────────────────
+    # ── Background Poll Loop (Non-blocking Asynchronous) ──────
     def _poll_loop(self):
-        for inst in self.instances:
-            inst.poll_health()
-        self.update_tray_icon()
+        def _bg_poll():
+            statuses = []
+            for inst in list(self.instances):
+                try:
+                    alive = inst.check_health_sync(timeout=0.6)
+                    statuses.append((inst, alive))
+                except Exception:
+                    pass
+            try:
+                self.after(0, lambda: self._apply_poll_results(statuses))
+            except Exception:
+                pass
 
-        # Check periodic auto-backup
-        try:
-            ok, msg, path = backup_manager.check_and_run_auto_backup()
-            if ok and hasattr(self, "backup_list_container"):
-                self._render_available_backups()
-                if hasattr(self, "last_backup_time_lbl"):
-                    now_str = settings_manager.get_setting("last_backup_time", "-")
-                    self.last_backup_time_lbl.config(text=t("lbl_last_backup_time", time=now_str), fg=C["green"])
-        except Exception:
-            pass
+        threading.Thread(target=_bg_poll, daemon=True).start()
+
+        # Check periodic auto-backup asynchronously
+        def _bg_backup():
+            try:
+                ok, msg, path = backup_manager.check_and_run_auto_backup()
+                if ok:
+                    self.after(0, self._on_auto_backup_done)
+            except Exception:
+                pass
+        threading.Thread(target=_bg_backup, daemon=True).start()
 
         self.after(4000, self._poll_loop)
+
+    def _apply_poll_results(self, statuses):
+        changed = False
+        for inst, alive in statuses:
+            if inst in self.instances:
+                if inst.apply_health_status(alive):
+                    changed = True
+        if changed:
+            self.update_tray_icon()
+            self._update_header_stats()
+
+    def _on_auto_backup_done(self):
+        if hasattr(self, "backup_list_container"):
+            self._render_available_backups()
+            if hasattr(self, "last_backup_time_lbl"):
+                now_str = settings_manager.get_setting("last_backup_time", "-")
+                self.last_backup_time_lbl.config(text=t("lbl_last_backup_time", time=now_str), fg=C["green"])
 
 
 #: На случай, если шаблона не оказалось и в сборке.
