@@ -237,6 +237,118 @@ def find_free_port(start: int = BASE_PORT, host: str = "127.0.0.1", exclude: set
     return start + len(exclude)
 
 
+#: Our own proxy launchers: `python main.py` in a script build, vless2socks-cli.exe in a frozen one.
+_SUPERVISOR_EXE_NAMES = {"python.exe", "vless2socks-cli.exe"}
+
+
+def _process_table() -> dict[int, tuple[int, str]]:
+    """Snapshot of running processes on Windows: pid -> (parent pid, exe name in lower case)."""
+    if sys.platform != "win32":
+        return {}
+    import ctypes
+    from ctypes import wintypes
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", wintypes.LONG), ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    table: dict[int, tuple[int, str]] = {}
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+        if snapshot in (None, wintypes.HANDLE(-1).value):
+            return {}
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+            while ok:
+                table[int(entry.th32ProcessID)] = (int(entry.th32ParentProcessID), entry.szExeFile.lower())
+                ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snapshot)
+    except Exception:
+        return {}
+    return table
+
+
+def _expand_to_proxy_supervisors(
+    pids: set[int],
+    current_pid: int,
+    table: dict[int, tuple[int, str]] | None = None,
+    start_time=None,
+) -> set[int]:
+    """Replace an xray pid by the top of its `main.py` launcher chain.
+
+    xray is kept alive by its launcher, so killing xray alone frees the port for a second at most: a
+    launcher orphaned by a previous GUI session restarts it and fights the new instance for the port.
+    Never climbs into the current process or its ancestors.
+    """
+    if table is None:
+        table = _process_table()
+    if not table:
+        return set(pids)
+    if start_time is None:
+        start_time = _process_start_time
+
+    protected = set()
+    cursor = current_pid
+    while cursor in table and cursor not in protected:
+        protected.add(cursor)
+        cursor = table[cursor][0]
+
+    expanded = set()
+    for pid in pids:
+        target = pid
+        if table.get(pid, (0, ""))[1] == "xray.exe":
+            for _ in range(3):
+                parent = table.get(target, (0, ""))[0]
+                if parent in protected or table.get(parent, (0, ""))[1] not in _SUPERVISOR_EXE_NAMES:
+                    break
+                # A recorded parent pid may have been reused by an unrelated process after the real
+                # parent died; a genuine parent is never younger than its child.
+                born_parent, born_child = start_time(parent), start_time(target)
+                if born_parent is None or born_child is None or born_parent > born_child:
+                    break
+                target = parent
+        expanded.add(target)
+    return expanded
+
+
+def _process_start_time(pid: int) -> int | None:
+    """Creation time of a process as a Windows FILETIME integer, or None if it cannot be read."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return None
+        try:
+            created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+            if not kernel32.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)):
+                return None
+            return (created.dwHighDateTime << 32) | created.dwLowDateTime
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return None
+
+
 def kill_processes_on_port(port: int, current_pid: int | None = None) -> tuple[bool, str]:
     """Force kill processes holding the given port on Windows."""
     import os
@@ -277,6 +389,8 @@ def kill_processes_on_port(port: int, current_pid: int | None = None) -> tuple[b
         if is_port_free(port):
             return True, t("port_already_free", port=port)
         return False, t("port_busy_wait", port=port)
+
+    pids_to_kill = _expand_to_proxy_supervisors(pids_to_kill, current_pid)
 
     killed_count = 0
     errors = []
@@ -617,6 +731,7 @@ class ProxyInstance:
     running: bool = False
     healthy: bool = False
     is_transitioning: bool = False
+    _should_run: bool = False
 
     def __init__(self, app: "VlessApp", cfg: dict, global_id: int):
         self.app = app
@@ -668,6 +783,8 @@ class ProxyInstance:
         self.order_label: Optional[tk.Label] = None
 
         # Reconnect state
+        #: True once the proxy was started (or adopted) and until the user stops it
+        self._should_run = False
         self._manual_stop = False
         self._reconnect_attempt = 0
         self._reconnect_timer_id: Optional[str] = None
@@ -2236,6 +2353,8 @@ class ProxyInstance:
         if self.killswitch_var is not None:
             self.cfg["killswitch"] = bool(self.killswitch_var.get())
         self._ensure_fallback_proxy()
+        # Only now, with a valid URL: from here on the proxy is expected to stay up until stopped
+        self._should_run = True
         self._init_geo_from_url()
 
         # Write instance config
@@ -2311,6 +2430,8 @@ class ProxyInstance:
         if self.killswitch_var is not None:
             self.cfg["killswitch"] = bool(self.killswitch_var.get())
         self._ensure_fallback_proxy()
+        # Only now, with a valid URL: from here on the proxy is expected to stay up until stopped
+        self._should_run = True
         self._init_geo_from_url()
 
         self.is_transitioning = True
@@ -2421,6 +2542,7 @@ class ProxyInstance:
 
     def _stop_internal(self):
         self._manual_stop = True
+        self._should_run = False
         self._cancel_reconnect()
         self._reconnect_attempt = 0
         self._log("Stopping...")
@@ -2498,6 +2620,7 @@ class ProxyInstance:
             return
 
         self._manual_stop = True
+        self._should_run = False
         self._cancel_reconnect()
         self._reconnect_attempt = 0
         self.is_transitioning = True
@@ -2669,6 +2792,7 @@ class ProxyInstance:
 
     def destroy(self):
         self._manual_stop = True
+        self._should_run = False
         self._cancel_reconnect()
         self.stop()
         if self.config_path.exists():
@@ -2747,16 +2871,26 @@ class ProxyInstance:
                 self._set_state("running")
                 self.app.refresh_overview()
                 changed = True
-            elif not alive and self.healthy:
-                self.healthy = False
-                if self.process and self.process.poll() is None:
-                    self._set_state("starting")
-                else:
+            elif not alive:
+                has_live_process = bool(self.process and self.process.poll() is None)
+                if has_live_process:
+                    if self.healthy:
+                        self.healthy = False
+                        self._set_state("starting")
+                        self.app.refresh_overview()
+                        changed = True
+                elif self._reconnect_timer_id is None:
+                    # Nothing of ours is behind this instance any more - e.g. a process adopted from a
+                    # previous GUI session has died. Drop the stale "running" flag, otherwise
+                    # _schedule_reconnect() refuses to act and the proxy stays down forever.
+                    self.healthy = False
+                    self.running = False
+                    self.process = None
                     self._set_state("error")
                     if not self._manual_stop and self.is_auto_reconnect_enabled():
                         self._schedule_reconnect()
-                self.app.refresh_overview()
-                changed = True
+                    self.app.refresh_overview()
+                    changed = True
         else:
             if alive:
                 if self._manual_stop:
@@ -2776,6 +2910,7 @@ class ProxyInstance:
                     # Preexisting process detected on port
                     self.running = True
                     self.healthy = True
+                    self._should_run = True
                     self._set_state("running")
                     self.app.refresh_overview()
                     changed = True
@@ -2784,6 +2919,16 @@ class ProxyInstance:
                     self.healthy = False
                     self._set_state("stopped")
                     self.app.refresh_overview()
+                    changed = True
+                # Safety net: the proxy is supposed to be up, nothing is running and no retry is
+                # pending (a failed launch, a watcher thread that never got to schedule one, ...)
+                if (
+                    self._should_run
+                    and not self._manual_stop
+                    and self._reconnect_timer_id is None
+                    and self.is_auto_reconnect_enabled()
+                ):
+                    self._schedule_reconnect()
                     changed = True
         return changed
 
