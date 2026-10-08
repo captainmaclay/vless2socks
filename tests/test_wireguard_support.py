@@ -170,6 +170,45 @@ class WireGuardXrayConfigTest(unittest.TestCase):
         desc = describe_config(xray_cfg)
         self.assertIn("allowedIPs=3 subnets", desc)
 
+    def test_split_tunnel_routes_non_allowed_traffic_to_fallback_proxy(self):
+        """Partial AllowedIPs + fallbackProxy: corporate subnets go to WireGuard, the rest to the fallback SOCKS5."""
+        def make(allowed, fallback, port=1030):
+            srv = WireGuardServer(
+                address="wg.example.com",
+                port=51820,
+                secret_key="clientPrivateSecretKey=",
+                peer_public_key="serverPublicKeyExpected=",
+                local_address=["10.0.0.2/32"],
+                allowed_ips=allowed,
+            )
+            return build_xray_config(AppConfig(
+                server=srv, listen_host="127.0.0.1", listen_port=port,
+                killswitch=True, send_through="none", fallback_proxy=fallback,
+            ))
+
+        split = make(["10.200.2.0/24", "10.104.0.0/16"], "127.0.0.1:1015")
+        by_tag = {o["tag"]: o for o in split["outbounds"]}
+        self.assertEqual(by_tag["fallback"]["protocol"], "socks")
+        self.assertEqual(by_tag["fallback"]["settings"]["servers"], [{"address": "127.0.0.1", "port": 1015}])
+        rules = split["routing"]["rules"]
+        self.assertEqual(rules[0], {"type": "field", "ip": ["10.200.2.0/24", "10.104.0.0/16"], "outboundTag": "proxy"})
+        self.assertEqual(rules[1]["outboundTag"], "fallback")
+        self.assertIn("socks-in", rules[1]["inboundTag"])
+        # The catch-all fallback rule would swallow domains unless they are resolved at the IP rule
+        self.assertEqual(split["routing"]["domainStrategy"], "IPOnDemand")
+        self.assertIn(split["dns"]["tag"], rules[1]["inboundTag"])
+
+        # No fallback configured, a full-tunnel profile, or a fallback pointing at itself: routing stays as before
+        for cfg in (
+            make(["10.200.2.0/24"], ""),
+            make(["0.0.0.0/0"], "127.0.0.1:1015"),
+            make(["10.200.2.0/24"], "127.0.0.1:1030"),
+        ):
+            self.assertNotIn("fallback", [o["tag"] for o in cfg["outbounds"]])
+            self.assertNotIn("dns", cfg)
+            self.assertEqual(cfg["routing"]["rules"][0]["outboundTag"], "proxy")
+            self.assertNotIn("ip", cfg["routing"]["rules"][0])
+
     def test_wireguard_backend_resolution(self):
         srv = WireGuardServer(
             address="1.2.3.4",

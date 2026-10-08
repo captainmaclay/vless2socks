@@ -61,6 +61,10 @@ def run():
             "tests.test_ink_automation",
             "tests.test_gui_launchers_modal",
             "tests.test_e2e",
+            "tests.test_zapret_recovery",
+            "tests.test_zapret_e2e",
+            "tests.test_zapret_relay_error",
+            "tests.test_telegram_proxy_dispatcher",
         ]
         for mod in modules:
             try:

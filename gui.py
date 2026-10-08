@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import queue
 import shutil
 import socket
 import subprocess
@@ -34,6 +35,7 @@ from typing import Any, Optional
 import backup_manager
 import geo_ip
 import settings_manager
+from ZapretRecovery import Zapret2Watcher, ZapretRecoveryWidget
 from i18n import get_current_language, load_language_preference, save_language_preference, t
 from vless2socks.paths import APP_DIR, FROZEN, bundled, unpack_bundled_bin
 
@@ -170,6 +172,8 @@ def download_xray(emit) -> bool:
     return True
 
 PAGE_SIZE = 10
+RESTART_PROXIES_TIMEOUT_SEC = 45
+UI_QUEUE_POLL_MS = 20
 BASE_PORT = 1081
 
 # ── Colors (Catppuccin Mocha Palette) ──────────────────────────
@@ -187,8 +191,11 @@ C = {
     "blue":     "#89b4fa",
     "teal":     "#94e2d5",
     "purple":   "#cba6f7",
+    "orange":   "#fab387",
+    "peach":    "#fab387",
     "hover":    "#45475a",
     "border":   "#45475a",
+
     "log_bg":   "#11111b",
     "log_fg":   "#a6adc8",
     "orange":   "#ff7700",
@@ -207,9 +214,15 @@ def is_port_free(port: int, host: str = "127.0.0.1") -> bool:
 
 
 def is_port_alive(host: str, port: int, timeout: float = 0.8) -> bool:
-    """Check if port is responding via TCP connect."""
+    """Check if port is responding via TCP/SOCKS5 connect without generating EOF errors."""
     try:
-        with socket.create_connection((host, port), timeout=timeout):
+        with socket.create_connection((host, port), timeout=timeout) as s:
+            try:
+                s.settimeout(min(timeout, 0.3))
+                s.sendall(b"\x05\x01\x00")
+                _ = s.recv(2)
+            except Exception:
+                pass
             return True
     except (OSError, socket.timeout):
         return False
@@ -356,6 +369,9 @@ def ensure_system_proxy_1015(instances: list[dict]) -> list[dict]:
             if "work_proxy" not in inst and "Work_Proxy" not in inst:
                 inst["work_proxy"] = False
                 inst["Work_Proxy"] = False
+            if "telegram_proxy" not in inst and "TelegramProxy" not in inst:
+                inst["telegram_proxy"] = False
+                inst["TelegramProxy"] = False
         elif port == 1030 or "worproxy" in str(inst.get("name", "")).lower():
             if "work_proxy" not in inst and "Work_Proxy" not in inst:
                 inst["work_proxy"] = True
@@ -363,6 +379,9 @@ def ensure_system_proxy_1015(instances: list[dict]) -> list[dict]:
             if "system_proxy" not in inst and "System_Proxy" not in inst:
                 inst["system_proxy"] = False
                 inst["System_Proxy"] = False
+            if "telegram_proxy" not in inst and "TelegramProxy" not in inst:
+                inst["telegram_proxy"] = False
+                inst["TelegramProxy"] = False
 
     if not found_1015:
         system_proxy = {
@@ -384,6 +403,8 @@ def ensure_system_proxy_1015(instances: list[dict]) -> list[dict]:
             "System_Proxy": True,
             "work_proxy": False,
             "Work_Proxy": False,
+            "telegram_proxy": False,
+            "TelegramProxy": False,
         }
         instances.insert(0, system_proxy)
 
@@ -651,9 +672,11 @@ class ProxyInstance:
         self._reconnect_attempt = 0
         self._reconnect_timer_id: Optional[str] = None
 
-        # Flags: System_Proxy & Work_Proxy
+        # Flags: System_Proxy & Work_Proxy & TelegramProxy
         self.system_proxy_var: Optional[tk.BooleanVar] = None
         self.work_proxy_var: Optional[tk.BooleanVar] = None
+        self.telegram_proxy_var: Optional[tk.BooleanVar] = None
+
 
         # Ensure port 1015 / 1030 defaults
         _, port = self.get_listen()
@@ -733,6 +756,58 @@ class ProxyInstance:
         self.cfg["Work_Proxy"] = val
         self.app.save_all()
         self.app.refresh_overview()
+
+    def is_telegram_proxy(self) -> bool:
+        """Check if instance is flagged as TelegramProxy."""
+        if self.telegram_proxy_var is not None:
+            return bool(self.telegram_proxy_var.get())
+        if "telegram_proxy" in self.cfg:
+            return bool(self.cfg["telegram_proxy"])
+        if "TelegramProxy" in self.cfg:
+            return bool(self.cfg["TelegramProxy"])
+        return False
+
+    def _ensure_fallback_proxy(self) -> None:
+        """WireGuard split tunnel: send traffic outside AllowedIPs through the System Proxy socket.
+
+        Only fills the default; an explicit "fallbackProxy" in the instance config (even "") is kept.
+        """
+        if "fallbackProxy" in self.cfg:
+            return
+        if not str(self.cfg.get("url", "")).startswith(("wireguard://", "wg://")):
+            return
+        if self.is_system_proxy():
+            return
+        system_socket = str(settings_manager.get_setting("system_proxy", "127.0.0.1:1015") or "").strip()
+        if system_socket:
+            self.cfg["fallbackProxy"] = system_socket
+
+    def set_telegram_proxy(self, val: bool) -> None:
+        """Dynamically set TelegramProxy flag and persist."""
+        b = bool(val)
+        self.cfg["telegram_proxy"] = b
+        self.cfg["TelegramProxy"] = b
+        if self.telegram_proxy_var is not None:
+            self.telegram_proxy_var.set(b)
+        self.app.save_all()
+        if hasattr(self.app, "_update_telegram_dispatcher_pool"):
+            self.app._update_telegram_dispatcher_pool()
+        if hasattr(self.app, "zapret_watcher") and self.app.zapret_watcher:
+            self.app.zapret_watcher.trigger_immediate_check()
+        self.app.refresh_overview()
+
+    def _on_telegram_proxy_toggled(self) -> None:
+        val = bool(self.telegram_proxy_var.get() if self.telegram_proxy_var else False)
+        self.cfg["telegram_proxy"] = val
+        self.cfg["TelegramProxy"] = val
+        self.app.save_all()
+        if hasattr(self.app, "_update_telegram_dispatcher_pool"):
+            self.app._update_telegram_dispatcher_pool()
+        if hasattr(self.app, "zapret_watcher") and self.app.zapret_watcher:
+            self.app.zapret_watcher.trigger_immediate_check()
+        self.app.refresh_overview()
+
+
 
     def get_order(self) -> float:
         """Return numeric order value (>= 0). Default is 0.0 for port 1015, or global_id for others."""
@@ -1017,6 +1092,25 @@ class ProxyInstance:
             command=self._on_work_proxy_toggled,
         )
         wp_chk.pack(side=tk.LEFT, padx=(0, 12))
+
+        self.telegram_proxy_var = tk.BooleanVar(value=self.is_telegram_proxy())
+        tp_chk = tk.Checkbutton(
+            flags_frame, text=f" {t('lbl_telegram_proxy')}", variable=self.telegram_proxy_var,
+            font=("Segoe UI", 9, "bold"), fg=C["peach"], bg=bg,
+            selectcolor=C["card"], activebackground=bg, activeforeground=C["peach"],
+            command=self._on_telegram_proxy_toggled,
+        )
+        tp_chk.pack(side=tk.LEFT, padx=(0, 12))
+
+        self.btn_copy_tg = tk.Button(
+            flags_frame, text=f"📋 {t('btn_copy_tg_socks')}", font=("Segoe UI", 8, "bold"),
+            bg=C["overlay"], fg=C["green"], activebackground=C["hover"], activeforeground=C["green"],
+            relief=tk.FLAT, padx=8, pady=2, cursor="hand2",
+            command=lambda: self.app._copy_tg_proxy_link(self),
+        )
+        self.btn_copy_tg.pack(side=tk.LEFT, padx=(4, 0))
+
+
 
         # 4. Upstream Protocol & Server Configuration
         proto_frame = tk.Frame(self.frame, bg=bg)
@@ -2000,7 +2094,7 @@ class ProxyInstance:
         except ValueError:
             port = 1081
 
-        if not self.running or not is_port_alive(host, port):
+        def _mark_stopped():
             self.geo_info["verified"] = False
             self.geo_info["ip"] = ""
             if self.frame and self.geo_card_label:
@@ -2009,10 +2103,16 @@ class ProxyInstance:
                 except Exception:
                     pass
             self._log(f"Geo IP: {t('status_stopped')} (порт {port} не отвечает)")
+
+        if not self.running:
+            _mark_stopped()
             return
 
         if self.geo_card_label:
-            self.geo_card_label.config(text=t("geo_checking"))
+            try:
+                self.geo_card_label.config(text=t("geo_checking"))
+            except Exception:
+                pass
 
         url = self.url_entry.get().strip() if self.url_entry else self.cfg.get("url", "")
 
@@ -2021,12 +2121,19 @@ class ProxyInstance:
             self._log(f"Geo IP: {self.geo_info.get('flag')} {self.geo_info.get('country')} ({self.geo_info.get('ip') or 'no IP'})")
             if self.frame and self.geo_card_label:
                 try:
-                    self.frame.after(0, lambda: self.geo_card_label.config(text=self._format_geo_text()))
+                    self.app.after(0,lambda: self.geo_card_label.config(text=self._format_geo_text()))
                 except Exception:
                     pass
             self.app.after(0, self.app.refresh_overview)
 
-        geo_ip.fetch_geo_async(host, port, _on_result, fallback_url=url)
+        def _probe():
+            # The port probe can take up to its full timeout, so it must not run on the GUI thread
+            if not is_port_alive(host, port):
+                self._dispatch_ui(_mark_stopped)
+                return
+            geo_ip.fetch_geo_async(host, port, _on_result, fallback_url=url)
+
+        threading.Thread(target=_probe, daemon=True).start()
 
     def _dispatch_ui(self, fn):
         """Safely schedule a function on the main thread, or invoke directly if not in Tk mainloop or test environment."""
@@ -2128,6 +2235,7 @@ class ProxyInstance:
         self.cfg["listen"] = f"{host}:{port}"
         if self.killswitch_var is not None:
             self.cfg["killswitch"] = bool(self.killswitch_var.get())
+        self._ensure_fallback_proxy()
         self._init_geo_from_url()
 
         # Write instance config
@@ -2202,6 +2310,7 @@ class ProxyInstance:
         self.cfg["listen"] = f"{host}:{port}"
         if self.killswitch_var is not None:
             self.cfg["killswitch"] = bool(self.killswitch_var.get())
+        self._ensure_fallback_proxy()
         self._init_geo_from_url()
 
         self.is_transitioning = True
@@ -2493,6 +2602,11 @@ class ProxyInstance:
             except Exception:
                 pass
         if not url:
+            if callback:
+                try:
+                    callback(False)
+                except Exception:
+                    pass
             return
         if self.running or (self.process and self.process.poll() is None):
             self.stop_async(callback=lambda: self.start_async(callback=callback))
@@ -2576,7 +2690,7 @@ class ProxyInstance:
                         self.healthy = True
                         self._reconnect_attempt = 0
                         if self.frame:
-                            self.frame.after(0, lambda: self._set_state("running"))
+                            self.app.after(0,lambda: self._set_state("running"))
         except Exception:
             pass
 
@@ -2602,7 +2716,7 @@ class ProxyInstance:
             pass
         try:
             if self.frame:
-                self.frame.after(0, lambda: self._set_state("error"))
+                self.app.after(0,lambda: self._set_state("error"))
             self.app.after(0, self.app.update_tray_icon)
             self.app.after(0, self.app.refresh_overview)
 
@@ -2720,7 +2834,7 @@ class ProxyInstance:
         self.log_lines.append(line)
         if self.frame and self.log_text:
             try:
-                self.frame.after(0, lambda l=line: self._append_log(l))
+                self.app.after(0,lambda l=line: self._append_log(l))
             except Exception:
                 pass
 
@@ -2771,6 +2885,20 @@ class ProxyInstance:
             wp_val = self.is_work_proxy()
             cfg["work_proxy"] = wp_val
             cfg["Work_Proxy"] = wp_val
+
+        if self.telegram_proxy_var is not None:
+            tp_val = bool(self.telegram_proxy_var.get())
+            cfg["telegram_proxy"] = tp_val
+            cfg["TelegramProxy"] = tp_val
+        elif "telegram_proxy" in self.cfg or "TelegramProxy" in self.cfg:
+            tp_val = bool(self.cfg.get("telegram_proxy", self.cfg.get("TelegramProxy", False)))
+            cfg["telegram_proxy"] = tp_val
+            cfg["TelegramProxy"] = tp_val
+        else:
+            tp_val = self.is_telegram_proxy()
+            cfg["telegram_proxy"] = tp_val
+            cfg["TelegramProxy"] = tp_val
+
 
         if "name" in self.cfg:
             cfg["name"] = self.cfg["name"]
@@ -3083,6 +3211,10 @@ class VlessApp(tk.Tk):
     def __init__(self):
         super().__init__()
 
+        # Worker threads never touch Tk directly: their after() calls land in this queue
+        self._ui_queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._drain_ui_queue()
+
         self.title(t("app_title"))
         self.geometry("820x620")
         self.minsize(680, 480)
@@ -3104,6 +3236,7 @@ class VlessApp(tk.Tk):
         self.restart_wsl_var = tk.BooleanVar(value=bool(settings_manager.get_setting("restart_wsl", True)))
         self.restart_work_proxy_var = tk.BooleanVar(value=bool(settings_manager.get_setting("restart_work_proxy", True)))
         self.restart_system_proxy_var = tk.BooleanVar(value=bool(settings_manager.get_setting("restart_system_proxy", True)))
+        self.restart_telegram_proxy_var = tk.BooleanVar(value=bool(settings_manager.get_setting("restart_telegram_proxy", True)))
 
         # Protocols & Window State Handlers
         self.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
@@ -3111,7 +3244,19 @@ class VlessApp(tk.Tk):
         self.bind("<Deactivate>", self._on_main_deactivate, add="+")
 
         self._load_saved_data()
+
+        # Zapret2 Watcher Background Service
+        z_prefs = settings_manager.get_zapret2_settings()
+        self.zapret_watcher = Zapret2Watcher(
+            enabled=z_prefs["enabled"],
+            watch_main=z_prefs["watch_main"],
+            watch_tg=z_prefs["watch_tg"],
+            tg_proxy_provider=self.get_telegram_proxies,
+            tg_restart_handler=self.restart_telegram_proxies,
+        )
+        self.zapret_watcher.start()
         self._build_main_ui()
+        self._update_telegram_dispatcher_pool()
         self._setup_tray()
         self._poll_loop()
 
@@ -3209,32 +3354,67 @@ class VlessApp(tk.Tk):
         self.nav_notebook.add(self.overview_frame, text=t("nav_overview"))
         self._build_overview_tab()
 
+        # Tabs 2-6 get their (empty) pages right away so the tab strip is complete, but their
+        # contents are built one per event-loop turn after the window is already on screen.
         # Tab 2: Proxies (Paginated)
         self.proxies_frame = tk.Frame(self.nav_notebook, bg=C["bg"])
         self.nav_notebook.add(self.proxies_frame, text=t("nav_proxies"))
-        self._build_proxies_tab()
 
         # Tab 3: Options (NEW)
         self.options_frame = tk.Frame(self.nav_notebook, bg=C["bg"])
         self.nav_notebook.add(self.options_frame, text=t("nav_options"))
-        self._build_options_tab()
 
         # Tab 4: Backup & Security
         self.backup_frame = tk.Frame(self.nav_notebook, bg=C["bg"])
         self.nav_notebook.add(self.backup_frame, text=t("nav_backup"))
-        self._build_backup_tab()
 
         # Tab 5: WSL Isolation Guard
         self.wsl_iso_frame = tk.Frame(self.nav_notebook, bg=C["bg"])
         self.nav_notebook.add(self.wsl_iso_frame, text=t("nav_wsl_isolation"))
-        self._build_wsl_isolation_tab()
 
         # Tab 6: Localization
         self.loc_frame = tk.Frame(self.nav_notebook, bg=C["bg"])
         self.nav_notebook.add(self.loc_frame, text=t("nav_localization"))
-        self._build_localization_tab()
+
+        self._pending_tab_builders = [
+            self._build_proxies_tab,
+            self._build_options_tab,
+            self._build_backup_tab,
+            self._build_wsl_isolation_tab,
+            self._build_localization_tab,
+        ]
+        # Opening a tab that is not built yet builds everything that is still pending
+        self.nav_notebook.bind("<<NotebookTabChanged>>", self._on_nav_tab_changed, add="+")
+        self.after_idle(lambda: self.after(30, self._build_next_deferred_tab))
 
         self._update_header_stats()
+
+    def _build_next_deferred_tab(self):
+        """Build one pending tab, then yield to the event loop before the next one."""
+        pending = getattr(self, "_pending_tab_builders", None)
+        if not pending:
+            return
+        builder = pending.pop(0)
+        try:
+            builder()
+        except Exception as err:
+            self._log(f"⚠️ [GUI] Tab build failed ({builder.__name__}): {err}")
+        if pending:
+            self.after(15, self._build_next_deferred_tab)
+
+    def _on_nav_tab_changed(self, event=None):
+        # The event also fires for the initial Overview selection, which needs nothing extra
+        try:
+            if self.nav_notebook.select() == str(self.overview_frame):
+                return
+        except Exception:
+            return
+        self._ensure_tabs_built()
+
+    def _ensure_tabs_built(self):
+        """Synchronously build every tab that is still pending."""
+        while getattr(self, "_pending_tab_builders", None):
+            self._build_next_deferred_tab()
 
     # ── Overview Tab ──────────────────────────────────────────
     def _build_overview_tab(self):
@@ -3271,6 +3451,10 @@ class VlessApp(tk.Tk):
             bg=C["overlay"], fg=C["text"], activebackground=C["hover"],
             relief=tk.FLAT, padx=10, pady=3, command=self.refresh_all_geo,
         ).pack(side=tk.LEFT, padx=3)
+
+        # Zapret2 Watcher Block (Auto-recovery & Watcher)
+        self.zapret_watcher_widget = ZapretRecoveryWidget(self.overview_frame, watcher=self.zapret_watcher)
+        self.zapret_watcher_widget.pack(fill=tk.X, padx=px, pady=(0, 8))
 
         # Scrollable container for proxy rows
         canvas_frame = tk.Frame(self.overview_frame, bg=bg)
@@ -3534,6 +3718,13 @@ class VlessApp(tk.Tk):
             if inst.is_work_proxy():
                 work_badge.pack(side=tk.LEFT, padx=(6, 0))
 
+            tg_badge = tk.Label(
+                title_row, text=f" {t('badge_telegram_proxy')} ", font=("Segoe UI", 7, "bold"),
+                bg=C["hover"], fg=C["peach"], padx=4, pady=1
+            )
+            if inst.is_telegram_proxy():
+                tg_badge.pack(side=tk.LEFT, padx=(6, 0))
+
             detail_row = tk.Frame(info, bg=C["card"])
             detail_row.pack(anchor="w", pady=(2, 0))
 
@@ -3566,6 +3757,16 @@ class VlessApp(tk.Tk):
             )
             toggle_btn.pack(side=tk.LEFT, padx=3)
 
+            # Copy TG_socks button (for TelegramProxy instances)
+            if inst.is_telegram_proxy():
+                copy_tg_btn = tk.Button(
+                    actions, text=f"📋 {t('btn_copy_tg_socks')}", font=("Segoe UI", 8, "bold"),
+                    bg=C["overlay"], fg=C["green"], activebackground=C["hover"], activeforeground=C["green"],
+                    relief=tk.FLAT, padx=8, pady=2, cursor="hand2",
+                    command=lambda i=inst: self._copy_tg_proxy_link(i),
+                )
+                copy_tg_btn.pack(side=tk.LEFT, padx=3)
+
             # Check Geo button
             geo_btn = tk.Button(
                 actions, text="🔍", font=("Segoe UI", 9),
@@ -3590,6 +3791,8 @@ class VlessApp(tk.Tk):
                 "ks_badge": ks_badge,
                 "system_badge": system_badge,
                 "work_badge": work_badge,
+                "tg_badge": tg_badge,
+
                 "ports_lbl": ports_lbl,
                 "geo_lbl": geo_lbl,
                 "toggle_btn": toggle_btn,
@@ -3606,6 +3809,127 @@ class VlessApp(tk.Tk):
         self.refresh_current_page_tabs()
         if target_tab_idx < len(self.sub_notebook.tabs()):
             self.sub_notebook.select(target_tab_idx)
+
+    def _copy_tg_proxy_link(self, inst=None):
+        from vless2socks import telegram_proxy
+        url = telegram_proxy.build_tg_socks_url()
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(url)
+            self.update()
+        except Exception:
+            pass
+        msg = t("msg_tg_link_copied", url=url)
+        try:
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.set_status(f"📋 {url}", temp_sec=5)
+            messagebox.showinfo("Telegram Proxy", msg, parent=self)
+        except Exception:
+            pass
+
+    def _update_telegram_dispatcher_pool(self):
+        try:
+            from vless2socks import telegram_proxy
+            disp = telegram_proxy.get_tg_dispatcher()
+            disp.set_pool(self.instances)
+            tg_insts = [i for i in getattr(self, "instances", []) if i.is_telegram_proxy()]
+            if tg_insts and not disp.is_running():
+                # start() waits for the listener to come up; keep that wait off the GUI thread
+                threading.Thread(target=disp.start, daemon=True).start()
+            elif not tg_insts and disp.is_running():
+                disp.stop()
+        except Exception as err:
+            self._log(f"⚠️ [TelegramProxy] dispatcher pool update failed: {err}")
+
+    def _get_active_telegram_proxy_socket(self) -> str:
+        """Return current active upstream socket for TelegramProxy, or 'не выбрано' / 'undefined'."""
+        try:
+            from vless2socks import telegram_proxy
+            disp = telegram_proxy.get_tg_dispatcher()
+            act = disp.get_active_proxy()
+            if act and act.get("host") and act.get("port"):
+                return f"{act['host']}:{act['port']}"
+        except Exception:
+            pass
+        tg_insts = [i for i in getattr(self, "instances", []) if i.is_telegram_proxy()]
+        if tg_insts:
+            h, p = tg_insts[0].get_listen()
+            return f"{h}:{p}"
+        lang = "ru"
+        try:
+            from i18n import get_current_language
+            lang = get_current_language()
+        except Exception:
+            pass
+        return "undefined" if lang.lower().startswith("en") else "не выбрано"
+
+    def get_telegram_proxies(self) -> list:
+        """Return list of active ProxyInstance configurations flagged as TelegramProxy."""
+        proxies = []
+        for inst in getattr(self, "instances", []):
+            try:
+                if inst.is_telegram_proxy():
+                    h, p = inst.get_listen()
+                    proxies.append({
+                        "id": getattr(inst, "global_id", None),
+                        "name": inst.cfg.get("name", ""),
+                        "host": h or "127.0.0.1",
+                        "port": int(p) if str(p).isdigit() else 1081,
+                        "running": inst.running or (inst.process and inst.process.poll() is None),
+                        "instance": inst,
+                    })
+            except Exception:
+                pass
+        return proxies
+
+    def restart_telegram_proxies(self, targets: list = None) -> bool:
+        """Restart proxies flagged as TelegramProxy if inactive or targeted."""
+        all_ok = True
+        try:
+            tg_insts = []
+            if targets:
+                target_ports = set()
+                for t in targets:
+                    if isinstance(t, dict):
+                        target_ports.add(t.get("port"))
+                    elif hasattr(t, "get_listen"):
+                        _, p = t.get_listen()
+                        if str(p).isdigit():
+                            target_ports.add(int(p))
+                for inst in getattr(self, "instances", []):
+                    _, p = inst.get_listen()
+                    if int(p) in target_ports if str(p).isdigit() else False:
+                        tg_insts.append(inst)
+            else:
+                tg_insts = [i for i in getattr(self, "instances", []) if i.is_telegram_proxy()]
+
+            for inst in tg_insts:
+                try:
+                    # Живые апстримы не трогаем: если упал только диспетчер, хватит его перезапуска ниже
+                    if inst.check_health_sync():
+                        continue
+                    self._log(f"🔄 [ZapretWatcher] Restarting telegram proxy instance {inst.cfg.get('name', '')}...")
+                    inst.restart(blocking=False)
+                except Exception as e:
+                    self._log(f"⚠️ [ZapretWatcher] Error restarting telegram proxy: {e}")
+                    all_ok = False
+
+            # Гарантируем запуск и актуализацию пула диспетчера TelegramProxy
+            try:
+                from vless2socks import telegram_proxy
+                disp = telegram_proxy.get_tg_dispatcher()
+                disp.set_pool(self.instances)
+                disp.rotate_to_next()
+                if not disp.is_running():
+                    disp.start()
+            except Exception as e:
+                self._log(f"⚠️ [ZapretWatcher] TelegramProxy dispatcher restart failed: {e}")
+                all_ok = False
+        except Exception as e:
+            self._log(f"❌ [ZapretWatcher] restart_telegram_proxies failed: {e}")
+            all_ok = False
+        return all_ok
+
 
     def prompt_rename_proxy(self, inst: ProxyInstance):
         old_name = inst.get_display_name()
@@ -3702,6 +4026,10 @@ class VlessApp(tk.Tk):
 
     def refresh_current_page_tabs(self):
         """Render the 10 instance tabs for the current page."""
+        if not hasattr(self, "sub_notebook"):
+            # Proxies tab is still waiting in the deferred build queue
+            self._ensure_tabs_built()
+            return
         for tab_id in self.sub_notebook.tabs():
             self.sub_notebook.forget(tab_id)
 
@@ -3916,6 +4244,70 @@ class VlessApp(tk.Tk):
             fg=C["muted"], bg=C["card"], wraplength=700, justify=tk.LEFT,
         ).pack(anchor="w", padx=36, pady=(0, 10))
 
+        # 5. TelegramProxy Virtual Socket Port
+        card5 = tk.Frame(opt_content, bg=C["card"], relief=tk.FLAT, borderwidth=1)
+        card5.pack(fill=tk.X, pady=6, padx=2)
+
+        tk.Label(
+            card5, text=f"✈️  {t('opt_tg_proxy_port_title')}",
+            font=("Segoe UI", 10, "bold"), fg=C["text"], bg=C["card"],
+        ).pack(anchor="w", padx=12, pady=(10, 2))
+
+        tk.Label(
+            card5, text=t("opt_tg_proxy_port_desc"), font=("Segoe UI", 8),
+            fg=C["subtext"], bg=C["card"], wraplength=700, justify=tk.LEFT,
+        ).pack(anchor="w", padx=36, pady=(0, 6))
+
+        tg_port_row = tk.Frame(card5, bg=C["card"])
+        tg_port_row.pack(fill=tk.X, padx=36, pady=(2, 10))
+
+        tk.Label(
+            tg_port_row, text=t("opt_tg_proxy_port_lbl"), font=("Segoe UI", 9, "bold"),
+            fg=C["text"], bg=C["card"],
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        curr_tg_port = settings_manager.get_telegram_proxy_port()
+        self.tg_port_entry = tk.Entry(
+            tg_port_row, font=("Consolas", 10), width=12,
+            bg=C["overlay"], fg=C["text"], insertbackground=C["text"],
+            relief=tk.FLAT, borderwidth=4,
+        )
+        self.tg_port_entry.pack(side=tk.LEFT, padx=(0, 8))
+        self.tg_port_entry.insert(0, str(curr_tg_port))
+        attach_clipboard_and_context_menu(self.tg_port_entry)
+
+        def _on_tg_port_change(event=None):
+            val = self.tg_port_entry.get().strip()
+            if val.isdigit() and 1 <= int(val) <= 65535:
+                p = int(val)
+                settings_manager.set_telegram_proxy_port(p)
+                try:
+                    from vless2socks import telegram_proxy
+                    disp = telegram_proxy.get_tg_dispatcher()
+                    disp.set_listen_port(p)
+                except Exception:
+                    pass
+
+        self.tg_port_entry.bind("<KeyRelease>", _on_tg_port_change)
+
+        def _reset_tg_port():
+            self.tg_port_entry.delete(0, tk.END)
+            self.tg_port_entry.insert(0, str(settings_manager.DEFAULT_TELEGRAM_PROXY_PORT))
+            settings_manager.set_telegram_proxy_port(settings_manager.DEFAULT_TELEGRAM_PROXY_PORT)
+            try:
+                from vless2socks import telegram_proxy
+                disp = telegram_proxy.get_tg_dispatcher()
+                disp.set_listen_port(settings_manager.DEFAULT_TELEGRAM_PROXY_PORT)
+            except Exception:
+                pass
+
+        reset_tg_btn = tk.Button(
+            tg_port_row, text=t("btn_reset_tg_port"), font=("Segoe UI", 8, "bold"),
+            bg=C["overlay"], fg=C["peach"], activebackground=C["hover"], relief=tk.FLAT,
+            padx=8, pady=2, command=_reset_tg_port,
+        )
+        reset_tg_btn.pack(side=tk.LEFT)
+
         # Footer note
         tk.Label(
             opt_content, text=t("opt_saved_hint"), font=("Segoe UI", 9, "bold"),
@@ -3979,7 +4371,11 @@ class VlessApp(tk.Tk):
         dlg.minsize(680, 560)
         dlg.configure(bg=C["bg"])
         dlg.transient(self)
-        dlg.grab_set()
+        try:
+            if self.winfo_viewable():
+                dlg.grab_set()
+        except Exception:
+            pass
 
         try:
             x = self.winfo_x() + (self.winfo_width() - 780) // 2
@@ -4134,11 +4530,17 @@ class VlessApp(tk.Tk):
                 fg=C["blue"], bg=C["card"]
             ).pack(side=tk.LEFT, anchor="w")
 
+            orig_text = t("btn_copy_prompt")
             def _make_copy_cmd(txt, btn_ref):
                 def _copy():
                     try:
                         self.clipboard_clear()
                         self.clipboard_append(txt)
+                        try:
+                            if btn_ref.winfo_exists():
+                                btn_ref.config(text="✓ " + t("btn_copy_prompt"), bg=C["green"], fg="#1e1e2e")
+                        except Exception:
+                            pass
                         def _revert(b=btn_ref, ot=orig_text):
                             try:
                                 if b.winfo_exists():
@@ -4147,7 +4549,7 @@ class VlessApp(tk.Tk):
                                 pass
                         self.after(1800, _revert)
                     except Exception as ex:
-                        messagebox.showerror("Clipboard", f"Ошибка копирования: {ex}", parent=dlg)
+                        pass
                 return _copy
 
             copy_btn = tk.Button(
@@ -4850,12 +5252,14 @@ class VlessApp(tk.Tk):
         for inst in self.instances:
             url = inst.cfg.get("url", "").strip()
             if (url.startswith("vless://") or url.startswith("socks5://") or url.startswith("socks://") or url.startswith("wireguard://") or url.startswith("wg://")) and not inst.running:
-                inst.start()
+                # Non-blocking: every proxy launches in its own worker thread, the window stays responsive
+                inst.start(blocking=False)
                 started_count += 1
         if started_count > 0:
             self.refresh_overview()
             self.update_tray_icon()
             self._update_header_stats()
+        self._update_telegram_dispatcher_pool()
 
     def add_new_instance(self):
         """Add a new proxy instance."""
@@ -4996,14 +5400,20 @@ class VlessApp(tk.Tk):
         sep = tk.Frame(inner, bg=C["overlay"], height=1)
         sep.pack(fill=tk.X, pady=(0, 8))
 
-        # Checkboxes: WSL, WorkProxy, SystemProxy
+        # Checkboxes: WSL, WorkProxy, SystemProxy, TelegramProxy
+        tg_socket = self._get_active_telegram_proxy_socket()
         chk_opts = [
-            (f"🐧  {t('lbl_restart_wsl')}", self.restart_wsl_var, C["yellow"]),
-            (f"💼  {t('lbl_restart_work_proxy')}", self.restart_work_proxy_var, C["teal"]),
-            (f"⚙️  {t('lbl_restart_system_proxy')}", self.restart_system_proxy_var, C["blue"]),
+            (f"🐧  {t('lbl_restart_wsl')}", self.restart_wsl_var, C["yellow"], "wsl"),
+            (f"💼  {t('lbl_restart_work_proxy')}", self.restart_work_proxy_var, C["teal"], "work"),
+            (f"⚙️  {t('lbl_restart_system_proxy')}", self.restart_system_proxy_var, C["blue"], "system"),
+            (f"✈️  TelegramProxy ({tg_socket})", self.restart_telegram_proxy_var, C["peach"], "telegram"),
         ]
 
-        for label_text, var, accent_color in chk_opts:
+        def _restart_single(service):
+            self.close_restart_services_menu()
+            self.restart_single_service(service)
+
+        for label_text, var, accent_color, service in chk_opts:
             row = tk.Frame(inner, bg=C["card"], cursor="hand2")
             row.pack(fill=tk.X, pady=3)
 
@@ -5012,6 +5422,10 @@ class VlessApp(tk.Tk):
                 fg=accent_color, bg=C["card"], cursor="hand2",
             )
             lbl.pack(side=tk.LEFT)
+
+            # Link-like hover: underline + red while the pointer is over the label
+            lbl.bind("<Enter>", lambda e, l=lbl: l.config(font=("Segoe UI", 9, "bold underline"), fg=C["red"]))
+            lbl.bind("<Leave>", lambda e, l=lbl, c=accent_color: l.config(font=("Segoe UI", 9, "bold"), fg=c))
 
             cb = OrangeCheckbox(
                 row, variable=var,
@@ -5022,14 +5436,15 @@ class VlessApp(tk.Tk):
             )
             cb.pack(side=tk.RIGHT)
 
-            # Clicking the row or label also toggles the checkbox
-            lbl.bind("<Button-1>", lambda e, c=cb: c._toggle())
+            # Clicking the label restarts only this service; the checkbox (and empty row area) toggles the flag
+            lbl.bind("<Button-1>", lambda e, s=service: _restart_single(s))
             row.bind("<Button-1>", lambda e, c=cb: c._toggle())
 
         # Footer Hint
         hint_lbl = tk.Label(
             inner, text=t("restart_menu_hint"),
-            font=("Segoe UI", 7), fg=C["subtext"], bg=C["card"]
+            font=("Segoe UI", 7), fg=C["subtext"], bg=C["card"],
+            wraplength=238, justify=tk.LEFT,
         )
         hint_lbl.pack(anchor="w", pady=(8, 0))
 
@@ -5041,15 +5456,15 @@ class VlessApp(tk.Tk):
             main_ry = self.btn_restart_services.winfo_rooty()
             main_h = self.btn_restart_services.winfo_height()
 
-            target_w = 245
-            target_h = 168
+            target_w = 265
+            target_h = 212
             popup_x = (arrow_rx + arrow_rw) - target_w
             popup_y = main_ry + main_h + 3
         except Exception:
             popup_x = self.winfo_rootx() + 300
             popup_y = self.winfo_rooty() + 50
-            target_w = 245
-            target_h = 168
+            target_w = 265
+            target_h = 212
 
         # Smooth slide-down unfolding animation
         self.restart_menu_win.geometry(f"{target_w}x4+{popup_x}+{popup_y}")
@@ -5133,15 +5548,26 @@ class VlessApp(tk.Tk):
         wsl = bool(self.restart_wsl_var.get())
         work = bool(self.restart_work_proxy_var.get())
         sys_p = bool(self.restart_system_proxy_var.get())
-        settings_manager.set_restart_services_flags(wsl, work, sys_p)
+        tg_p = bool(self.restart_telegram_proxy_var.get())
+        settings_manager.set_restart_services_flags(wsl, work, sys_p, tg_p)
 
-    def execute_restart_services(self):
-        """Restart all services whose checkboxes are currently checked (WSL, WorkProxy, SystemProxy)."""
-        wsl = bool(self.restart_wsl_var.get())
-        work = bool(self.restart_work_proxy_var.get())
-        sys_p = bool(self.restart_system_proxy_var.get())
+    def execute_restart_services(self, only: Optional[str] = None):
+        """Restart all services whose checkboxes are currently checked (WSL, WorkProxy, SystemProxy, TelegramProxy).
 
-        if not (wsl or work or sys_p):
+        With ``only`` ("wsl" / "work" / "system" / "telegram") restart just that service, ignoring the checkboxes.
+        """
+        if only:
+            wsl = only == "wsl"
+            work = only == "work"
+            sys_p = only == "system"
+            tg_p = only == "telegram"
+        else:
+            wsl = bool(self.restart_wsl_var.get())
+            work = bool(self.restart_work_proxy_var.get())
+            sys_p = bool(self.restart_system_proxy_var.get())
+            tg_p = bool(self.restart_telegram_proxy_var.get())
+
+        if not (wsl or work or sys_p or tg_p):
             messagebox.showinfo(
                 "RestartServices",
                 t("msg_restart_no_selection"),
@@ -5165,11 +5591,76 @@ class VlessApp(tk.Tk):
 
         self.after(0, _ensure_hud)
 
+        # Everything that reads widget state happens here, on the GUI thread; the worker only waits and logs.
+        # Collect every proxy instance to restart (an instance with several flags is restarted once).
+        groups = []
+        if work:
+            groups.append(("WorkProxy", lambda i: i.is_work_proxy()))
+        if sys_p:
+            groups.append(("SystemProxy", lambda i: i.is_system_proxy()))
+        if tg_p:
+            groups.append(("TelegramProxy", lambda i: i.is_telegram_proxy()))
+
+        targets = []
+        counts = {}
+        for group_name, belongs in groups:
+            cnt = 0
+            for inst in self.instances:
+                if belongs(inst):
+                    cnt += 1
+                    if inst not in targets:
+                        targets.append(inst)
+            counts[group_name] = cnt
+
+        if tg_p:
+            try:
+                from vless2socks import telegram_proxy
+                telegram_proxy.get_tg_dispatcher().set_pool(self.instances)
+            except Exception as err:
+                self._log(f"⚠️ [RestartServices] TelegramProxy pool update warning: {err}")
+
+        def _finish_hud(text):
+            try:
+                if getattr(self, "restart_hud_win", None) and self.restart_hud_win.winfo_exists():
+                    self.restart_hud_win.set_finished(text)
+            except Exception:
+                pass
+
+        self._set_restart_button_busy(True)
+
         def _worker():
-            self._set_restart_button_busy(True)
             restarted_items = []
             try:
-                # 1. WSL
+                # 1. Kick all proxy restarts at once: each instance stops/starts in its own worker thread
+                all_done = threading.Event()
+                remaining = [len(targets)]
+                done_lock = threading.Lock()
+
+                def _one_done(_ok=None):
+                    with done_lock:
+                        remaining[0] -= 1
+                        if remaining[0] <= 0:
+                            all_done.set()
+
+                def _kick():
+                    for inst in targets:
+                        try:
+                            if inst.is_transitioning:
+                                self._log(f"⚠️ [RestartServices] {inst.get_display_name()} is busy, skipped.")
+                                _one_done()
+                                continue
+                            inst.restart_async(callback=_one_done)
+                        except Exception as err:
+                            self._log(f"⚠️ [RestartServices] Proxy restart warning: {err}")
+                            _one_done()
+
+                if targets:
+                    self._log(f"🔄 [RestartServices] Restarting {len(targets)} proxy instance(s) in parallel...")
+                    self.after(0, _kick)
+                else:
+                    all_done.set()
+
+                # 2. WSL restarts in this thread while the proxies restart in theirs
                 if wsl:
                     self._log("🔄 [RestartServices] Restarting WSL...")
                     ok, msg = restart_wsl()
@@ -5179,55 +5670,69 @@ class VlessApp(tk.Tk):
                     else:
                         self._log(f"⚠️ [RestartServices] {msg}")
 
-                # 2. WorkProxy instances
-                restarted_proxies = set()
-                if work:
-                    self._log("🔄 [RestartServices] Restarting WorkProxy instances...")
-                    cnt = 0
-                    for inst in self.instances:
-                        if inst.is_work_proxy():
-                            try:
-                                inst.restart()
-                            except Exception as err:
-                                self._log(f"⚠️ [RestartServices] WorkProxy restart warning: {err}")
-                            restarted_proxies.add(inst)
-                            cnt += 1
-                    restarted_items.append(f"WorkProxy ({cnt})")
-                    self._log(f"✅ [RestartServices] Restarted {cnt} WorkProxy instance(s).")
+                if not all_done.wait(timeout=RESTART_PROXIES_TIMEOUT_SEC):
+                    self._log(f"⚠️ [RestartServices] {remaining[0]} proxy instance(s) did not confirm restart in time.")
 
-                # 3. SystemProxy instances
-                if sys_p:
-                    self._log("🔄 [RestartServices] Restarting SystemProxy instances...")
-                    cnt = 0
-                    for inst in self.instances:
-                        if inst.is_system_proxy():
-                            if inst not in restarted_proxies:
-                                try:
-                                    inst.restart()
-                                except Exception as err:
-                                    self._log(f"⚠️ [RestartServices] SystemProxy restart warning: {err}")
-                                restarted_proxies.add(inst)
-                            cnt += 1
-                    restarted_items.append(f"SystemProxy ({cnt})")
-                    self._log(f"✅ [RestartServices] Restarted {cnt} SystemProxy instance(s).")
+                for group_name, cnt in counts.items():
+                    if group_name != "TelegramProxy":
+                        restarted_items.append(f"{group_name} ({cnt})")
+                        self._log(f"✅ [RestartServices] Restarted {cnt} {group_name} instance(s).")
+
+                # 3. TelegramProxy dispatcher
+                if tg_p:
+                    cnt = counts.get("TelegramProxy", 0)
+                    try:
+                        from vless2socks import telegram_proxy
+                        disp = telegram_proxy.get_tg_dispatcher()
+                        disp.rotate_to_next()
+                        if not disp.is_running():
+                            disp.start()
+                    except Exception as err:
+                        self._log(f"⚠️ [RestartServices] TelegramProxy dispatcher restart warning: {err}")
+                    restarted_items.append(f"TelegramProxy ({cnt})" if cnt else "TelegramProxy")
+                    self._log(f"✅ [RestartServices] Restarted TelegramProxy ({cnt} instance(s)).")
 
                 self.after(500, self.refresh_overview)
                 self.after(500, self._update_header_stats)
                 summary_str = ", ".join(restarted_items) if restarted_items else "Done"
                 self._log(f"🎉 [RestartServices] Finished restarting: {summary_str}.")
                 self.after(0, lambda: self._set_restart_button_success(summary_str))
-                if getattr(self, "restart_hud_win", None) and self.restart_hud_win.winfo_exists():
-                    self.restart_hud_win.set_finished(summary_str)
+                self.after(0, lambda: _finish_hud(summary_str))
             except Exception as e:
                 self._log(f"❌ [RestartServices] Error: {e}")
                 self.after(0, lambda: self._set_restart_button_busy(False))
-                if getattr(self, "restart_hud_win", None) and self.restart_hud_win.winfo_exists():
-                    self.restart_hud_win.set_finished("Error")
+                self.after(0, lambda: _finish_hud("Error"))
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def after(self, ms, func=None, *args):
+        """Thread-safe ``after``: calls made from worker threads are queued and scheduled by the GUI thread."""
+        if func is not None and threading.current_thread() is not threading.main_thread():
+            pending = getattr(self, "_ui_queue", None)
+            if pending is not None:
+                pending.put((ms, func, args))
+                return None
+        return super().after(ms, func, *args)
+
+    def _drain_ui_queue(self):
+        """GUI-thread pump for callbacks queued by worker threads through ``after``."""
+        try:
+            while True:
+                ms, func, args = self._ui_queue.get_nowait()
+                super().after(ms, func, *args)
+        except queue.Empty:
+            pass
+        super().after(UI_QUEUE_POLL_MS, self._drain_ui_queue)
+
     def _log(self, msg: str):
         """Application-level logger for background service operations."""
+        if threading.current_thread() is not threading.main_thread():
+            # The HUD and the WSL log are widgets: hand the line over to the GUI thread
+            try:
+                self.after(0, self._log, msg)
+            except Exception:
+                pass
+            return
         ts = time.strftime("%H:%M:%S")
         print(f"[{ts}] {msg}", flush=True)
         try:
@@ -5279,6 +5784,7 @@ class VlessApp(tk.Tk):
             pystray.MenuItem(t("tray_show"), self._show_from_tray, default=True),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(f"🔄 {t('btn_restart_services')}", self._tray_restart_services),
+            pystray.MenuItem(f"✈️ {t('lbl_restart_telegram_proxy')}", self._tray_restart_telegram_proxy),
             pystray.MenuItem(
                 f"⚙️ {t('restart_menu_title')}",
                 pystray.Menu(
@@ -5296,6 +5802,11 @@ class VlessApp(tk.Tk):
                         f"⚙️ {t('lbl_restart_system_proxy')}",
                         self._tray_toggle_system_proxy,
                         checked=lambda _: bool(settings_manager.get_setting("restart_system_proxy", True)),
+                    ),
+                    pystray.MenuItem(
+                        f"✈️ {t('lbl_restart_telegram_proxy')}",
+                        self._tray_toggle_telegram_proxy,
+                        checked=lambda _: bool(settings_manager.get_setting("restart_telegram_proxy", True)),
                     ),
                 ),
             ),
@@ -5320,6 +5831,25 @@ class VlessApp(tk.Tk):
     def _tray_restart_services(self, icon=None, item=None):
         """Trigger RestartServices from system tray context menu."""
         self.after(0, self.execute_restart_services)
+
+    def _tray_restart_telegram_proxy(self, icon=None, item=None):
+        """Restart only TelegramProxy (flagged instances + dispatcher) from system tray context menu."""
+        self.after(0, lambda: self.restart_single_service("telegram"))
+
+    def _tray_toggle_telegram_proxy(self, icon=None, item=None):
+        cur = bool(settings_manager.get_setting("restart_telegram_proxy", True))
+        new_val = not cur
+        settings_manager.set_setting("restart_telegram_proxy", new_val)
+        self.restart_telegram_proxy_var.set(new_val)
+        if self._tray_icon:
+            self._tray_icon.update_menu()
+
+    def restart_single_service(self, service: str):
+        """Restart one RestartServices entry ("wsl" / "work" / "system" / "telegram") regardless of the checkboxes."""
+        # A restart is already running (main button is disabled while busy)
+        if self.btn_restart_services and str(self.btn_restart_services["state"]) == tk.DISABLED:
+            return
+        self.execute_restart_services(only=service)
 
     def _tray_toggle_wsl(self, icon=None, item=None):
         cur = bool(settings_manager.get_setting("restart_wsl", True))
@@ -5388,6 +5918,11 @@ class VlessApp(tk.Tk):
         self.after(0, self._exit)
 
     def _exit(self):
+        if getattr(self, "zapret_watcher", None):
+            try:
+                self.zapret_watcher.stop()
+            except Exception:
+                pass
         if getattr(self, "restart_hud_win", None):
             try:
                 self.restart_hud_win.close()

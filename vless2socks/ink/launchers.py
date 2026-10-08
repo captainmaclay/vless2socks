@@ -77,13 +77,13 @@ def configure_xshell_proxy(port: int, proxy_name: Optional[str] = None) -> bool:
 
         # NetSarang reads UTF-16 with BOM for Proxy INIs
         ini_content = f"[SECTION]\r\nTYPE=2\r\nHOST=127.0.0.1\r\nPORT={port}\r\nUSERNAME=\r\nPASSWORD=\r\n"
-        with open(ini_file, "w", encoding="utf-16") as f:
+        with open(ini_file, "w", encoding="utf-16", newline="") as f:
             f.write(ini_content)
 
         # Update default.xshf to reference this proxy if available, ensuring StartUp=0
         default_xshf = os.path.join(documents, r"NetSarang Computer\8\Xshell\Sessions\default.xshf")
         if os.path.isfile(default_xshf):
-            with open(default_xshf, "r", encoding="utf-16le", errors="ignore") as f:
+            with open(default_xshf, "r", encoding="utf-16", errors="ignore") as f:
                 text = f.read()
 
             import re
@@ -95,7 +95,8 @@ def configure_xshell_proxy(port: int, proxy_name: Optional[str] = None) -> bool:
                     f"[CONNECTION:PROXY]\r\nProxy={name}\r\nStartUp=0",
                     text,
                 )
-                with open(default_xshf, "w", encoding="utf-16") as f:
+                text = text.lstrip("\ufeff")
+                with open(default_xshf, "w", encoding="utf-16", newline="") as f:
                     f.write(text)
 
         return True

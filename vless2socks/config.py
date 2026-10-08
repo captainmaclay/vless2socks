@@ -47,6 +47,10 @@ class AppConfig:
     send_through: str = ""
     system_proxy: bool = False
     work_proxy: bool = False
+    telegram_proxy: bool = False
+    #: "host:port" локального SOCKS5 для трафика, который WireGuard-профиль с неполным
+    #: AllowedIPs (split tunnel) не может отправить в туннель. Пусто — всё идёт в туннель.
+    fallback_proxy: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -56,6 +60,11 @@ class AppConfig:
     @property
     def Work_Proxy(self) -> bool:
         return self.work_proxy
+
+    @property
+    def TelegramProxy(self) -> bool:
+        return self.telegram_proxy
+
 
     @property
     def auth_required(self) -> bool:
@@ -183,6 +192,11 @@ def load_config(
         raw_wp = data.get("Work_Proxy")
     is_wp = (port == 1030 or "worproxy" in str(data.get("name", "")).lower()) if raw_wp is None else bool(raw_wp)
 
+    raw_tp = data.get("telegram_proxy")
+    if raw_tp is None:
+        raw_tp = data.get("TelegramProxy")
+    is_tp = bool(raw_tp) if raw_tp is not None else False
+
     return AppConfig(
         server=server,
         listen_host=host,
@@ -206,4 +220,7 @@ def load_config(
         send_through=str(data.get("sendThrough") or data.get("send_through") or "").strip(),
         system_proxy=is_sp,
         work_proxy=is_wp,
+        telegram_proxy=is_tp,
+        fallback_proxy=str(data.get("fallbackProxy") or data.get("fallback_proxy") or "").strip(),
     )
+

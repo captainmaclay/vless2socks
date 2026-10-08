@@ -49,6 +49,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "restart_wsl": True,
     "restart_work_proxy": True,
     "restart_system_proxy": True,
+    "zapret2_watcher_enabled": True,
+    "zapret2_watch_main": True,
+    "zapret2_watch_tg": True,
 }
 
 
@@ -136,13 +139,60 @@ def get_restart_services_flags() -> dict[str, bool]:
         "wsl": bool(get_setting("restart_wsl", True)),
         "work_proxy": bool(get_setting("restart_work_proxy", True)),
         "system_proxy": bool(get_setting("restart_system_proxy", True)),
+        "telegram_proxy": bool(get_setting("restart_telegram_proxy", True)),
     }
 
 
-def set_restart_services_flags(wsl: bool, work_proxy: bool, system_proxy: bool) -> None:
+def set_restart_services_flags(
+    wsl: bool,
+    work_proxy: bool,
+    system_proxy: bool,
+    telegram_proxy: bool = True,
+) -> None:
     """Persist user checkbox choices for RestartServices."""
     cfg = load_settings()
     cfg["restart_wsl"] = bool(wsl)
     cfg["restart_work_proxy"] = bool(work_proxy)
     cfg["restart_system_proxy"] = bool(system_proxy)
+    cfg["restart_telegram_proxy"] = bool(telegram_proxy)
     save_settings(cfg)
+
+
+DEFAULT_TELEGRAM_PROXY_PORT = 1373
+
+
+def get_telegram_proxy_port() -> int:
+    """Return user-configured TelegramProxy virtual socket port (default 1373)."""
+    val = get_setting("telegram_proxy_port", DEFAULT_TELEGRAM_PROXY_PORT)
+    try:
+        p = int(val)
+        if 1 <= p <= 65535:
+            return p
+    except Exception:
+        pass
+    return DEFAULT_TELEGRAM_PROXY_PORT
+
+
+def set_telegram_proxy_port(port: int) -> None:
+    """Persist user-configured TelegramProxy virtual socket port."""
+    p = int(port)
+    set_setting("telegram_proxy_port", p)
+
+
+def get_zapret2_settings() -> dict[str, bool]:
+    """Get active preferences for Zapret2 Watcher."""
+    return {
+        "enabled": bool(get_setting("zapret2_watcher_enabled", True)),
+        "watch_main": bool(get_setting("zapret2_watch_main", True)),
+        "watch_tg": bool(get_setting("zapret2_watch_tg", True)),
+    }
+
+
+def set_zapret2_settings(enabled: bool, watch_main: bool, watch_tg: bool) -> None:
+    """Persist user choices for Zapret2 Watcher."""
+    cfg = load_settings()
+    cfg["zapret2_watcher_enabled"] = bool(enabled)
+    cfg["zapret2_watch_main"] = bool(watch_main)
+    cfg["zapret2_watch_tg"] = bool(watch_tg)
+    save_settings(cfg)
+

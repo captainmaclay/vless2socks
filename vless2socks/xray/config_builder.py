@@ -93,8 +93,52 @@ def build_xray_config(config: AppConfig, *, legacy_vnext: bool = False) -> dict[
 
     outbounds = [primary_outbound]
     routing = None
+    dns = None
 
-    if getattr(config, "killswitch", False):
+    fallback = _split_tunnel_fallback(config)
+    if fallback:
+        # WireGuard со split tunnel: в туннель уходит только то, что сервер согласен принять
+        # (AllowedIPs), всё остальное — через локальный SOCKS5 (обычно System Proxy), а не в никуда.
+        fb_host, fb_port = fallback
+        inbound_tags = ["socks-in", "http-in", _DNS_TAG]
+        outbounds.append({
+            "tag": "fallback",
+            "protocol": "socks",
+            "settings": {"servers": [{"address": fb_host, "port": fb_port}]},
+        })
+        if getattr(config, "killswitch", False):
+            outbounds.append({
+                "tag": "block",
+                "protocol": "blackhole",
+                "settings": {"response": {"type": "none"}},
+            })
+        outbounds.append(_direct_outbound())
+        # Имена разрешает сам xray (иначе рабочий домен не сопоставить с AllowedIPs), причём запросы
+        # идут по тем же правилам: к внутреннему DNS — в туннель, к публичному — через fallback,
+        # то есть мимо DNS провайдера.
+        dns = {
+            "tag": _DNS_TAG,
+            "servers": [f"tcp://{ip}" for ip in (getattr(config.server, "dns", None) or _DEFAULT_SPLIT_DNS)],
+            "queryStrategy": "UseIPv4",
+        }
+        routing = {
+            # IPOnDemand, а не IPIfNonMatch: второе правило ловит всё подряд, поэтому имя нужно
+            # разрешить уже на первом (IP-) правиле, иначе рабочие домены уйдут в fallback.
+            "domainStrategy": "IPOnDemand",
+            "rules": [
+                {
+                    "type": "field",
+                    "ip": list(config.server.allowed_ips),
+                    "outboundTag": "proxy",
+                },
+                {
+                    "type": "field",
+                    "inboundTag": inbound_tags,
+                    "outboundTag": "fallback",
+                },
+            ],
+        }
+    elif getattr(config, "killswitch", False):
         outbounds.append({
             "tag": "block",
             "protocol": "blackhole",
@@ -126,7 +170,34 @@ def build_xray_config(config: AppConfig, *, legacy_vnext: bool = False) -> dict[
     }
     if routing:
         res["routing"] = routing
+    if dns:
+        res["dns"] = dns
     return res
+
+
+_DNS_TAG = "dns-out"
+_DEFAULT_SPLIT_DNS = ("8.8.8.8", "1.1.1.1")
+_DEFAULT_ROUTES = {"0.0.0.0/0", "::/0"}
+
+
+def _split_tunnel_fallback(config: AppConfig) -> tuple[str, int] | None:
+    """Адрес fallback-прокси, если профиль — WireGuard с неполным AllowedIPs и fallback задан."""
+    server = config.server
+    if not isinstance(server, WireGuardServer):
+        return None
+    allowed = [str(a).strip() for a in (getattr(server, "allowed_ips", None) or [])]
+    if not allowed or _DEFAULT_ROUTES & set(allowed):
+        return None
+
+    raw = str(getattr(config, "fallback_proxy", "") or "").strip()
+    host, _, port_str = raw.rpartition(":")
+    if not host or not port_str.isdigit():
+        return None
+    port = int(port_str)
+    if port == config.listen_port and host == config.listen_host:
+        # Сам на себя: получилась бы петля.
+        return None
+    return host, port
 
 
 # ------------------------------------------------------------------- inbound

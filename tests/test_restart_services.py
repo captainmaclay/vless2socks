@@ -317,6 +317,7 @@ class TestRestartServices(unittest.TestCase):
             app.restart_wsl_var = tk.BooleanVar(value=True)
             app.restart_work_proxy_var = tk.BooleanVar(value=False)
             app.restart_system_proxy_var = tk.BooleanVar(value=False)
+            app.restart_telegram_proxy_var = tk.BooleanVar(value=False)
             app.instances = []
             app.after = MagicMock()
             app._set_restart_button_busy = MagicMock()
@@ -333,6 +334,48 @@ class TestRestartServices(unittest.TestCase):
                     mock_wsl.assert_called_once()
                     self.assertTrue(any("Restarting WSL" in str(c) for c in app._log.call_args_list))
                     self.assertTrue(any("WSL successfully restarted" in str(c) for c in app._log.call_args_list))
+        finally:
+            root.destroy()
+
+    def test_execute_restart_services_only_restarts_single_service(self):
+        """execute_restart_services(only=...) restarts just that service and ignores the checkboxes."""
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            work_inst = MagicMock()
+            work_inst.is_work_proxy.return_value = True
+            work_inst.is_system_proxy.return_value = False
+            work_inst.is_telegram_proxy.return_value = False
+            work_inst.is_transitioning = False
+            work_inst.restart_async.side_effect = lambda callback=None: callback(True)
+            sys_inst = MagicMock()
+            sys_inst.is_work_proxy.return_value = False
+            sys_inst.is_system_proxy.return_value = True
+            sys_inst.is_telegram_proxy.return_value = False
+
+            app = MagicMock(spec=gui.VlessApp)
+            # All checkboxes are on, WorkProxy's is off: `only` must win in both directions
+            app.restart_wsl_var = tk.BooleanVar(value=True)
+            app.restart_work_proxy_var = tk.BooleanVar(value=False)
+            app.restart_system_proxy_var = tk.BooleanVar(value=True)
+            app.restart_telegram_proxy_var = tk.BooleanVar(value=True)
+            app.instances = [work_inst, sys_inst]
+            # Run scheduled callbacks immediately: the worker hands the restarts to the GUI thread via after()
+            app.after = lambda ms, fn=None, *a: fn(*a) if fn else None
+            app._set_restart_button_busy = MagicMock()
+            app._set_restart_button_success = MagicMock()
+            app._log = MagicMock()
+
+            with patch("gui.restart_wsl", return_value=(True, "ok")) as mock_wsl, patch("gui.RestartHUDWindow"):
+                with patch("threading.Thread") as mock_thread:
+                    gui.VlessApp.execute_restart_services(app, only="work")
+                    mock_thread.assert_called_once()
+                    mock_thread.call_args[1]["target"]()
+
+                    mock_wsl.assert_not_called()
+                    work_inst.restart_async.assert_called_once()
+                    sys_inst.restart_async.assert_not_called()
         finally:
             root.destroy()
 

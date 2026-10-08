@@ -340,6 +340,8 @@ def wipe_all_sensitive_data(stop_all_callback: Optional[Callable[[], None]] = No
             "System_Proxy": True,
             "work_proxy": False,
             "Work_Proxy": False,
+            "telegram_proxy": False,
+            "TelegramProxy": False,
         }
     ]
     with open(INSTANCES_FILE, "w", encoding="utf-8") as f:

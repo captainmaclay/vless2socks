@@ -30,11 +30,14 @@
 | Feature | Description |
 |---------|-------------|
 | **Multi-Proxy Management** | Unlimited SOCKS5 proxy instances with 10-per-page pagination |
+| **TelegramProxy Virtual Socket** | Dedicated virtual hub on `127.0.0.1:1373` (customizable) with master key, seamless failover & auto-rotation across flagged proxies |
+| **Zapret2 Watcher Service** | Background self-healing watchdog for `winws2.exe` & TelegramProxy with slide-down menu & backoff retry |
 | **Dual Backend Engine** | Pure Python SOCKS5 server or Xray-core (auto-detected) |
 | **Geo-IP Detection** | Country detection from URL fragments + live exit IP lookup via SOCKS5 |
 | **Hidden VLESS URLs** | Eye toggle (👁️ / 🙈) to show/hide sensitive VLESS links |
 | **Encrypted Backups** | AES-256-GCM with PBKDF2 key derivation, `.hbak` format |
 | **Auto-Reconnect** | Configurable retry intervals with exponential backoff |
+| **Proxy Launcher Automation** | Auto-generates multi-resolution `.ico` icons, `.bat` runners, and `.lnk` shortcuts with `C:\MyFiles\Proxy` hierarchy |
 | **Force Port Takeover** | Automatically kill processes occupying required ports |
 | **System Tray** | Minimize to tray with status indicator icons |
 | **Bilingual UI** | English (default) and Russian with instant hot-switch |
@@ -136,12 +139,17 @@ first run from templates bundled inside the exe, so `dist/` ships as-is.
 The application has **6 main tabs**:
 
 ### 🏠 Overview
-Real-time dashboard showing all configured SOCKS5 proxies with their status, ports, country flags, and quick actions. Start/Stop All buttons and Refresh Geo for batch operations.
+Real-time dashboard showing all configured SOCKS5 proxies with their status, ports, country flags, and quick actions:
+- Start/Stop All buttons and Refresh Geo for batch operations.
+- **Copy TG_socks** quick button on any proxy instance flagged with `TelegramProxy`.
+- **RestartServices Widget** with live health status indicator and slide-down context menu showing the active TelegramProxy upstream socket (`TelegramProxy ({active_socket})`).
 
 ### 🛡️ Proxies
 Paginated proxy management (10 per page). Each proxy card includes:
 - VLESS URL field (hidden by default with 👁️ toggle)
 - Host / Port configuration with auto-free-port finder
+- **TelegramProxy Flag** — enrolls this proxy in the resilient TelegramProxy virtual rotation pool
+- **Copy TG Proxy / TG_socks** button to copy universal Telegram master links
 - Start / Stop toggle with real-time health indicator (●)
 - Live log viewer with auto-scroll
 - Geo-IP country card with refresh button
@@ -155,6 +163,7 @@ Persistent settings saved to `settings.json`:
 - **Start Minimized to Tray** — launch directly to system tray (default: OFF)
 - **Auto-Reconnect on Failure** — automatic retry with configurable intervals (default: ON)
   - Default cycle: `10s → 15s → 30s → 1m → 2m → 3m → 30s (repeat)`
+- **TelegramProxy Virtual Port** — customizable listening port for the Telegram relay virtual socket (default: `1373`, with "Reset to 1373" button)
 
 ### 💾 Backup & Security
 - **Master Password** with SHA-256 fingerprint display
@@ -227,18 +236,32 @@ vless2socks/
 │   ├── selftest.py         # Tunnel connectivity test
 │   ├── ipcheck.py          # Direct vs. tunnel IP comparison
 │   ├── logging_setup.py    # Console logging configuration
+│   ├── telegram_proxy.py   # TelegramProxy virtual socket hub (1373) & seamless failover
+│   ├── ink/                # Proxy launcher & multi-resolution icon engine
+│   │   ├── colors.py       # HSV color transformations & white shield preservation
+│   │   ├── icon_engine.py  # Win32 PE multi-resolution icon extraction (.ico)
+│   │   ├── launchers.py    # Bat runner generator (Chrome, Xshell, etc.)
+│   │   ├── pipeline.py     # End-to-end launcher & shortcut build pipeline
+│   │   └── shortcuts.py    # Windows shell link (.lnk) creator
 │   └── xray/               # Xray-core integration
 │       ├── __init__.py
 │       ├── binary.py       # Xray binary discovery
 │       ├── config_builder.py # Xray JSON config generator
 │       └── runner.py       # Xray process manager
 │
+├── ZapretRecovery/         # Background self-healing watcher for zapret2 & TelegramProxy
+│   ├── __init__.py
+│   ├── core.py             # Watcher core, state machine & backoff scheduler
+│   ├── watcher.py          # Background monitor thread & process checker
+│   └── widget.py           # Slide-down RestartServices dropdown widget & minimizer
+│
 ├── tools/                  # Utilities
 │   ├── get_xray.py         # Xray-core auto-downloader
 │   └── selftest_all.py     # Comprehensive self-test suite
 │
 ├── tests/                  # Unit tests
-│   └── test_features.py
+│   ├── test_features.py
+│   └── test_telegram_proxy_dispatcher.py
 │
 ├── wsl-proxy-isolation/    # WSL2 Fail-Safe Network Isolation & Gemini Skills
 │   ├── __init__.py
@@ -277,41 +300,104 @@ Python standard library modules used: `tkinter`, `asyncio`, `subprocess`, `socke
 | File Format | `.hbak` with `HBAK\x01` magic header |
 | Contents | ZIP archive (instances.json, config.json, settings.json, .env) |
 
-## 🛡️ WSL2 Network Isolation & Gemini AI Skills
+## ✈️ TelegramProxy Virtual Socket & Resilient Failover
 
-### Integration with Gemini & Autonomous AI Agents
-The `wsl-proxy-isolation` module can be operated via the GUI, CLI, or by **Gemini / Antigravity AI agents** using the registered skill:
-- **Global Agent Skill:** `C:\Users\f\.gemini\config\skills\wsl-proxy-isolation\SKILL.md`
-- **Local Workspace Skill:** `wsl-proxy-isolation/SKILL.md`
+vless2socks features a resilient virtual socket dispatcher dedicated to Telegram desktop and mobile clients. Instead of binding Telegram directly to volatile upstream ports, vless2socks provides a single, high-availability master hub:
 
-### Autonomous Agent Capabilities
-Gemini can autonomously:
-1. **Detect WSL2:** Check if WSL is installed and identify active Linux distributions (`Ubuntu`, etc.).
-2. **Enforce Isolation:** Apply kernel packet-filtering rules restricting all WSL2 traffic to the local SOCKS5 proxy (`127.0.0.1:1015` / `127.0.0.1:11015`) with persistent boot configuration in `/etc/wsl.conf` and `/etc/nftables.conf`.
-3. **Audit & Leak Verification:** Execute live verification tests inside WSL:
-   - TCP handshake latency
-   - Direct IP leak test (`curl --noproxy '*'`) -> must be rejected by kernel
-   - SOCKS5 remote DNS test (`curl --socks5-hostname`) -> verifies external tunnel IP
-   - Bypass protection test (`curl -x http://127.0.0.1:2080`) -> must be rejected
-4. **Safe De-isolation:** Revert to Direct IP mode upon request.
+### 1. Dedicated Virtual Socket Hub (`127.0.0.1:1373`)
+- By default, the internal dispatcher listens on `127.0.0.1:1373`.
+- **Fully Customizable:** The listening port can be adjusted in real time from the **Options** tab in GUI or via `settings_manager` (`"telegram_proxy_port"` in `settings.json`). A one-click **"Reset to 1373"** button restores the default.
+- When modified, the dispatcher automatically unbinds and re-establishes the listener on the new port without interrupting background operations.
 
-### Quick CLI Usage for Agents & Scripts
-```powershell
-# Check WSL status
-python wsl-proxy-isolation/cli.py check-wsl
+### 2. Universal Master Key Links
+- Generate instant Telegram-compatible links configured with the virtual socket:
+  - MTProto format: `tg://proxy?server=127.0.0.1&port=1373&secret=dd648b061090960667e2620c7949495503`
+  - SOCKS5 format: `tg://socks?server=127.0.0.1&port=1373`
+- Users only need to add this single proxy link to Telegram once. You never need to update Telegram proxy settings again when switching or changing servers.
+- Available via the **Copy TG_socks** button on proxy cards in the Overview tab and in the proxy configuration dialog.
 
-# Apply isolation to port 1015
-python wsl-proxy-isolation/cli.py apply --port 1015
+### 3. Dynamic Real-Time Failover & Auto-Rotation
+- Any proxy instance in vless2socks can be enrolled in the Telegram pool by enabling the **TelegramProxy** checkbox flag.
+- The virtual dispatcher continuously routes incoming Telegram connections to the active flagged proxy.
+- If the current active upstream server goes down, resets connections, or times out, the dispatcher instantly and seamlessly fails over to the next healthy proxy with the `TelegramProxy` flag in real time.
+- If all flagged proxies are unavailable, the socket remains intact and automatically resumes forwarding the moment any enrolled proxy recovers.
+- Flag state and custom port configurations are fully persistent across reboots and saved in `.hbak` encrypted backups.
 
-# Run comprehensive diagnostic audit
-python wsl-proxy-isolation/cli.py test --port 1015
+### 4. RestartServices Integration
+- The **RestartServices** widget in the GUI toolbar features an interactive slide-down menu with a dedicated `TelegramProxy ({active_socket})` row.
+- It dynamically reflects the active upstream proxy endpoint (e.g., `127.0.0.1:1080` or `127.0.0.1:1081`), or displays `undefined` / `не выбрано` when no enrolled proxies are running.
+- Allows one-click restart and reconnect of the TelegramProxy virtual relay service directly from the menu.
 
-# Automated pipeline: Check -> Apply -> Audit
-python wsl-proxy-isolation/cli.py full-setup
+---
 
-# Restore direct IP access
-python wsl-proxy-isolation/cli.py remove
-```
+## 🛡️ Zapret2 Watcher (ZapretRecovery)
+
+vless2socks embeds a dedicated autonomous watchdog (`ZapretRecovery`) designed to maintain continuous availability of DPI bypass services (`winws2.exe`, `zapret-discord-youtube`) alongside proxy tunnels:
+
+- **Self-Healing Watchdog:** Continuously monitors the health of DPI circumvention processes in the background. If a crash or port conflict occurs, it restarts the service with an exponential backoff schedule:
+  ```
+  1s → 2s → 4s → 8s → 16s → 30s → 60s
+  ```
+- **Windows Minimization Fix:** Includes a native window watchdog preventing UI freezes or zombie background instances when the main application window is minimized to the taskbar or system tray.
+- **Unified Service Management:** Accessible via the `RestartServices` toolbar button to quickly restart Zapret2, reload filter drivers, or reboot the TelegramProxy dispatcher in one click.
+
+---
+
+## 🚀 Antigravity Agent Skills Suite
+
+vless2socks comes integrated with custom autonomous skills designed for Google DeepMind **Antigravity** and **Gemini AI** coding agents.
+
+### 1. `wsl-proxy-isolation` — Fail-Safe WSL2 Kernel Firewall Jail
+- **Location:** `wsl-proxy-isolation/SKILL.md` (and `~/.gemini/config/skills/wsl-proxy-isolation/SKILL.md`)
+- **Kernel Lockdown:** Configures strict `nftables` (with `iptables` fallback) rules inside WSL2. Outbound network traffic is locked to the loopback interface (`lo`) and local SOCKS5 port `1015`/`11015`, dropping all direct WAN/LAN connections (`counter reject`).
+- **Zero DNS Leaks:** Configures `ALL_PROXY='socks5h://127.0.0.1:1015'` in `/etc/profile.d/` for complete remote domain name resolution.
+- **Bypass Protection:** Rejects unauthorized local ports (e.g. `2080`).
+- **Automated Verification:** Comprehensive testing pipeline testing TCP handshake latency, direct IP leakage, and proxy routing via CLI:
+  ```powershell
+  # Check WSL status
+  python wsl-proxy-isolation/cli.py check-wsl
+
+  # Apply isolation to port 1015
+  python wsl-proxy-isolation/cli.py apply --port 1015
+
+  # Run comprehensive diagnostic audit
+  python wsl-proxy-isolation/cli.py test --port 1015
+
+  # Automated pipeline: Check -> Apply -> Audit
+  python wsl-proxy-isolation/cli.py full-setup
+
+  # Restore direct IP access
+  python wsl-proxy-isolation/cli.py remove
+  ```
+
+### 2. `proxy-launcher-generator` — Multi-Resolution Icon & Launcher Automation
+- **Location:** `~/.gemini/config/skills/proxy-launcher-generator/SKILL.md` & `vless2socks/ink/`
+- **Standardized Proxy Hierarchy:** Automates the creation of isolated launchers and shortcuts inside `C:\MyFiles\Proxy\`:
+  ```text
+  C:\MyFiles\Proxy\
+  ├── Chrome_Socket_1015.bat        # Launcher batch runners in root
+  ├── Xshell_Socket_1030.bat
+  ├── ico/                          # Multi-resolution application icons
+  │   ├── chrome_gold.ico
+  │   └── xshell_cyan.ico
+  └── ink/                          # Windows shortcuts (.lnk)
+      ├── Chrome Socket 1015.lnk
+      └── Xshell Socket 1030.lnk
+  ```
+- **Typo Protection (NTFS Junctions):** Automatically links `link` and `lnk` aliases to `ink`:
+  ```cmd
+  mklink /J "C:\MyFiles\Proxy\link" "C:\MyFiles\Proxy\ink"
+  mklink /J "C:\MyFiles\Proxy\lnk" "C:\MyFiles\Proxy\ink"
+  ```
+- **PE Multi-Res Extraction:** Extracts genuine 32-bit icon layers (256, 128, 64, 48, 32, 24, 16 px) directly from PE binaries (`chrome.exe`, `Xshell.exe`) using `pefile` (`RT_GROUP_ICON` -> `RT_ICON`) to eliminate Windows 10/11 scaling blur.
+- **HSV Badge Preservation:** Accurately tints application icons to custom proxy colors while preserving white dividers, badges, and inner graphics.
+
+### 3. `wsl-gui-troubleshooting` — Linux GUI & Electron Lifecyle in WSLg
+- **Location:** `~/.gemini/config/skills/wsl-gui-troubleshooting/SKILL.md`
+- **Elimination of Zombie Processes:** Solves the issue where closing an Electron application (e.g., Claude Desktop) in WSL2 fails to terminate the background process due to missing system tray support in WSLg (`kill -TERM`, `chrome_crashpad_handler`).
+- **SingletonLock Recovery:** Automatically cleans stale lockfiles (`~/.config/<App>/SingletonLock`) preventing instances from failing silently on relaunch.
+- **Session DBus Setup:** Ensures `XDG_RUNTIME_DIR` and `DBus` (`/run/user/<uid>/bus`) are properly started before launching graphical applications.
+- **Window Activation Watchdog:** Uses `xdotool` to activate existing visible windows instead of launching duplicate processes.
 
 ## License
 
@@ -331,11 +417,14 @@ MIT License. See [LICENSE](LICENSE) for details.
 | Возможность | Описание |
 |-------------|----------|
 | **Мультипрокси** | Неограниченное количество SOCKS5-прокси с пагинацией по 10 на страницу |
+| **TelegramProxy Виртуальный сокет** | Выделенный отказоустойчивый хаб на `127.0.0.1:1373` (настраиваемый) с мастер-ключом и бесшовной ротацией |
+| **Служба Zapret2 Watcher** | Фоновый watchdog самовосстановления для `winws2.exe` и TelegramProxy с выпадающим меню и экспоненциальным backoff |
 | **Двойной движок** | Встроенный Python SOCKS5-сервер или Xray-core (автовыбор) |
 | **Geo-IP** | Определение страны из URL-фрагмента + живой запрос внешнего IP через SOCKS5 |
 | **Скрытие VLESS-ссылок** | Кнопка-глаз (👁️ / 🙈) для показа/скрытия конфиденциальных ссылок |
 | **Шифрованные бэкапы** | AES-256-GCM с PBKDF2, формат `.hbak` |
 | **Авто-переподключение** | Настраиваемые интервалы повтора с нарастающей задержкой |
+| **Автоматизация лаунчеров** | Создание многослойных `.ico` иконок, `.bat` скриптов и ярлыков `.lnk` с иерархией `C:\MyFiles\Proxy` |
 | **Захват портов** | Автоматическое завершение процессов, занимающих нужные порты |
 | **Системный трей** | Сворачивание в трей с иконкой-индикатором |
 | **Локализация** | Английский (по умолчанию) и русский — мгновенное переключение |
@@ -438,12 +527,17 @@ dist/
 В приложении **6 основных вкладок**:
 
 ### 🏠 Обзор (Overview)
-Панель мониторинга со всеми настроенными прокси: статус, порты, флаги стран, кнопки управления. Групповые операции «Запустить все» / «Остановить все».
+Панель мониторинга со всеми настроенными прокси: статус, порты, флаги стран, кнопки управления:
+- Групповые операции «Запустить все» / «Остановить все» и «Обновить GeoIP».
+- Быстрая кнопка **Copy TG_socks** на карточках прокси, отмеченных флагом `TelegramProxy`.
+- Виджет **RestartServices** с живым индикатором состояния и выпадающим меню со строкой активного сокета `TelegramProxy ({активный_сокет})` (или `не выбрано`).
 
 ### 🛡️ Прокси (Proxies)
 Управление прокси с пагинацией (10 на страницу). Каждая карточка содержит:
 - Поле VLESS URL (скрыто по умолчанию, кнопка 👁️)
 - Хост / Порт с автоподбором свободного порта
+- Флаг **TelegramProxy** — включение прокси в пул отказоустойчивой ротации для Telegram
+- Кнопка **Copy TG Proxy / TG_socks** для копирования универсальной мастер-ссылки
 - Кнопка Start/Stop с индикатором здоровья (●)
 - Живой просмотр логов с автопрокруткой
 - Карточка GeoIP с обновлением
@@ -457,6 +551,7 @@ dist/
 - **Start Minimized to Tray** — запуск в трее (по умолчанию: ВЫКЛ)
 - **Auto-Reconnect on Failure** — автопереподключение (по умолчанию: ВКЛ)
   - Цикл по умолчанию: `10с → 15с → 30с → 1м → 2м → 3м → 30с (повтор)`
+- **Порт TelegramProxy** — настраиваемый порт виртуального сокета для Telegram (по умолчанию: `1373`, с кнопкой сброса к 1373)
 
 ### 💾 Бэкап и Безопасность (Backup & Security)
 - Мастер-пароль с отпечатком SHA-256
@@ -500,38 +595,103 @@ dist/
 | Формат файла | `.hbak` с магическим заголовком `HBAK\x01` |
 | Содержимое | ZIP-архив (instances.json, config.json, settings.json, .env) |
 
-## 🛡️ Сетевая изоляция WSL2 и скиллы для Gemini AI
+## ✈️ Виртуальный сокет TelegramProxy и отказоустойчивый Failover
 
-### Работа в связке с Gemini и автономными агентами
-Модуль `wsl-proxy-isolation` полностью совместим со стандартами скиллов Google Antigravity / Gemini:
-- **Глобальный системный скилл:** `C:\Users\f\.gemini\config\skills\wsl-proxy-isolation\SKILL.md`
-- **Локальный скилл в репозитории:** `wsl-proxy-isolation/SKILL.md`
+В **vless2socks** встроен выделенный диспетчер виртуального сокета специально для клиентов Telegram (Desktop и Mobile). Вместо привязки Telegram к нестабильным портам отдельных серверов, программа предоставляет единый отказоустойчивый хаб:
 
-### Что умеет агент Gemini с этим скиллом:
-1. **Экспресс-проверка WSL2:** Автоматически проверяет установку `wsl.exe`, список дистрибутивов (`Ubuntu` и др.) и версию ядра.
-2. **Активация изоляции на сокет 1015:** В одну команду устанавливает правила `nftables`, блокирует сторонние порты (:2080), прописывает `socks5h://127.0.0.1:1015` и регистрирует персистентный автозапуск в `/etc/wsl.conf` и `/etc/nftables.conf`.
-3. **Глубокий аудит утечек:** Изнутри WSL2 агент выполняет тесты:
-   - Handshake локального сокета 1015/11015
-   - Тест утечки IP (`curl --noproxy '*'`) — должен быть отсечен ядром
-   - Тест удаленного DNS (`curl --socks5-hostname`) — подтверждает подмену внешнего IP
-   - Тест блокировки обхода (`curl -x http://127.0.0.1:2080`)
-4. **Быстрое управление через CLI:**
-```powershell
-# Проверить статус WSL
-python wsl-proxy-isolation/cli.py check-wsl
+### 1. Выделенный виртуальный хаб (`127.0.0.1:1373`)
+- По умолчанию диспетчер слушает порт `127.0.0.1:1373`.
+- **Полная гибкость настройки:** Порт можно изменить в любой момент на вкладке **«Опции»** в GUI или через менеджер настроек (`telegram_proxy_port` в `settings.json`). Кнопка **«Сбросить на 1373»** позволяет мгновенно вернуть порт по умолчанию.
+- При смене порта диспетчер на лету переоткрывает локальный сокет без остановки фоновых сервисов.
 
-# Применить правила изоляции на сокет 1015
-python wsl-proxy-isolation/cli.py apply --port 1015
+### 2. Универсальные мастер-ссылки для Telegram
+- Генерация ссылок единого формата для мгновенного добавления в Telegram:
+  - MTProto-формат: `tg://proxy?server=127.0.0.1&port=1373&secret=dd648b061090960667e2620c7949495503`
+  - SOCKS5-формат: `tg://socks?server=127.0.0.1&port=1373`
+- Достаточно один раз добавить эту ссылку в Telegram. При смене серверов или падении соединений менять настройки внутри Telegram больше не требуется!
+- Ссылку можно скопировать кнопкой **Copy TG_socks** прямо с карточки любого прокси в «Обзоре» или в окне настройки конкретного прокси.
 
-# Запустить комплексный аудит контура
-python wsl-proxy-isolation/cli.py test --port 1015
+### 3. Бесшовный Failover и динамическая ротация
+- Любой прокси в vless2socks можно включить в Telegram-пул, отметив чекбокс **TelegramProxy**.
+- Виртуальный диспетчер маршрутизирует входящие соединения Telegram на активный рабочий прокси из пула.
+- Если текущий сервер падает, обрывает соединение или не отвечает, диспетчер в реальном времени бесшовно переключает трафик на следующий живой прокси с флагом `TelegramProxy`.
+- Если все отмеченные прокси временно недоступны, виртуальный сокет не падает, а возобновляет работу сразу же при восстановлении любого из них.
+- Состояние флагов и пользовательский порт надёжно сохраняются в конфигах и восстанавливаются из зашифрованных бэкапов `.hbak`.
 
-# Полный конвейер: проверка -> настройка -> аудит
-python wsl-proxy-isolation/cli.py full-setup
+### 4. Интеграция с RestartServices
+- Виджет **RestartServices** на панели управления оснащен выпадающим меню, где отдельной строкой отображается сокет: `TelegramProxy ({активный_сокет})` (например, `127.0.0.1:1080` или `не выбрано`).
+- Позволяет в один клик перезапустить службу виртуального прокси Telegram при возникновении задержек или сбоев.
 
-# Снять изоляцию (вернуть Direct IP)
-python wsl-proxy-isolation/cli.py remove
-```
+---
+
+## 🛡️ Сторожевой сервис Zapret2 (ZapretRecovery)
+
+В состав приложения включен автономный сторожевой модуль (`ZapretRecovery`), обеспечивающий непрерывную работоспособность средств обхода DPI (`winws2.exe`, `zapret-discord-youtube`):
+
+- **Фоновый самовосстанавливающийся Watchdog:** Следит за процессами обхода DPI. При падении или конфликте портов автоматически перезапускает службу с нарастающим интервалом (экспоненциальный backoff):
+  ```
+  1с → 2с → 4с → 8с → 16с → 30с → 60с
+  ```
+- **Защита от зависаний при сворачивании окон:** Нативный вотчдог следит за минимизацией и восстановлением главного окна Windows, исключая образование зомби-процессов и зависание интерфейса.
+- **Единое меню перезапуска:** Кнопка `RestartServices` в шапке окна позволяет выборочно или полностью перезапустить Zapret2, сетевые драйверы и диспетчер TelegramProxy.
+
+---
+
+## 🚀 Набор скиллов для агентов Antigravity / Gemini
+
+Кодовая база vless2socks стандартизирована для взаимодействия с автономными AI-агентами Google DeepMind Antigravity и Gemini с помощью набора специализированных скиллов:
+
+### 1. `wsl-proxy-isolation` — Сетевая тюрьма ядра Linux (WSL2)
+- **Расположение:** `wsl-proxy-isolation/SKILL.md` (и `~/.gemini/config/skills/wsl-proxy-isolation/SKILL.md`)
+- **Защита ядра Linux:** Настраивает правила `nftables` (с фоллбэком на `iptables`) внутри WSL2. Исходящий трафик заблокирован правилом `counter reject`, за исключением loopback (`lo`) и порта SOCKS5 `1015`/`11015`.
+- **Защита от DNS-утечек:** Автоматическая настройка `ALL_PROXY='socks5h://127.0.0.1:1015'` в `/etc/profile.d/` — все DNS-запросы разрешаются удаленно через прокси.
+- **Защита от обхода:** Блокировка попыток подключений к неавторизованным локальным сокетам (например, `:2080`).
+- **Автоматизированный аудит через CLI:**
+  ```powershell
+  # Проверка окружения WSL
+  python wsl-proxy-isolation/cli.py check-wsl
+
+  # Применение изоляции на порт 1015
+  python wsl-proxy-isolation/cli.py apply --port 1015
+
+  # Запуск комплексного аудита утечек
+  python wsl-proxy-isolation/cli.py test --port 1015
+
+  # Полный цикл (проверка -> настройка -> аудит)
+  python wsl-proxy-isolation/cli.py full-setup
+
+  # Снятие изоляции и возврат прямого выхода в сеть
+  python wsl-proxy-isolation/cli.py remove
+  ```
+
+### 2. `proxy-launcher-generator` — Автоматизация многослойных иконок и лаунчеров
+- **Расположение:** `~/.gemini/config/skills/proxy-launcher-generator/SKILL.md` и модуль `vless2socks/ink/`
+- **Иерархия папки лаунчеров:** Автоматизирует создание изолированных скриптов и ярлыков в `C:\MyFiles\Proxy\`:
+  ```text
+  C:\MyFiles\Proxy\
+  ├── Chrome_Socket_1015.bat        # Батники запуска в корне папки
+  ├── Xshell_Socket_1030.bat
+  ├── ico/                          # Цветные иконки со всеми слоями разрешения
+  │   ├── chrome_gold.ico
+  │   └── xshell_cyan.ico
+  └── ink/                          # Windows-ярлыки (.lnk)
+      ├── Chrome Socket 1015.lnk
+      └── Xshell Socket 1030.lnk
+  ```
+- **Защита от опечаток (NTFS Junctions):** Автоматическое создание симлинков-директорий `link` и `lnk` на папку `ink`:
+  ```cmd
+  mklink /J "C:\MyFiles\Proxy\link" "C:\MyFiles\Proxy\ink"
+  mklink /J "C:\MyFiles\Proxy\lnk" "C:\MyFiles\Proxy\ink"
+  ```
+- **Извлечение системных слоев из PE:** С помощью `pefile` (`RT_GROUP_ICON` -> `RT_ICON`) слои иконок (256, 128, 64, 48, 32, 24, 16 px) достаются прямо из бинарников (`chrome.exe`, `Xshell.exe`), что предотвращает мыло и артефакты масштабирования в Windows 10/11.
+- **HSV-трансформация:** Корректно перекрашивает иконки в индивидуальные цвета портов, сохраняя белые системные ободки, бейджи и логотипы.
+
+### 3. `wsl-gui-troubleshooting` — Запуск и отладка Linux GUI в WSLg
+- **Расположение:** `~/.gemini/config/skills/wsl-gui-troubleshooting/SKILL.md`
+- **Устранение зомби-процессов:** Решает проблему зависания Electron-приложений (например, Claude Desktop) при закрытии крестиком из-за отсутствия системного трея в WSLg (`kill -TERM`, `chrome_crashpad_handler`).
+- **Сброс SingletonLock:** Автоматическая очистка блокировок `~/.config/<App>/SingletonLock`, устраняющая сбои повторного запуска.
+- **Инициализация сессионного DBus:** Гарантирует запуск `XDG_RUNTIME_DIR` и `dbus-daemon` перед стартом GUI-процессов.
+- **Фокусировка окон через `xdotool`:** Активирует существующее открытое окно вместо создания дублирующих экземпляров.
 
 ## Лицензия
 
