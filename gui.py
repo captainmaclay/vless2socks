@@ -38,6 +38,10 @@ import settings_manager
 from ZapretRecovery import Zapret2Watcher, ZapretRecoveryWidget
 from i18n import get_current_language, load_language_preference, save_language_preference, t
 from vless2socks.paths import APP_DIR, FROZEN, bundled, unpack_bundled_bin
+from vless2socks.power_watcher import PowerBroadcastWatcher
+from vless2socks.wsl_watchdog import WSL_OPERATION_LOCK, WslWatchdog
+from vless2socks.ipc_server import SingleInstanceIpcServer, request_show_running_instance
+from vless2socks.tunnel_probe import probe_socks5_tunnel
 
 # ── Tray dependencies ──────────────────────────────────────────
 try:
@@ -551,6 +555,12 @@ def save_instances(instances: list[dict]) -> None:
 
 
 def restart_wsl() -> tuple[bool, str]:
+    """Restart WSL on purpose; the lock tells the WSL watchdog this is not a hang."""
+    with WSL_OPERATION_LOCK:
+        return _restart_wsl_unlocked()
+
+
+def _restart_wsl_unlocked() -> tuple[bool, str]:
     """Execute clean WSL restart:
     1. Query currently running distros.
     2. Explicitly terminate running distros (forces GUI/X11 apps to terminate).
@@ -788,6 +798,8 @@ class ProxyInstance:
         self._manual_stop = False
         self._reconnect_attempt = 0
         self._reconnect_timer_id: Optional[str] = None
+        self._upstream_failures = 0
+        self._last_tunnel_probe = 0.0
 
         # Flags: System_Proxy & Work_Proxy & TelegramProxy
         self.system_proxy_var: Optional[tk.BooleanVar] = None
@@ -2856,7 +2868,28 @@ class ProxyInstance:
             p = int(p_str)
         except ValueError:
             return False
-        return is_port_alive(h, p, timeout=timeout)
+
+        # 1. Quick local loopback port check
+        if not is_port_alive(h, p, timeout=timeout):
+            return False
+
+        # 2. If running, periodically verify actual outbound tunnel connectivity
+        if self.running and not self.is_transitioning:
+            now = time.time()
+            if now - getattr(self, "_last_tunnel_probe", 0.0) >= 12.0:
+                self._last_tunnel_probe = now
+                try:
+                    ok, _ = probe_socks5_tunnel(h, p, timeout=1.0)
+                    if not ok:
+                        self._upstream_failures = getattr(self, "_upstream_failures", 0) + 1
+                        if self._upstream_failures >= 2:
+                            return False
+                    else:
+                        self._upstream_failures = 0
+                except Exception:
+                    pass
+
+        return True
 
     def apply_health_status(self, alive: bool) -> bool:
         """Apply health status on main thread. Returns True if status changed."""
@@ -2865,20 +2898,25 @@ class ProxyInstance:
 
         changed = False
         if self.running:
-            if alive and not self.healthy:
-                self.healthy = True
-                self._reconnect_attempt = 0
-                self._set_state("running")
-                self.app.refresh_overview()
-                changed = True
+            if alive:
+                self._upstream_failures = 0
+                if not self.healthy:
+                    self.healthy = True
+                    self._reconnect_attempt = 0
+                    self._set_state("running")
+                    self.app.refresh_overview()
+                    changed = True
             elif not alive:
                 has_live_process = bool(self.process and self.process.poll() is None)
                 if has_live_process:
                     if self.healthy:
                         self.healthy = False
-                        self._set_state("starting")
+                        self._set_state("error")
                         self.app.refresh_overview()
                         changed = True
+                    if not self._manual_stop and self.is_auto_reconnect_enabled():
+                        self._log("🔄 [SelfRecovery] Dead upstream tunnel detected with live process. Restarting instance...")
+                        self.restart(blocking=False)
                 elif self._reconnect_timer_id is None:
                     # Nothing of ours is behind this instance any more - e.g. a process adopted from a
                     # previous GUI session has died. Drop the stale "running" flag, otherwise
@@ -3404,6 +3442,23 @@ class VlessApp(tk.Tk):
         self._update_telegram_dispatcher_pool()
         self._setup_tray()
         self._poll_loop()
+
+        # Single-Instance IPC & Wake-from-sleep Auto-Recovery
+        self._power_watcher = PowerBroadcastWatcher(on_resume=self._on_power_resume)
+        self._power_watcher.start()
+        self._ipc_server = SingleInstanceIpcServer(on_show=self._ipc_on_show, on_restart=self._ipc_on_restart)
+        self._ipc_server.start()
+
+        # WSL watchdog: recovers a hung WSL, leaves a healthy or stopped one alone
+        self.wsl_watchdog = WslWatchdog(
+            enabled=bool(settings_manager.get_setting("wsl_watchdog_enabled", True)),
+            auto_recover=bool(settings_manager.get_setting("wsl_watchdog_auto_recover", True)),
+            recover_gui=bool(settings_manager.get_setting("wsl_watchdog_recover_gui", False)),
+            on_log=self._log,
+            on_alert=self._tray_notify,
+            on_change=self._tray_refresh_menu,
+        )
+        self.wsl_watchdog.start()
 
         # Startup Options: Auto-start configured proxies
         if settings_manager.get_setting("autostart_proxies", True):
@@ -5864,10 +5919,16 @@ class VlessApp(tk.Tk):
         try:
             while True:
                 ms, func, args = self._ui_queue.get_nowait()
-                super().after(ms, func, *args)
+                try:
+                    super().after(ms, func, *args)
+                except Exception:
+                    pass
         except queue.Empty:
             pass
-        super().after(UI_QUEUE_POLL_MS, self._drain_ui_queue)
+        except Exception:
+            pass
+        finally:
+            super().after(UI_QUEUE_POLL_MS, self._drain_ui_queue)
 
     def _log(self, msg: str):
         """Application-level logger for background service operations."""
@@ -5930,6 +5991,11 @@ class VlessApp(tk.Tk):
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(f"🔄 {t('btn_restart_services')}", self._tray_restart_services),
             pystray.MenuItem(f"✈️ {t('lbl_restart_telegram_proxy')}", self._tray_restart_telegram_proxy),
+            pystray.MenuItem(
+                lambda _: f"🐧 {t('lbl_wsl_watchdog')}: {self._wsl_watchdog_status_text()}",
+                self._tray_toggle_wsl_watchdog,
+                checked=lambda _: bool(settings_manager.get_setting("wsl_watchdog_enabled", True)),
+            ),
             pystray.MenuItem(
                 f"⚙️ {t('restart_menu_title')}",
                 pystray.Menu(
@@ -5996,6 +6062,35 @@ class VlessApp(tk.Tk):
             return
         self.execute_restart_services(only=service)
 
+    def _tray_toggle_wsl_watchdog(self, icon=None, item=None):
+        new_val = not bool(settings_manager.get_setting("wsl_watchdog_enabled", True))
+        settings_manager.set_setting("wsl_watchdog_enabled", new_val)
+        self.wsl_watchdog.set_enabled(new_val)
+        if self._tray_icon:
+            self._tray_icon.update_menu()
+
+    def _wsl_watchdog_status_text(self) -> str:
+        watchdog = getattr(self, "wsl_watchdog", None)
+        if not watchdog or not watchdog.enabled:
+            return "off"
+        state = watchdog.get_state()
+        return "recovering" if state["recovering"] else state["status"]
+
+    def _tray_refresh_menu(self):
+        try:
+            if self._tray_icon:
+                self._tray_icon.update_menu()
+        except Exception:
+            pass
+
+    def _tray_notify(self, message: str):
+        """Balloon from the tray icon; safe from any thread, silent when there is no tray."""
+        try:
+            if self._tray_icon:
+                self._tray_icon.notify(message[:250], "vless2socks")
+        except Exception:
+            pass
+
     def _tray_toggle_wsl(self, icon=None, item=None):
         cur = bool(settings_manager.get_setting("restart_wsl", True))
         new_val = not cur
@@ -6050,19 +6145,105 @@ class VlessApp(tk.Tk):
         else:
             self._exit()
 
+    def _ipc_on_show(self):
+        try:
+            self.after(0, self._do_show)
+        except Exception:
+            pass
+
+    def _ipc_on_restart(self):
+        try:
+            self.after(0, self.restart_all)
+        except Exception:
+            pass
+
+    def _on_power_resume(self):
+        self._log("⚡ [PowerWatcher] System resumed from sleep. Scheduling self-recovery in 2.5s...")
+        if getattr(self, "wsl_watchdog", None):
+            self.wsl_watchdog.note_resume()
+        try:
+            self.after(2500, self._perform_power_recovery)
+        except Exception:
+            pass
+
+    def _perform_power_recovery(self):
+        self._log("⚡ [PowerWatcher] Re-healing proxies and restoring tray icon after sleep...")
+        self._reinit_tray()
+        for inst in list(self.instances):
+            try:
+                if inst.running or inst._should_run:
+                    inst._upstream_failures = 0
+                    inst._last_tunnel_probe = 0.0
+                    self._log(f"⚡ [PowerWatcher] Restarting active proxy {inst.cfg.get('name', '')}...")
+                    inst.restart(blocking=False)
+            except Exception as e:
+                self._log(f"⚠️ [PowerWatcher] Error restarting {inst.cfg.get('name', '')}: {e}")
+        self.refresh_overview()
+        self.update_tray_icon()
+        self._update_header_stats()
+
+    def _reinit_tray(self):
+        """Re-initializes pystray icon if the OS notification area desynced during sleep."""
+        if not HAS_TRAY:
+            return
+        try:
+            if self._tray_icon:
+                self._tray_icon.stop()
+        except Exception:
+            pass
+        self._tray_icon = None
+        self._tray_thread = None
+        self.after(300, self._setup_tray)
+        self.after(600, self.update_tray_icon)
+
     def _show_from_tray(self, icon=None, item=None):
         self.after(0, self._do_show)
 
     def _do_show(self):
-        self.deiconify()
-        self.lift()
-        self.focus_force()
+        try:
+            self.deiconify()
+        except Exception:
+            pass
         self._hidden = False
+
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                hwnd = self.winfo_id()
+                parent_hwnd = ctypes.windll.user32.GetAncestor(hwnd, 2)  # GA_ROOT
+                target_hwnd = parent_hwnd if parent_hwnd else hwnd
+                ctypes.windll.user32.ShowWindow(target_hwnd, 9)  # SW_RESTORE
+                ctypes.windll.user32.SetForegroundWindow(target_hwnd)
+            except Exception:
+                pass
+
+        try:
+            self.lift()
+            self.attributes("-topmost", True)
+            self.attributes("-topmost", False)
+            self.focus_force()
+        except Exception:
+            pass
 
     def _exit_from_tray(self, icon=None, item=None):
         self.after(0, self._exit)
 
     def _exit(self):
+        if getattr(self, "_power_watcher", None):
+            try:
+                self._power_watcher.stop()
+            except Exception:
+                pass
+        if getattr(self, "_ipc_server", None):
+            try:
+                self._ipc_server.stop()
+            except Exception:
+                pass
+        if getattr(self, "wsl_watchdog", None):
+            try:
+                self.wsl_watchdog.stop()
+            except Exception:
+                pass
         if getattr(self, "zapret_watcher", None):
             try:
                 self.zapret_watcher.stop()
@@ -6290,6 +6471,11 @@ def main():
 
     # Проверка на множественный запуск GUI
     if not _acquire_instance_lock():
+        try:
+            if request_show_running_instance():
+                return 0
+        except Exception:
+            pass
         _show_already_running_notice(1200)
         return 0
 
