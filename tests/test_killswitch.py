@@ -213,6 +213,7 @@ class GuiKillswitchIntegrationTest(unittest.TestCase):
         app.save_all = MagicMock()
         app.refresh_current_page_tabs = MagicMock()
         app.refresh_overview = MagicMock()
+        app.update_overview_card = MagicMock()
         app.update_tray_icon = MagicMock()
 
         cfg = {
@@ -239,19 +240,24 @@ class GuiKillswitchIntegrationTest(unittest.TestCase):
         # Mock leak detection stopping proxy when no TUN is active
         inst.running = True
         inst.stop = MagicMock()
+        inst.stop_async = MagicMock()
         with patch("vless2socks.ipcheck.is_system_tun_active", return_value=False):
             with patch("vless2socks.ipcheck.check_ip_leak", return_value=(True, "1.1.1.1", "1.1.1.1", "Leak!")):
                 with patch("gui.messagebox.showerror"):
                     inst.verify_killswitch(manual=False, sync=True)
-                    inst.stop.assert_called()
+                    # stopped without blocking the GUI thread
+                    inst.stop_async.assert_called()
+                    inst.stop.assert_not_called()
 
         # When Throne/TUN is active on host, proxy must NOT be stopped!
         inst.running = True
         inst.stop = MagicMock()
+        inst.stop_async = MagicMock()
         with patch("vless2socks.ipcheck.is_system_tun_active", return_value=True):
             with patch("vless2socks.ipcheck.check_ip_leak", return_value=(True, "62.60.234.188", "62.60.234.188", "Leak!")):
                 inst.verify_killswitch(manual=False, sync=True)
                 inst.stop.assert_not_called()
+                inst.stop_async.assert_not_called()
 
 
 if __name__ == "__main__":

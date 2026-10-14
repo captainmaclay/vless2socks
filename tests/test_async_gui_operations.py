@@ -12,8 +12,6 @@ class AsyncGuiOperationsTest(unittest.TestCase):
         self.mock_app = MagicMock(spec=VlessApp)
         self.mock_app.after = MagicMock(side_effect=lambda delay, fn=None, *args: fn(*args) if fn else None)
         self.mock_app.instances = []
-        self.mock_app._overview_cards = {}
-        self.mock_app._cached_instances_signature = None
 
         self.cfg = {
             "name": "Async Test Proxy",
@@ -31,6 +29,7 @@ class AsyncGuiOperationsTest(unittest.TestCase):
         mock_proc.pid = 99999
         mock_proc.poll.return_value = None
         mock_proc.wait.side_effect = lambda: time.sleep(5)
+        mock_proc.stderr.readline.return_value = b""  # closed pipe: the reader thread must end
 
         callback_called = threading.Event()
         callback_result = []
@@ -55,7 +54,7 @@ class AsyncGuiOperationsTest(unittest.TestCase):
             self.assertTrue(self.inst.running)
             self.assertFalse(self.inst.is_transitioning)
             self.assertEqual(self.inst.process, mock_proc)
-            self.mock_app.refresh_overview.assert_called()
+            self.mock_app.update_overview_card.assert_called_with(self.inst)
 
     def test_stop_async_non_blocking_and_callback(self):
         mock_proc = MagicMock()
@@ -81,7 +80,7 @@ class AsyncGuiOperationsTest(unittest.TestCase):
             self.assertFalse(self.inst.healthy)
             self.assertFalse(self.inst.is_transitioning)
             self.assertIsNone(self.inst.process)
-            self.mock_app.refresh_overview.assert_called()
+            self.mock_app.update_overview_card.assert_called_with(self.inst)
 
     def test_toggle_async_behavior(self):
         with patch.object(self.inst, "start_async") as mock_start_async, \
@@ -119,6 +118,7 @@ class AsyncGuiOperationsTest(unittest.TestCase):
 
         app = MagicMock(spec=VlessApp)
         app.instances = [inst1, inst2]
+        app.start_proxies_throttled = lambda insts: VlessApp.start_proxies_throttled(app, insts)
 
         VlessApp.start_all(app)
         inst1.start_async.assert_called_once()
@@ -132,6 +132,7 @@ class AsyncGuiOperationsTest(unittest.TestCase):
         inst2.stop_async.assert_called_once()
 
     def test_in_place_differential_card_updates(self):
+        """A status change redraws only that proxy's card, never the whole list."""
         try:
             root = tk.Tk()
             root.withdraw()
@@ -139,38 +140,32 @@ class AsyncGuiOperationsTest(unittest.TestCase):
             self.skipTest("Tkinter display not available")
 
         try:
-            content_frame = tk.Frame(root)
+            from overview_view import OverviewView
+            canvas = tk.Canvas(root, width=900, height=400)
             real_app = MagicMock(spec=VlessApp)
-            real_app.overview_content = content_frame
-            real_app._overview_cards = {}
+            real_app.overview_view = OverviewView(canvas, C)
+            real_app.overview_view_mode = "list"
+            real_app._selected = set()
             real_app.instances = [self.inst]
-            real_app._update_overview_card_widgets = lambda inst, data: VlessApp._update_overview_card_widgets(real_app, inst, data)
+            real_app._card_model = lambda inst, idx, badge: VlessApp._card_model(real_app, inst, idx, badge)
+            real_app._header_model = lambda *a, **k: VlessApp._header_model(real_app, *a, **k)
             real_app.prompt_reorder_proxy = MagicMock()
             real_app.prompt_rename_proxy = MagicMock()
 
-            # First build: widgets should be created
-            VlessApp.refresh_overview(real_app)
-            self.assertIn(self.inst, real_app._overview_cards)
-            card_dict = real_app._overview_cards[self.inst]
-            card_widget = card_dict["card"]
-            dot_widget = card_dict["dot"]
-            self.assertTrue(card_widget.winfo_exists())
+            # First draw: the card is on the canvas, stopped = red dot
+            VlessApp._render_overview(real_app)
+            view = real_app.overview_view
+            self.assertIn(self.inst, view.card_slots)
+            self.assertEqual(view.card_dots(self.inst), [C["red"]])
 
-            # Verify initial stopped color (red)
-            self.assertEqual(dot_widget.cget("fg"), C["red"])
-
-            # Mutate state without recreating DOM
+            # State change: only this card is redrawn, the list is not rebuilt
             self.inst.running = True
             self.inst.healthy = True
-            initial_card_id = id(card_widget)
-
-            # Second refresh: signature is identical, so it must update in-place without destroying
-            VlessApp.refresh_overview(real_app)
-
-            # Ensure the SAME widget instance exists and was updated
-            self.assertEqual(id(real_app._overview_cards[self.inst]["card"]), initial_card_id)
-            self.assertTrue(card_widget.winfo_exists())
-            self.assertEqual(dot_widget.cget("fg"), C["green"])
+            with patch.object(view, "render", wraps=view.render) as full_render:
+                VlessApp.update_overview_card(real_app, self.inst)
+                VlessApp._flush_card_updates(real_app)   # what the scheduled idle call does
+            full_render.assert_not_called()
+            self.assertEqual(view.card_dots(self.inst), [C["green"]])
         finally:
             root.destroy()
 

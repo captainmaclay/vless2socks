@@ -88,11 +88,11 @@ def _extract_ip(body: str) -> str:
 
 def is_system_tun_active() -> bool:
     """Определить, активен ли в Windows системный TUN-интерфейс (Throne, sing-tun, wintun)."""
-    import subprocess
     import sys
+    from .winroute import route_print_default
     if sys.platform == "win32":
         try:
-            out = subprocess.check_output("route print 0.0.0.0", shell=True, text=True)
+            out = route_print_default()
             for line in out.splitlines():
                 parts = line.strip().split()
                 if len(parts) >= 5 and parts[0] == "0.0.0.0":

@@ -53,18 +53,17 @@ class StopAndIndicationTest(unittest.TestCase):
         self.inst.geo_info["ip"] = "1.2.3.4"
 
         with patch("gui.subprocess.run") as mock_run, \
-             patch("gui.kill_processes_on_port") as mock_kill_port:
-            mock_kill_port.return_value = (True, "freed")
+             patch("gui.kill_process_trees") as mock_kill_tree, \
+             patch("gui.free_ports") as mock_free_ports:
             self.inst.stop()
 
-            # Process tree kill attempted
+            # Process tree killed through the Win32 API: no taskkill process is started
             if sys.platform == "win32":
-                self.assertTrue(any("taskkill" in str(c) for c in mock_run.call_args_list))
+                mock_kill_tree.assert_called_once_with([99999])
+                self.assertFalse(any("taskkill" in str(c) for c in mock_run.call_args_list))
 
-            # Both SOCKS5 and HTTP ports cleaned up
-            called_ports = [c[0][0] for c in mock_kill_port.call_args_list]
-            self.assertIn(19876, called_ports)
-            self.assertIn(29876, called_ports)
+            # Both SOCKS5 and HTTP ports cleaned up, in one call
+            mock_free_ports.assert_called_once_with([19876, 29876])
 
             # State updated to stopped
             self.assertFalse(self.inst.running)
@@ -79,7 +78,7 @@ class StopAndIndicationTest(unittest.TestCase):
 
             # UI indicators refreshed
             self.mock_app.update_tray_icon.assert_called()
-            self.mock_app.refresh_overview.assert_called()
+            self.mock_app.update_overview_card.assert_called_with(self.inst)
             self.mock_app._update_header_stats.assert_called()
 
     def test_check_geo_now_when_stopped(self):
@@ -109,19 +108,18 @@ class StopAndIndicationTest(unittest.TestCase):
 
             self.assertFalse(self.inst.healthy)
             mock_set_state.assert_called_with("error")
-            self.mock_app.refresh_overview.assert_called()
+            self.mock_app.update_overview_card.assert_called_with(self.inst)
 
     def test_poll_health_cleans_up_orphan_when_manually_stopped(self):
         self.inst.running = False
         self.inst._manual_stop = True
         with patch("gui.is_port_alive", return_value=True), \
-             patch("gui.kill_processes_on_port") as mock_kill, \
+             patch("gui.free_ports") as mock_free, \
              patch("geo_ip.invalidate_cache") as mock_inval:
             self.inst.poll_health()
 
-            # Should kill the lingering orphan process
-            called_ports = [c[0][0] for c in mock_kill.call_args_list]
-            self.assertIn(19876, called_ports)
+            # Should kill the lingering orphan process (SOCKS and HTTP port in one sweep)
+            mock_free.assert_called_once_with([19876, 29876])
             mock_inval.assert_called_with("127.0.0.1", 19876)
 
     def test_poll_health_syncs_running_if_preexisting_active(self):
@@ -134,7 +132,7 @@ class StopAndIndicationTest(unittest.TestCase):
             self.assertTrue(self.inst.running)
             self.assertTrue(self.inst.healthy)
             mock_set_state.assert_called_with("running")
-            self.mock_app.refresh_overview.assert_called()
+            self.mock_app.update_overview_card.assert_called_with(self.inst)
 
     def test_autostart_configured_proxies_includes_socks5(self):
         from gui import VlessApp
@@ -177,17 +175,21 @@ class StopAndIndicationTest(unittest.TestCase):
         mock_vless_app.update_tray_icon = MagicMock()
         mock_vless_app._update_header_stats = MagicMock()
 
-        # Call the actual autostart_configured_proxies method
+        # Call the actual autostart_configured_proxies method (it starts through the throttled queue)
+        for inst in mock_vless_app.instances:
+            inst.is_transitioning = False
+            inst.start_async = MagicMock()
+        mock_vless_app.start_proxies_throttled = lambda insts: VlessApp.start_proxies_throttled(mock_vless_app, insts)
         VlessApp.autostart_configured_proxies(mock_vless_app)
 
         # Verify that both VLESS and SOCKS5 instances were started
-        inst_vless.start.assert_called_once()
-        inst_socks5.start.assert_called_once()
-        inst_socks.start.assert_called_once()
+        inst_vless.start_async.assert_called_once()
+        inst_socks5.start_async.assert_called_once()
+        inst_socks.start_async.assert_called_once()
 
         # Empty and already running should NOT be started
-        inst_empty.start.assert_not_called()
-        inst_already_running.start.assert_not_called()
+        inst_empty.start_async.assert_not_called()
+        inst_already_running.start_async.assert_not_called()
 
         # UI updates triggered
         mock_vless_app.refresh_overview.assert_called_once()

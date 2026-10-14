@@ -19,7 +19,7 @@ class ThroneCompatibilityTest(unittest.IsolatedAsyncioTestCase):
             "          0.0.0.0          0.0.0.0      192.168.1.1    192.168.1.157     50\n"
             "          0.0.0.0        248.0.0.0       172.19.0.2       172.19.0.1      0\n"
         )
-        with patch("subprocess.check_output", return_value=mock_route_out):
+        with patch("vless2socks.winroute.route_print_default", return_value=mock_route_out):
             self.assertTrue(is_system_tun_active())
 
     def test_tun_detection_without_tun(self):
@@ -31,7 +31,7 @@ class ThroneCompatibilityTest(unittest.IsolatedAsyncioTestCase):
             "Network Destination        Netmask          Gateway       Interface  Metric\n"
             "          0.0.0.0          0.0.0.0      192.168.1.1    192.168.1.157     50\n"
         )
-        with patch("subprocess.check_output", return_value=mock_route_out):
+        with patch("vless2socks.winroute.route_print_default", return_value=mock_route_out):
             self.assertFalse(is_system_tun_active())
 
     async def test_shared_proxy_with_throne_is_safe(self):

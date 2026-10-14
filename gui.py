@@ -16,6 +16,7 @@ Features:
 from __future__ import annotations
 
 import contextlib
+import functools
 import io
 import json
 import queue
@@ -30,12 +31,15 @@ import traceback
 from collections import deque
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import backup_manager
 import geo_ip
+import proxy_groups
 import settings_manager
+import subscriptions
 from ZapretRecovery import Zapret2Watcher, ZapretRecoveryWidget
+from overview_view import Button as OverviewButton, CardModel, HeaderModel, HintModel, OverviewView
 from i18n import get_current_language, load_language_preference, save_language_preference, t
 from vless2socks.paths import APP_DIR, FROZEN, bundled, unpack_bundled_bin
 from vless2socks.power_watcher import PowerBroadcastWatcher
@@ -178,6 +182,8 @@ def download_xray(emit) -> bool:
 PAGE_SIZE = 10
 RESTART_PROXIES_TIMEOUT_SEC = 45
 UI_QUEUE_POLL_MS = 20
+LOG_FLUSH_MS = 200          # proxy log lines reach the widget in batches, not one redraw per line
+LOG_WIDGET_MAX_LINES = 500  # the log widget keeps only the tail; an unbounded Text makes every append slow
 BASE_PORT = 1081
 
 # ── Colors (Catppuccin Mocha Palette) ──────────────────────────
@@ -353,73 +359,209 @@ def _process_start_time(pid: int) -> int | None:
         return None
 
 
+#: Console tools (netstat) started by the GUI at the same time. Dozens of proxies stopping or
+#: taking over ports together used to start them by the hundred; the desktop heap ran out and
+#: Windows failed new console programs with 0xc0000142.
+_CONSOLE_TOOL_SLOTS = threading.BoundedSemaphore(4)
+#: Killswitch leak checks running at the same time (each one makes outgoing connections)
+_LEAK_CHECK_SLOTS = threading.BoundedSemaphore(3)
+#: Proxies starting at the same time on "Start all" / autostart
+START_CONCURRENCY = 6
+START_SPACING_MS = 400
+#: Short background jobs (geo lookups, killswitch checks) share one pool: starting a new
+#: thread from the GUI thread for each of dozens of proxies made Thread.start() wait on
+#: thread start-up again and again while everything else was busy
+_BACKGROUND_POOL = None
+_BACKGROUND_POOL_LOCK = threading.Lock()
+
+
+def submit_background(fn, *args):
+    """Run fn in the shared background pool; returns its Future."""
+    global _BACKGROUND_POOL
+    with _BACKGROUND_POOL_LOCK:
+        if _BACKGROUND_POOL is None:
+            from concurrent.futures import ThreadPoolExecutor
+            _BACKGROUND_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="bg")
+    return _BACKGROUND_POOL.submit(fn, *args)
+
+
+_LIFECYCLE_POOL = None
+
+
+def submit_lifecycle(fn, *args):
+    """Proxy start/stop workers (they block on Popen / process exit). A pool: threads are
+    created once and reused, so the GUI thread does not wait for a new thread to start
+    on every start, stop or restart of every proxy."""
+    global _LIFECYCLE_POOL
+    with _BACKGROUND_POOL_LOCK:
+        if _LIFECYCLE_POOL is None:
+            from concurrent.futures import ThreadPoolExecutor
+            _LIFECYCLE_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="lifecycle")
+    return _LIFECYCLE_POOL.submit(fn, *args)
+
+
+#: After the last proxy of a start wave was launched, background tab building waits
+#: this long: geo lookups and killswitch checks of the new proxies are still arriving
+TAB_BUILD_QUIET_MS = 8000
+#: Upper bound for the exit; the window is already hidden while proxies are killed
+EXIT_TIMEOUT_S = 8.0
+#: Proxy health checks run in parallel during one status sweep
+HEALTH_CHECK_WORKERS = 16
+#: Grace period during which a newly started proxy is warming up, initializing its core,
+#: and binding its listening port. Health checks during this window will not trigger
+#: error state or self-recovery restarts.
+STARTUP_GRACE_PERIOD_S = 20.0
+#: Minimum cooldown between automatic self-recovery restarts for the same proxy instance.
+SELF_RECOVERY_COOLDOWN_S = 45.0
+#: Consecutive failed health sweeps required on a running proxy past warmup before self-recovery.
+SELF_RECOVERY_FAIL_THRESHOLD = 3
+#: Maximum consecutive self-recovery attempts before pausing to prevent infinite loops.
+MAX_CONSECUTIVE_RECOVERIES = 3
+
+
+def _terminate_pid(pid: int) -> bool:
+    """TerminateProcess through the Win32 API: no taskkill.exe process per kill."""
+    if sys.platform != "win32":
+        try:
+            import os
+            import signal
+            os.kill(pid, signal.SIGKILL)
+            return True
+        except Exception:
+            return False
+    import ctypes
+    from ctypes import wintypes
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel32.OpenProcess(0x0001, False, int(pid))  # PROCESS_TERMINATE
+        if not handle:
+            return False
+        try:
+            return bool(kernel32.TerminateProcess(handle, 1))
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return False
+
+
+def kill_process_trees(
+    root_pids: "Iterable[int]",
+    current_pid: int | None = None,
+    table: dict[int, tuple[int, str]] | None = None,
+) -> set[int]:
+    """Kill every root pid with all its descendants in one pass (like taskkill /F /T, but
+    without starting a process). Never touches this process or its ancestors.
+    Roots go first so a launcher cannot restart its xray while the tree is torn down."""
+    import os
+    if current_pid is None:
+        current_pid = os.getpid()
+    roots = {int(p) for p in root_pids if p}
+    if not roots:
+        return set()
+    if table is None:
+        table = _process_table()
+
+    protected = set()
+    cursor = current_pid
+    while cursor in table and cursor not in protected:
+        protected.add(cursor)
+        cursor = table[cursor][0]
+    protected.add(current_pid)
+
+    children: dict[int, list[int]] = {}
+    for pid, (ppid, _name) in table.items():
+        if pid != ppid:
+            children.setdefault(ppid, []).append(pid)
+
+    order: list[int] = []
+    seen: set[int] = set()
+    queue_ = [p for p in roots if p not in protected]
+    while queue_:
+        pid = queue_.pop(0)
+        if pid in seen or pid in protected:
+            continue
+        seen.add(pid)
+        order.append(pid)
+        queue_.extend(children.get(pid, []))
+
+    return {pid for pid in order if _terminate_pid(pid)}
+
+
+def listening_pids_by_port(ports: "Iterable[int]") -> dict[int, set[int]]:
+    """Pids bound to each of `ports` (TCP and UDP), from a single netstat run."""
+    wanted = {int(p) for p in ports}
+    found: dict[int, set[int]] = {}
+    if not wanted:
+        return found
+    with _CONSOLE_TOOL_SLOTS:
+        res = subprocess.run(
+            ["netstat", "-ano"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, errors="replace", timeout=20,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+    for line in res.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 4 or parts[0].upper() not in ("TCP", "UDP"):
+            continue
+        port_str = parts[1].rpartition(":")[2]
+        try:
+            port, pid = int(port_str), int(parts[-1])
+        except ValueError:
+            continue
+        if port in wanted and pid:
+            found.setdefault(port, set()).add(pid)
+    return found
+
+
+def free_ports(ports: "Iterable[int]", current_pid: int | None = None) -> set[int]:
+    """Kill whatever still holds any of `ports` (and its proxy launcher). Ports that are
+    already free cost nothing; the busy ones are found with one netstat run in total."""
+    import os
+    if current_pid is None:
+        current_pid = os.getpid()
+    busy = [p for p in ports if not is_port_free(int(p))]
+    if not busy:
+        return set()
+    holders = set()
+    for pids in listening_pids_by_port(busy).values():
+        holders |= pids
+    holders.discard(current_pid)
+    if not holders:
+        return set()
+    table = _process_table()
+    return kill_process_trees(_expand_to_proxy_supervisors(holders, current_pid, table), current_pid, table)
+
+
 def kill_processes_on_port(port: int, current_pid: int | None = None) -> tuple[bool, str]:
     """Force kill processes holding the given port on Windows."""
     import os
     if current_pid is None:
         current_pid = os.getpid()
 
-    pids_to_kill = set()
-    for proto in ("tcp", "udp"):
-        try:
-            cmd = ["netstat", "-ano", "-p", proto]
-            res = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                errors="replace",
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-            )
-            for line in res.stdout.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split()
-                if len(parts) >= 4:
-                    local_addr = parts[1]
-                    if local_addr.endswith(f":{port}"):
-                        pid_str = parts[-1]
-                        try:
-                            pid = int(pid_str)
-                            if pid != 0 and pid != current_pid:
-                                pids_to_kill.add(pid)
-                        except ValueError:
-                            pass
-        except Exception as e:
-            return False, f"Port scan error: {e}"
+    try:
+        pids_to_kill = {pid for pid in listening_pids_by_port([port]).get(port, set()) if pid != current_pid}
+    except Exception as e:
+        return False, f"Port scan error: {e}"
 
     if not pids_to_kill:
         if is_port_free(port):
             return True, t("port_already_free", port=port)
         return False, t("port_busy_wait", port=port)
 
-    pids_to_kill = _expand_to_proxy_supervisors(pids_to_kill, current_pid)
-
-    killed_count = 0
-    errors = []
-    for pid in pids_to_kill:
-        try:
-            res = subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(pid)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                errors="replace",
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-            )
-            if res.returncode == 0:
-                killed_count += 1
-            else:
-                err = res.stderr.strip() or res.stdout.strip()
-                errors.append(f"PID {pid}: {err}")
-        except Exception as e:
-            errors.append(f"PID {pid}: {e}")
+    table = _process_table()
+    pids_to_kill = _expand_to_proxy_supervisors(pids_to_kill, current_pid, table)
+    killed = kill_process_trees(pids_to_kill, current_pid, table)
 
     time.sleep(0.4)
-    if is_port_free(port) or killed_count > 0:
-        return True, t("port_freed", port=port, count=killed_count)
-    return False, t("port_fail_free", port=port, error="; ".join(errors))
+    if is_port_free(port) or killed:
+        return True, t("port_freed", port=port, count=len(killed))
+    missed = ", ".join(str(p) for p in sorted(pids_to_kill - killed))
+    return False, t("port_fail_free", port=port, error=f"PID {missed}")
 
 
 def extract_server_name(url: str) -> str:
@@ -623,8 +765,9 @@ def _restart_wsl_unlocked() -> tuple[bool, str]:
 
 
 # ── Tray Icon ──────────────────────────────────────────────────
+@functools.lru_cache(maxsize=8)
 def make_tray_icon(color: str = "green") -> "Image.Image":
-    """Create system tray icon image."""
+    """Create system tray icon image (cached: it is asked for on every status change)."""
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -751,7 +894,10 @@ class ProxyInstance:
         self.running = False
         self.healthy = False
         self.is_transitioning = False
-        self.log_lines: deque[str] = deque(maxlen=500)
+        self.log_lines: deque[str] = deque(maxlen=LOG_WIDGET_MAX_LINES)
+        self._pending_log: list[str] = []
+        self._log_lock = threading.Lock()
+        self._log_flush_scheduled = False
         self.config_path = ROOT_DIR / f".instance_{global_id}.json"
 
         # Geo status
@@ -792,6 +938,11 @@ class ProxyInstance:
         self.name_label: Optional[tk.Label] = None
         self.order_label: Optional[tk.Label] = None
 
+        # Group selector (Proxies tab)
+        self.group_menu_btn: Optional[tk.Menubutton] = None
+        self.group_menu: Optional[tk.Menu] = None
+        self._group_menu_vars: dict[str, tk.BooleanVar] = {}
+
         # Reconnect state
         #: True once the proxy was started (or adopted) and until the user stops it
         self._should_run = False
@@ -800,6 +951,11 @@ class ProxyInstance:
         self._reconnect_timer_id: Optional[str] = None
         self._upstream_failures = 0
         self._last_tunnel_probe = 0.0
+        self._start_time = 0.0
+        self._was_healthy = False
+        self._last_recovery_restart = 0.0
+        self._recovery_restart_count = 0
+        self._consecutive_unhealthy = 0
 
         # Flags: System_Proxy & Work_Proxy & TelegramProxy
         self.system_proxy_var: Optional[tk.BooleanVar] = None
@@ -860,7 +1016,7 @@ class ProxyInstance:
         if self.system_proxy_var is not None:
             self.system_proxy_var.set(b)
         self.app.save_all()
-        self.app.refresh_overview()
+        self.app.update_overview_card(self)
 
     def set_work_proxy(self, val: bool) -> None:
         """Dynamically set Work_Proxy flag and persist."""
@@ -870,21 +1026,21 @@ class ProxyInstance:
         if self.work_proxy_var is not None:
             self.work_proxy_var.set(b)
         self.app.save_all()
-        self.app.refresh_overview()
+        self.app.update_overview_card(self)
 
     def _on_system_proxy_toggled(self) -> None:
         val = bool(self.system_proxy_var.get() if self.system_proxy_var else False)
         self.cfg["system_proxy"] = val
         self.cfg["System_Proxy"] = val
         self.app.save_all()
-        self.app.refresh_overview()
+        self.app.update_overview_card(self)
 
     def _on_work_proxy_toggled(self) -> None:
         val = bool(self.work_proxy_var.get() if self.work_proxy_var else False)
         self.cfg["work_proxy"] = val
         self.cfg["Work_Proxy"] = val
         self.app.save_all()
-        self.app.refresh_overview()
+        self.app.update_overview_card(self)
 
     def is_telegram_proxy(self) -> bool:
         """Check if instance is flagged as TelegramProxy."""
@@ -923,7 +1079,7 @@ class ProxyInstance:
             self.app._update_telegram_dispatcher_pool()
         if hasattr(self.app, "zapret_watcher") and self.app.zapret_watcher:
             self.app.zapret_watcher.trigger_immediate_check()
-        self.app.refresh_overview()
+        self.app.update_overview_card(self)
 
     def _on_telegram_proxy_toggled(self) -> None:
         val = bool(self.telegram_proxy_var.get() if self.telegram_proxy_var else False)
@@ -934,7 +1090,7 @@ class ProxyInstance:
             self.app._update_telegram_dispatcher_pool()
         if hasattr(self.app, "zapret_watcher") and self.app.zapret_watcher:
             self.app.zapret_watcher.trigger_immediate_check()
-        self.app.refresh_overview()
+        self.app.update_overview_card(self)
 
 
 
@@ -972,7 +1128,7 @@ class ProxyInstance:
     def set_name(self, new_name: str) -> None:
         self.cfg["name"] = new_name.strip()
         self.app.save_all()
-        self.app.refresh_overview()
+        self.app.update_overview_card(self)
         self.app.refresh_current_page_tabs()
         if self.name_label and self.name_label.winfo_exists():
             self.name_label.config(text=self.get_display_name())
@@ -982,6 +1138,68 @@ class ProxyInstance:
 
     def prompt_reorder(self) -> None:
         self.app.prompt_reorder_proxy(self)
+
+    def get_group_ids(self, known_ids: Optional[set[str]] = None) -> list[str]:
+        """Ids of the groups this proxy is in (empty list = Unsorted)."""
+        if known_ids is None:
+            known_ids = {g["id"] for g in proxy_groups.load_groups()}
+        return proxy_groups.group_ids_of(self.cfg, known_ids)
+
+    def set_group_membership(self, group_id: str, member: bool) -> None:
+        """Add this proxy to a group or take it out. Only the reference changes:
+        the proxy, its port and its other groups stay as they are."""
+        if member:
+            changed = proxy_groups.add_group_ref(self.cfg, group_id)
+        else:
+            changed = proxy_groups.remove_group_ref(self.cfg, group_id)
+        if changed:
+            self.app.save_all()
+            self.app.refresh_overview()
+        self._sync_group_selector()
+
+    def clear_groups(self) -> None:
+        """Take the proxy out of every group (it becomes Unsorted)."""
+        if proxy_groups.group_ids_of(self.cfg):
+            proxy_groups.set_group_ids(self.cfg, [])
+            self.app.save_all()
+            self.app.refresh_overview()
+        self._sync_group_selector()
+
+    def _sync_group_selector(self) -> None:
+        """Refresh the Proxies-tab group menu: its title and one checkbox per group."""
+        btn = getattr(self, "group_menu_btn", None)
+        if btn is None:
+            return
+        try:
+            if not btn.winfo_exists():
+                return
+        except Exception:
+            return
+        groups = proxy_groups.load_groups()
+        member_of = set(self.get_group_ids({g["id"] for g in groups}))
+        names = [g["name"] for g in groups if g["id"] in member_of]
+        btn.config(text=(f"📁 {', '.join(names)}" if names else f"📂 {t('group_unsorted')}") + "  ▾")
+
+        menu = self.group_menu
+        menu.delete(0, tk.END)
+        self._group_menu_vars = {}
+        for g in groups:
+            var = tk.BooleanVar(value=g["id"] in member_of)
+            self._group_menu_vars[g["id"]] = var
+            menu.add_checkbutton(
+                label=g["name"], variable=var,
+                command=lambda gid=g["id"], v=var: self.set_group_membership(gid, bool(v.get())),
+            )
+        if groups:
+            menu.add_separator()
+        menu.add_command(label=f"📂 {t('group_menu_clear')}", command=self.clear_groups)
+        menu.add_command(label=t("group_menu_new"), command=self._create_group_from_tab)
+
+    def _create_group_from_tab(self) -> None:
+        group = self.app.prompt_new_group(self.app, suggested=self.app.suggest_group_name())
+        if group is not None:
+            self.app.on_groups_changed()
+            self.set_group_membership(group["id"], True)
 
     def _cancel_reconnect(self):
         if self._reconnect_timer_id:
@@ -1239,7 +1457,29 @@ class ProxyInstance:
         )
         self.btn_copy_tg.pack(side=tk.LEFT, padx=(4, 0))
 
+        # 3.7. Group membership
+        group_frame = tk.Frame(self.frame, bg=bg)
+        group_frame.pack(fill=tk.X, padx=px, pady=(2, 4))
 
+        tk.Label(
+            group_frame, text=t("lbl_group"), font=("Segoe UI", 9, "bold"),
+            fg=C["subtext"], bg=bg
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        # A proxy can be in several groups: a menu of checkboxes, not a single choice
+        self.group_menu_btn = tk.Menubutton(
+            group_frame, text="", font=("Segoe UI", 9, "bold"), relief=tk.FLAT,
+            bg=C["overlay"], fg=C["text"], activebackground=C["hover"], activeforeground=C["blue"],
+            padx=10, pady=3, cursor="hand2", anchor="w",
+        )
+        self.group_menu = tk.Menu(
+            self.group_menu_btn, tearoff=0, bg=C["surface"], fg=C["text"],
+            activebackground=C["hover"], activeforeground=C["blue"], font=("Segoe UI", 9),
+            selectcolor=C["blue"],
+        )
+        self.group_menu_btn.config(menu=self.group_menu)
+        self.group_menu_btn.pack(side=tk.LEFT)
+        self._sync_group_selector()
 
         # 4. Upstream Protocol & Server Configuration
         proto_frame = tk.Frame(self.frame, bg=bg)
@@ -1468,7 +1708,7 @@ class ProxyInstance:
                 fg=C["green"] if val else C["muted"],
             )
         self.app.save_all()
-        self.app.refresh_overview()
+        self.app.update_overview_card(self)
         status_msg = f"Killswitch {'АКТИВИРОВАН (весь трафик привязан к прокси, утечки блокируются)' if val else 'ВЫКЛЮЧЕН'}."
         self._log(status_msg)
         if val and self.running:
@@ -1488,20 +1728,23 @@ class ProxyInstance:
             port = 1081
 
         def worker():
-            from vless2socks.ipcheck import check_ip_leak
-            self._log("🛡️ [KILLSWITCH] Проверка защиты от утечек...")
-            is_leak, direct_ip, tunnel_ip, msg = check_ip_leak(host, port)
+            from vless2socks.ipcheck import check_ip_leak, is_system_tun_active
+            # A handful at a time: with dozens of killswitch proxies starting together, every
+            # check at once meant a burst of connections and route lookups
+            with _LEAK_CHECK_SLOTS:
+                self._log("🛡️ [KILLSWITCH] Проверка защиты от утечек...")
+                is_leak, direct_ip, tunnel_ip, msg = check_ip_leak(host, port)
+                # Looked up here, in the worker: on_done runs on the GUI thread
+                system_tun = is_system_tun_active() if is_leak else False
 
             def on_done():
-                from vless2socks.ipcheck import is_system_tun_active
                 if is_leak:
-                    if is_system_tun_active():
+                    if system_tun:
                         self._log(f"ℹ️ [KILLSWITCH] Обнаружен системный туннель (Throne). Выходной IP ({tunnel_ip}) совпадает с системным. Прокси продолжает безопасную работу.")
                         return
                     self._log(f"⚠️ [KILLSWITCH ALERT] УТЕЧКА ОБНАРУЖЕНА! Реальный IP ({direct_ip}) == IP прокси ({tunnel_ip})")
                     self._log("🛡️ [KILLSWITCH] Немедленная остановка прокси для предотвращения утечки!")
-                    self.stop()
-                    self._set_state("error")
+                    self.stop_async(callback=lambda *_: self._set_state("error"))
                 elif tunnel_ip and direct_ip and tunnel_ip != direct_ip:
                     self._log(f"✓ [KILLSWITCH SAFE] Реальный IP: {direct_ip} != Выходной IP: {tunnel_ip}. Утечек нет.")
                     if manual:
@@ -1528,9 +1771,7 @@ class ProxyInstance:
             worker()
             return None
 
-        worker_thread = threading.Thread(target=worker, daemon=True)
-        worker_thread.start()
-        return worker_thread
+        return submit_background(worker)
 
     def _format_wireguard_summary(self) -> str:
         url = self.cfg.get("url", "").strip()
@@ -2253,7 +2494,7 @@ class ProxyInstance:
                     self.app.after(0,lambda: self.geo_card_label.config(text=self._format_geo_text()))
                 except Exception:
                     pass
-            self.app.after(0, self.app.refresh_overview)
+            self.app.update_overview_card(self)
 
         def _probe():
             # The port probe can take up to its full timeout, so it must not run on the GUI thread
@@ -2262,7 +2503,7 @@ class ProxyInstance:
                 return
             geo_ip.fetch_geo_async(host, port, _on_result, fallback_url=url)
 
-        threading.Thread(target=_probe, daemon=True).start()
+        submit_background(_probe)
 
     def _dispatch_ui(self, fn):
         """Safely schedule a function on the main thread, or invoke directly if not in Tk mainloop or test environment."""
@@ -2354,8 +2595,7 @@ class ProxyInstance:
                 http_p_int = self.get_http_port()
                 if not is_port_free(p_int, host) or not is_port_free(http_p_int, host):
                     self._log(f"Force takeover: reclaiming busy ports {p_int} & {http_p_int}...")
-                    kill_processes_on_port(p_int)
-                    kill_processes_on_port(http_p_int)
+                    free_ports([p_int, http_p_int])
                     time.sleep(0.3)
             except Exception as e:
                 self._log(f"Takeover error: {e}")
@@ -2393,11 +2633,18 @@ class ProxyInstance:
             return
 
         self.running = True
+        self.healthy = False
         self.is_transitioning = False
+        now = time.time()
+        self._start_time = now
+        self._last_tunnel_probe = now + 15.0
+        self._upstream_failures = 0
+        self._consecutive_unhealthy = 0
+        self._was_healthy = False
         self._log(f"Started (PID {self.process.pid})")
-        self.app.save_all()
+        self.app.request_save()
         self.app.update_tray_icon()
-        self.app.refresh_overview()
+        self.app.update_overview_card(self)
 
         threading.Thread(target=self._reader, daemon=True).start()
         threading.Thread(target=self._watcher, daemon=True).start()
@@ -2460,8 +2707,7 @@ class ProxyInstance:
                         http_p_int = self.get_http_port()
                         if not is_port_free(p_int, host) or not is_port_free(http_p_int, host):
                             self._safe_log(f"Force takeover: reclaiming busy ports {p_int} & {http_p_int}...")
-                            kill_processes_on_port(p_int)
-                            kill_processes_on_port(http_p_int)
+                            free_ports([p_int, http_p_int])
                             time.sleep(0.3)
                     except Exception as e:
                         self._safe_log(f"Takeover error: {e}")
@@ -2484,24 +2730,33 @@ class ProxyInstance:
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
                 )
                 self._dispatch_ui(lambda: self._on_start_success(proc, callback))
+                # queued after the success above, so the GUI sees "started" before any exit
+                threading.Thread(target=self._reader, args=(proc,), daemon=True).start()
+                threading.Thread(target=self._watcher, args=(proc,), daemon=True).start()
             except Exception as e:
                 self._dispatch_ui(lambda: self._on_start_failed(e, callback))
 
-        threading.Thread(target=_bg_worker, daemon=True).start()
+        submit_lifecycle(_bg_worker)
 
     def _on_start_success(self, proc, callback=None):
         self.process = proc
         self.running = True
         self.healthy = False
         self.is_transitioning = False
+        now = time.time()
+        self._start_time = now
+        self._last_tunnel_probe = now + 15.0
+        self._upstream_failures = 0
+        self._consecutive_unhealthy = 0
+        self._was_healthy = False
         self._log(f"Started (PID {proc.pid})")
-        self.app.save_all()
+        self.app.request_save()
         self.app.update_tray_icon()
-        self.app.refresh_overview()
+        self.app.update_overview_card(self)
         self.app._update_header_stats()
-
-        threading.Thread(target=self._reader, daemon=True).start()
-        threading.Thread(target=self._watcher, daemon=True).start()
+        # The output reader and the process watcher were started by the start worker
+        # (_bg_worker): Thread.start() waits for the new thread to run, and doing that twice
+        # per proxy on the GUI thread added up during a start wave.
 
         self.app.after(3000, self.check_geo_now)
         if self.cfg.get("killswitch", False):
@@ -2518,7 +2773,7 @@ class ProxyInstance:
         self.is_transitioning = False
         self._log(f"Launch error: {err}")
         self._set_state("error")
-        self.app.refresh_overview()
+        self.app.update_overview_card(self)
         if callback:
             try:
                 callback(False)
@@ -2571,12 +2826,7 @@ class ProxyInstance:
         if proc is not None:
             try:
                 if sys.platform == "win32":
-                    subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-                    )
+                    kill_process_trees([proc.pid])  # launcher + its xray, without a taskkill process
                 proc.terminate()
                 try:
                     proc.wait(timeout=2)
@@ -2587,8 +2837,7 @@ class ProxyInstance:
                 self._log(f"Stop error: {e}")
 
         try:
-            kill_processes_on_port(port)
-            kill_processes_on_port(http_port)
+            free_ports([port, http_port])
         except Exception as e:
             self._log(f"Port cleanup error: {e}")
 
@@ -2613,10 +2862,14 @@ class ProxyInstance:
         self.running = False
         self.healthy = False
         self.is_transitioning = False
+        self._start_time = 0.0
+        self._consecutive_unhealthy = 0
+        self._upstream_failures = 0
+        self._recovery_restart_count = 0
         self._set_state("stopped")
         self._log("Stopped")
         self.app.update_tray_icon()
-        self.app.refresh_overview()
+        self.app.update_overview_card(self)
         self.app._update_header_stats()
 
     def stop_async(self, callback: callable = None):
@@ -2638,7 +2891,7 @@ class ProxyInstance:
         self.is_transitioning = True
         self._set_state("stopping")
         self._log("Stopping...")
-        self.app.refresh_overview()
+        self.app.update_overview_card(self)
 
         proc = self.process
         self.process = None
@@ -2654,12 +2907,7 @@ class ProxyInstance:
             if proc is not None:
                 try:
                     if sys.platform == "win32":
-                        subprocess.run(
-                            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-                        )
+                        kill_process_trees([proc.pid])  # launcher + its xray, without a taskkill process
                     proc.terminate()
                     try:
                         proc.wait(timeout=2)
@@ -2670,8 +2918,7 @@ class ProxyInstance:
                     self._safe_log(f"Stop error: {e}")
 
             try:
-                kill_processes_on_port(port)
-                kill_processes_on_port(http_port)
+                free_ports([port, http_port])
             except Exception as e:
                 self._safe_log(f"Port cleanup error: {e}")
 
@@ -2686,12 +2933,16 @@ class ProxyInstance:
             geo_ip.invalidate_cache(h, port)
             self._dispatch_ui(lambda: self._on_stop_success(h, port, callback))
 
-        threading.Thread(target=_bg_worker, daemon=True).start()
+        submit_lifecycle(_bg_worker)
 
     def _on_stop_success(self, host, port, callback=None):
         self.running = False
         self.healthy = False
         self.is_transitioning = False
+        self._start_time = 0.0
+        self._consecutive_unhealthy = 0
+        self._upstream_failures = 0
+        self._recovery_restart_count = 0
         self.geo_info["verified"] = False
         self.geo_info["ip"] = ""
         if self.frame and self.geo_card_label:
@@ -2702,7 +2953,7 @@ class ProxyInstance:
         self._set_state("stopped")
         self._log("Stopped")
         self.app.update_tray_icon()
-        self.app.refresh_overview()
+        self.app.update_overview_card(self)
         self.app._update_header_stats()
         if callback:
             try:
@@ -2813,12 +3064,16 @@ class ProxyInstance:
             except Exception:
                 pass
 
-    def _reader(self):
-        proc = self.process
+    def _reader(self, proc=None):
+        proc = proc or self.process
         if not proc or not proc.stderr:
             return
         try:
-            for raw in iter(proc.stderr.readline, b""):
+            while True:
+                raw = proc.stderr.readline()
+                # Anything but a non-empty bytes line means the pipe is closed
+                if not isinstance(raw, bytes) or not raw:
+                    break
                 line = raw.decode("utf-8", errors="replace").rstrip()
                 if line:
                     self._log(line)
@@ -2830,8 +3085,8 @@ class ProxyInstance:
         except Exception:
             pass
 
-    def _watcher(self):
-        proc = self.process
+    def _watcher(self, proc=None):
+        proc = proc or self.process
         if not proc:
             return
         proc.wait()
@@ -2845,8 +3100,7 @@ class ProxyInstance:
         h, port_str = self.get_listen()
         try:
             p = int(port_str)
-            kill_processes_on_port(p)
-            kill_processes_on_port(self.get_http_port())
+            free_ports([p, self.get_http_port()])
             geo_ip.invalidate_cache(h, p)
         except Exception:
             pass
@@ -2854,7 +3108,7 @@ class ProxyInstance:
             if self.frame:
                 self.app.after(0,lambda: self._set_state("error"))
             self.app.after(0, self.app.update_tray_icon)
-            self.app.after(0, self.app.refresh_overview)
+            self.app.update_overview_card(self)
 
             if self.is_auto_reconnect_enabled():
                 self.app.after(0, self._schedule_reconnect)
@@ -2876,13 +3130,18 @@ class ProxyInstance:
         # 2. If running, periodically verify actual outbound tunnel connectivity
         if self.running and not self.is_transitioning:
             now = time.time()
-            if now - getattr(self, "_last_tunnel_probe", 0.0) >= 12.0:
+            start_time = getattr(self, "_start_time", 0.0)
+            # Never run active tunnel probe during startup grace period
+            if (now - start_time) < STARTUP_GRACE_PERIOD_S:
+                return True
+
+            if now - getattr(self, "_last_tunnel_probe", 0.0) >= 20.0:
                 self._last_tunnel_probe = now
                 try:
-                    ok, _ = probe_socks5_tunnel(h, p, timeout=1.0)
+                    ok, _ = probe_socks5_tunnel(h, p, timeout=2.5)
                     if not ok:
                         self._upstream_failures = getattr(self, "_upstream_failures", 0) + 1
-                        if self._upstream_failures >= 2:
+                        if self._upstream_failures >= SELF_RECOVERY_FAIL_THRESHOLD:
                             return False
                     else:
                         self._upstream_failures = 0
@@ -2897,25 +3156,70 @@ class ProxyInstance:
             return False
 
         changed = False
+        now = time.time()
+
         if self.running:
             if alive:
                 self._upstream_failures = 0
+                self._consecutive_unhealthy = 0
+                self._recovery_restart_count = 0
+                self._was_healthy = True
                 if not self.healthy:
                     self.healthy = True
                     self._reconnect_attempt = 0
                     self._set_state("running")
-                    self.app.refresh_overview()
+                    self.app.update_overview_card(self)
                     changed = True
             elif not alive:
                 has_live_process = bool(self.process and self.process.poll() is None)
                 if has_live_process:
+                    start_time = getattr(self, "_start_time", 0.0)
+                    is_warming_up = (now - start_time) < STARTUP_GRACE_PERIOD_S
+                    if is_warming_up:
+                        # Process is still warming up. Keep 'starting' state, never restart during warmup.
+                        if self.healthy:
+                            self.healthy = False
+                            self._set_state("starting")
+                            self.app.update_overview_card(self)
+                            changed = True
+                        return changed
+
+                    # Process has passed warmup window and is unhealthy
+                    self._consecutive_unhealthy = getattr(self, "_consecutive_unhealthy", 0) + 1
                     if self.healthy:
                         self.healthy = False
                         self._set_state("error")
-                        self.app.refresh_overview()
+                        self.app.update_overview_card(self)
                         changed = True
-                    if not self._manual_stop and self.is_auto_reconnect_enabled():
-                        self._log("🔄 [SelfRecovery] Dead upstream tunnel detected with live process. Restarting instance...")
+
+                    # Only consider self-recovery after confirmed consecutive failures
+                    if (
+                        not self._manual_stop
+                        and self.is_auto_reconnect_enabled()
+                        and self._consecutive_unhealthy >= SELF_RECOVERY_FAIL_THRESHOLD
+                    ):
+                        last_rec = getattr(self, "_last_recovery_restart", 0.0)
+                        rec_count = getattr(self, "_recovery_restart_count", 0)
+                        time_since_rec = now - last_rec
+
+                        if time_since_rec < SELF_RECOVERY_COOLDOWN_S:
+                            # In cooldown: do not restart in a rapid loop
+                            return changed
+
+                        if rec_count >= MAX_CONSECUTIVE_RECOVERIES:
+                            # Max recovery attempts reached; back off to prevent endless thrashing
+                            self._log(
+                                f"⚠️ [SelfRecovery] Max restart attempts ({MAX_CONSECUTIVE_RECOVERIES}) reached for live process. Pausing auto-recovery."
+                            )
+                            self._last_recovery_restart = now + 60.0  # extended backoff
+                            return changed
+
+                        self._last_recovery_restart = now
+                        self._recovery_restart_count = rec_count + 1
+                        self._consecutive_unhealthy = 0
+                        self._log(
+                            f"🔄 [SelfRecovery] Dead upstream tunnel detected with live process (recovery attempt #{self._recovery_restart_count}). Restarting instance..."
+                        )
                         self.restart(blocking=False)
                 elif self._reconnect_timer_id is None:
                     # Nothing of ours is behind this instance any more - e.g. a process adopted from a
@@ -2927,7 +3231,7 @@ class ProxyInstance:
                     self._set_state("error")
                     if not self._manual_stop and self.is_auto_reconnect_enabled():
                         self._schedule_reconnect()
-                    self.app.refresh_overview()
+                    self.app.update_overview_card(self)
                     changed = True
         else:
             if alive:
@@ -2937,7 +3241,7 @@ class ProxyInstance:
                     try:
                         p = int(port_str)
                         threading.Thread(
-                            target=lambda: (kill_processes_on_port(p), kill_processes_on_port(self.get_http_port()), geo_ip.invalidate_cache(h, p)),
+                            target=lambda: (free_ports([p, self.get_http_port()]), geo_ip.invalidate_cache(h, p)),
                             daemon=True
                         ).start()
                     except Exception:
@@ -2949,14 +3253,16 @@ class ProxyInstance:
                     self.running = True
                     self.healthy = True
                     self._should_run = True
+                    self._was_healthy = True
+                    self._start_time = now - STARTUP_GRACE_PERIOD_S
                     self._set_state("running")
-                    self.app.refresh_overview()
+                    self.app.update_overview_card(self)
                     changed = True
             else:
                 if self.healthy:
                     self.healthy = False
                     self._set_state("stopped")
-                    self.app.refresh_overview()
+                    self.app.update_overview_card(self)
                     changed = True
                 # Safety net: the proxy is supposed to be up, nothing is running and no retry is
                 # pending (a failed launch, a watcher thread that never got to schedule one, ...)
@@ -2975,7 +3281,7 @@ class ProxyInstance:
         alive = self.check_health_sync()
         if self.apply_health_status(alive):
             self.app.update_tray_icon()
-            self.app.refresh_overview()
+            self.app.update_overview_card(self)
             self.app._update_header_stats()
 
     def _set_state(self, state: str):
@@ -3016,18 +3322,34 @@ class ProxyInstance:
         line = f"[{ts}] {msg}"
         self.log_lines.append(line)
         if self.frame and self.log_text:
-            try:
-                self.app.after(0,lambda l=line: self._append_log(l))
-            except Exception:
-                pass
+            with self._log_lock:
+                self._pending_log.append(line)
+                schedule = not self._log_flush_scheduled
+                self._log_flush_scheduled = True
+            if schedule:
+                try:
+                    self.app.after(LOG_FLUSH_MS, self._flush_log)
+                except Exception:
+                    with self._log_lock:
+                        self._log_flush_scheduled = False
 
-    def _append_log(self, line: str):
-        if not self.log_text:
+    def _flush_log(self):
+        """Write the lines collected since the last flush in one go and drop everything but the tail."""
+        with self._log_lock:
+            lines = self._pending_log[-LOG_WIDGET_MAX_LINES:]
+            self._pending_log = []
+            self._log_flush_scheduled = False
+        if not self.log_text or not lines:
             return
         try:
+            follow = self.log_text.yview()[1] >= 0.999  # do not yank the view while the user reads older lines
             self.log_text.config(state=tk.NORMAL)
-            self.log_text.insert(tk.END, line + "\n")
-            self.log_text.see(tk.END)
+            self.log_text.insert(tk.END, "\n".join(lines) + "\n")
+            extra = int(self.log_text.index("end-1c").split(".")[0]) - 1 - LOG_WIDGET_MAX_LINES
+            if extra > 0:
+                self.log_text.delete("1.0", f"{extra + 1}.0")
+            if follow:
+                self.log_text.see(tk.END)
             self.log_text.config(state=tk.DISABLED)
         except Exception:
             pass
@@ -3090,6 +3412,588 @@ class ProxyInstance:
         if "sendThrough" in self.cfg:
             cfg["sendThrough"] = self.cfg["sendThrough"]
         return cfg
+
+
+def _center_over(win: tk.Toplevel, parent: tk.Misc) -> None:
+    """Place a dialog at the center of its parent window, using the dialog's natural size."""
+    try:
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        x = parent.winfo_rootx() + (parent.winfo_width() - w) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - h) // 3
+        win.geometry(f"+{max(0, x)}+{max(0, y)}")
+    except Exception:
+        pass
+
+
+# ── Proxy Groups Manager Dialog ───────────────────────────────
+class GroupsManagerDialog(tk.Toplevel):
+    """Modal list of proxy groups (10 per page): create, rename with ✏️, delete with ✕.
+
+    The window has no fixed size: it takes exactly the room its rows need, and the
+    page switcher is shown only when there are at least two pages.
+    """
+
+    def __init__(self, app: "VlessApp"):
+        super().__init__(app)
+        self.app = app
+        self.page = 0
+        bg = C["bg"]
+        self.title(t("dlg_groups_title"))
+        self.configure(bg=bg)
+        self.resizable(False, False)
+        self.transient(app)
+
+        header = tk.Frame(self, bg=bg)
+        header.pack(fill=tk.X, padx=16, pady=(14, 8))
+        tk.Label(
+            header, text=f"📁 {t('dlg_groups_title')}", font=("Segoe UI", 12, "bold"), fg=C["text"], bg=bg,
+        ).pack(side=tk.LEFT)
+        tk.Button(
+            header, text=t("btn_new_group"), font=("Segoe UI", 9, "bold"),
+            bg=C["green"], fg="#1e1e2e", activebackground=C["teal"],
+            relief=tk.FLAT, padx=10, pady=3, cursor="hand2", command=self._create,
+        ).pack(side=tk.RIGHT, padx=(24, 0))
+
+        self.rows_frame = tk.Frame(self, bg=bg)
+        self.rows_frame.pack(fill=tk.X, padx=16)
+
+        self.pager = tk.Frame(self, bg=bg)
+        self.prev_btn = tk.Button(
+            self.pager, text="◀", font=("Segoe UI", 9, "bold"), bg=C["overlay"], fg=C["text"],
+            activebackground=C["hover"], relief=tk.FLAT, padx=10, pady=1, cursor="hand2",
+            command=lambda: self._go(-1),
+        )
+        self.prev_btn.pack(side=tk.LEFT)
+        self.page_lbl = tk.Label(self.pager, text="", font=("Segoe UI", 9, "bold"), fg=C["text"], bg=bg)
+        self.page_lbl.pack(side=tk.LEFT, padx=10)
+        self.next_btn = tk.Button(
+            self.pager, text="▶", font=("Segoe UI", 9, "bold"), bg=C["overlay"], fg=C["text"],
+            activebackground=C["hover"], relief=tk.FLAT, padx=10, pady=1, cursor="hand2",
+            command=lambda: self._go(1),
+        )
+        self.next_btn.pack(side=tk.LEFT)
+
+        self.footer = tk.Frame(self, bg=bg)
+        self.footer.pack(fill=tk.X, padx=16, pady=(10, 14))
+        tk.Button(
+            self.footer, text=t("btn_close_dialog"), font=("Segoe UI", 9),
+            bg=C["overlay"], fg=C["text"], activebackground=C["hover"],
+            relief=tk.FLAT, padx=12, pady=3, cursor="hand2", command=self.destroy,
+        ).pack(side=tk.RIGHT)
+
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.render()
+        _center_over(self, app)
+        self._regrab()
+
+    def _regrab(self):
+        """Nested dialogs take the grab away; take it back so this window stays modal."""
+        try:
+            if self.winfo_exists():
+                self.grab_set()
+                self.focus_force()
+        except Exception:
+            pass
+
+    def render(self):
+        bg = C["bg"]
+        for w in self.rows_frame.winfo_children():
+            w.destroy()
+
+        groups = proxy_groups.load_groups()
+        counts = proxy_groups.member_counts(inst.cfg for inst in self.app.instances)
+
+        rows, self.page = proxy_groups.page_slice(groups, self.page)
+        if not groups:
+            tk.Label(
+                self.rows_frame, text=t("groups_empty"), font=("Segoe UI", 9, "italic"),
+                fg=C["muted"], bg=bg, pady=10,
+            ).pack(anchor="w")
+
+        for g in rows:
+            row = tk.Frame(self.rows_frame, bg=C["card"])
+            row.pack(fill=tk.X, pady=2)
+            tk.Label(
+                row, text=f"📁 {g['name']}", font=("Segoe UI", 10, "bold"), fg=C["text"], bg=C["card"],
+                width=28, anchor="w",
+            ).pack(side=tk.LEFT, padx=(10, 6), pady=6)
+            tk.Label(
+                row, text=t("group_proxy_count", count=counts.get(g["id"], 0)), font=("Segoe UI", 9),
+                fg=C["subtext"], bg=C["card"], width=11, anchor="w",
+            ).pack(side=tk.LEFT, padx=(0, 6))
+            tk.Button(
+                row, text="✕", font=("Segoe UI", 10, "bold"), bg=C["card"], fg=C["red"],
+                activebackground=C["hover"], activeforeground=C["red"], relief=tk.FLAT, bd=0,
+                padx=8, cursor="hand2", command=lambda grp=g: self._delete(grp),
+            ).pack(side=tk.RIGHT, padx=(0, 6))
+            tk.Button(
+                row, text="✏️", font=("Segoe UI", 9), bg=C["card"], fg=C["subtext"],
+                activebackground=C["hover"], activeforeground=C["text"], relief=tk.FLAT, bd=0,
+                padx=6, cursor="hand2", command=lambda grp=g: self._rename(grp),
+            ).pack(side=tk.RIGHT)
+
+        pages = proxy_groups.page_count(len(groups))
+        if pages >= 2:
+            self.page_lbl.config(text=t("groups_page_info", page=self.page + 1, pages=pages))
+            self.prev_btn.config(state=tk.NORMAL if self.page > 0 else tk.DISABLED)
+            self.next_btn.config(state=tk.NORMAL if self.page < pages - 1 else tk.DISABLED)
+            if not self.pager.winfo_manager():
+                self.pager.pack(padx=16, pady=(8, 0), before=self.footer)
+        else:
+            self.pager.pack_forget()
+
+        # Drop any previous size so the window shrinks or grows to its content
+        self.geometry("")
+
+    def _go(self, delta: int):
+        self.page += delta
+        self.render()
+
+    def _create(self):
+        group = self.app.prompt_new_group(self)
+        if group is not None:
+            self.page = proxy_groups.page_count(len(proxy_groups.load_groups())) - 1
+            self.app.on_groups_changed()
+            self.render()
+        self._regrab()
+
+    def _rename(self, group: dict):
+        if self.app.prompt_rename_group(group, self):
+            self.app.on_groups_changed()
+            self.render()
+        self._regrab()
+
+    def _delete(self, group: dict):
+        if self.app.delete_group_flow(group, self):
+            self.render()
+        self._regrab()
+
+
+# ── Group Tab Picker Dialog ───────────────────────────────────
+class GroupTabPickerDialog(tk.Toplevel):
+    """Modal checklist of groups (10 per page); every checked group opens as an Overview tab.
+
+    Groups that already have a tab are shown checked and disabled. Like the groups
+    manager, the window takes only the room its rows need and shows the page switcher
+    only from two pages on.
+    """
+
+    def __init__(self, app: "VlessApp"):
+        super().__init__(app)
+        self.app = app
+        self.page = 0
+        self.chosen: list[str] = []
+        self._vars: dict[str, tk.BooleanVar] = {}
+        bg = C["bg"]
+        self.title(t("dlg_pick_groups_title"))
+        self.configure(bg=bg)
+        self.resizable(False, False)
+        self.transient(app)
+
+        header = tk.Frame(self, bg=bg)
+        header.pack(fill=tk.X, padx=16, pady=(14, 2))
+        tk.Label(
+            header, text=f"📁 {t('dlg_pick_groups_title')}", font=("Segoe UI", 12, "bold"), fg=C["text"], bg=bg,
+        ).pack(side=tk.LEFT)
+        tk.Button(
+            header, text=t("btn_new_group"), font=("Segoe UI", 9, "bold"),
+            bg=C["green"], fg="#1e1e2e", activebackground=C["teal"],
+            relief=tk.FLAT, padx=10, pady=3, cursor="hand2", command=self._create,
+        ).pack(side=tk.RIGHT, padx=(24, 0))
+        tk.Label(self, text=t("pick_groups_hint"), font=("Segoe UI", 8), fg=C["subtext"], bg=bg).pack(anchor="w", padx=16, pady=(0, 8))
+
+        self.rows_frame = tk.Frame(self, bg=bg)
+        self.rows_frame.pack(fill=tk.X, padx=16)
+
+        self.pager = tk.Frame(self, bg=bg)
+        nav = dict(font=("Segoe UI", 9, "bold"), bg=C["overlay"], fg=C["text"], activebackground=C["hover"],
+                   relief=tk.FLAT, padx=10, pady=1, cursor="hand2")
+        self.prev_btn = tk.Button(self.pager, text="◀", command=lambda: self._go(-1), **nav)
+        self.prev_btn.pack(side=tk.LEFT)
+        self.page_lbl = tk.Label(self.pager, text="", font=("Segoe UI", 9, "bold"), fg=C["text"], bg=bg)
+        self.page_lbl.pack(side=tk.LEFT, padx=10)
+        self.next_btn = tk.Button(self.pager, text="▶", command=lambda: self._go(1), **nav)
+        self.next_btn.pack(side=tk.LEFT)
+
+        self.footer = tk.Frame(self, bg=bg)
+        self.footer.pack(fill=tk.X, padx=16, pady=(10, 14))
+        self.open_btn = tk.Button(
+            self.footer, text=t("btn_open_group_tabs"), font=("Segoe UI", 9, "bold"),
+            bg=C["blue"], fg="#1e1e2e", activebackground=C["teal"], disabledforeground=C["muted"],
+            relief=tk.FLAT, padx=12, pady=3, cursor="hand2", command=self._confirm,
+        )
+        self.open_btn.pack(side=tk.RIGHT)
+        tk.Button(
+            self.footer, text=t("btn_cancel"), font=("Segoe UI", 9),
+            bg=C["overlay"], fg=C["text"], activebackground=C["hover"],
+            relief=tk.FLAT, padx=12, pady=3, cursor="hand2", command=self.destroy,
+        ).pack(side=tk.RIGHT, padx=(0, 6))
+
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.render()
+        _center_over(self, app)
+        self._regrab()
+
+    def _regrab(self):
+        try:
+            if self.winfo_exists():
+                self.grab_set()
+                self.focus_force()
+        except Exception:
+            pass
+
+    def render(self):
+        bg = C["bg"]
+        for w in self.rows_frame.winfo_children():
+            w.destroy()
+        groups = proxy_groups.load_groups()
+        open_tabs = set(proxy_groups.get_group_tabs())
+        counts = proxy_groups.member_counts(inst.cfg for inst in self.app.instances)
+
+        rows, self.page = proxy_groups.page_slice(groups, self.page)
+        if not groups:
+            tk.Label(
+                self.rows_frame, text=t("groups_empty"), font=("Segoe UI", 9, "italic"),
+                fg=C["muted"], bg=bg, pady=10,
+            ).pack(anchor="w")
+
+        for g in rows:
+            is_open = g["id"] in open_tabs
+            var = self._vars.setdefault(g["id"], tk.BooleanVar(value=False))
+            if is_open:
+                var.set(True)
+            row = tk.Frame(self.rows_frame, bg=C["card"])
+            row.pack(fill=tk.X, pady=2)
+            label = f"📁 {g['name']}" + (f"   {t('group_tab_already_open')}" if is_open else "")
+            tk.Checkbutton(
+                row, text=f" {label}", variable=var, font=("Segoe UI", 10, "bold"),
+                fg=C["muted"] if is_open else C["text"], bg=C["card"], selectcolor=C["surface"],
+                activebackground=C["card"], activeforeground=C["blue"], disabledforeground=C["muted"],
+                anchor="w", width=30, state=tk.DISABLED if is_open else tk.NORMAL,
+                command=lambda gid=g["id"]: self._toggle(gid),
+            ).pack(side=tk.LEFT, padx=(8, 6), pady=4)
+            tk.Label(
+                row, text=t("group_proxy_count", count=counts.get(g["id"], 0)), font=("Segoe UI", 9),
+                fg=C["subtext"], bg=C["card"], width=11, anchor="w",
+            ).pack(side=tk.LEFT, padx=(0, 10))
+
+        pages = proxy_groups.page_count(len(groups))
+        if pages >= 2:
+            self.page_lbl.config(text=t("groups_page_info", page=self.page + 1, pages=pages))
+            self.prev_btn.config(state=tk.NORMAL if self.page > 0 else tk.DISABLED)
+            self.next_btn.config(state=tk.NORMAL if self.page < pages - 1 else tk.DISABLED)
+            if not self.pager.winfo_manager():
+                self.pager.pack(padx=16, pady=(8, 0), before=self.footer)
+        else:
+            self.pager.pack_forget()
+        self._sync_open_btn()
+        self.geometry("")
+
+    def _toggle(self, gid: str):
+        if self._vars[gid].get():
+            if gid not in self.chosen:
+                self.chosen.append(gid)
+        elif gid in self.chosen:
+            self.chosen.remove(gid)
+        self._sync_open_btn()
+
+    def _sync_open_btn(self):
+        self.open_btn.config(state=tk.NORMAL if self.chosen else tk.DISABLED)
+
+    def _go(self, delta: int):
+        self.page += delta
+        self.render()
+
+    def _create(self):
+        group = self.app.prompt_new_group(self, suggested=self.app.suggest_group_name())
+        if group is not None:
+            self.app.on_groups_changed()
+            self._vars[group["id"]] = tk.BooleanVar(value=True)
+            self.chosen.append(group["id"])
+            self.page = proxy_groups.page_count(len(proxy_groups.load_groups())) - 1
+            self.render()
+        self._regrab()
+
+    def _confirm(self):
+        chosen = list(self.chosen)
+        self.destroy()
+        self.app.open_group_tabs(chosen)
+
+
+# ── Add Subscription Wizard ───────────────────────────────────
+class SubscriptionDialog(tk.Toplevel):
+    """Modal wizard: subscription type → URL → target group → async import → summary."""
+
+    def __init__(self, app: "VlessApp"):
+        super().__init__(app)
+        self.app = app
+        bg = C["bg"]
+        self.title(t("dlg_sub_title"))
+        self.configure(bg=bg)
+        self.resizable(False, False)
+        self.transient(app)
+
+        self.type_var = tk.StringVar(value=subscriptions.TYPE_VLESS)
+        self.url_var = tk.StringVar()
+        self.group_mode_var = tk.StringVar()
+        self.new_group_var = tk.StringVar()
+        self.start_after_var = tk.BooleanVar(value=False)
+        self._busy = False
+
+        head = tk.Frame(self, bg=bg)
+        head.pack(fill=tk.X, padx=18, pady=(14, 4))
+        tk.Label(head, text=f"🔗 {t('dlg_sub_title')}", font=("Segoe UI", 12, "bold"), fg=C["text"], bg=bg).pack(side=tk.LEFT)
+        self.step_lbl = tk.Label(head, text="", font=("Segoe UI", 9), fg=C["subtext"], bg=bg)
+        self.step_lbl.pack(side=tk.RIGHT)
+
+        self.body = tk.Frame(self, bg=bg)
+        self.body.pack(fill=tk.BOTH, padx=18, pady=(4, 6))
+
+        self.status_lbl = tk.Label(self, text="", font=("Segoe UI", 9), fg=C["red"], bg=bg, wraplength=480, justify=tk.LEFT, anchor="w")
+        self.status_lbl.pack(fill=tk.X, padx=18)
+
+        footer = tk.Frame(self, bg=bg)
+        footer.pack(fill=tk.X, padx=18, pady=(8, 14))
+        btn = dict(font=("Segoe UI", 9, "bold"), relief=tk.FLAT, padx=12, pady=3, cursor="hand2")
+        self.next_btn = tk.Button(footer, bg=C["blue"], fg="#1e1e2e", activebackground=C["teal"], **btn)
+        self.next_btn.pack(side=tk.RIGHT)
+        self.back_btn = tk.Button(footer, text=t("btn_sub_back"), bg=C["overlay"], fg=C["text"], activebackground=C["hover"], **btn)
+        self.back_btn.pack(side=tk.RIGHT, padx=(0, 6))
+        self.cancel_btn = tk.Button(
+            footer, text=t("btn_cancel"), bg=C["overlay"], fg=C["text"], activebackground=C["hover"],
+            command=self._close, **btn,
+        )
+        self.cancel_btn.pack(side=tk.LEFT)
+
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.bind("<Escape>", lambda e: self._close())
+        self.show_type_step()
+        _center_over(self, app)
+        self.grab_set()
+        self.focus_force()
+
+    # Steps
+    def _clear(self, step: int):
+        for w in self.body.winfo_children():
+            w.destroy()
+        self.status_lbl.config(text="", fg=C["red"])
+        self.step_lbl.config(text=t("sub_step", step=step, steps=3) if step else "")
+
+    def _fit(self):
+        self.geometry("")
+
+    def show_type_step(self):
+        self._clear(1)
+        bg = C["bg"]
+        tk.Label(self.body, text=t("lbl_sub_type"), font=("Segoe UI", 10, "bold"), fg=C["text"], bg=bg).pack(anchor="w", pady=(0, 6))
+        tk.Radiobutton(
+            self.body, text=f" {t('sub_type_vless')}", variable=self.type_var, value=subscriptions.TYPE_VLESS,
+            font=("Segoe UI", 10, "bold"), fg=C["text"], bg=bg, selectcolor=C["card"],
+            activebackground=bg, activeforeground=C["blue"],
+        ).pack(anchor="w")
+        tk.Label(
+            self.body, text=t("sub_type_vless_desc"), font=("Segoe UI", 8), fg=C["subtext"], bg=bg,
+            wraplength=460, justify=tk.LEFT,
+        ).pack(anchor="w", padx=(26, 0), pady=(0, 4))
+        self.back_btn.pack_forget()
+        self.next_btn.config(text=t("btn_sub_next"), command=self.show_url_step, state=tk.NORMAL)
+        self._fit()
+
+    def show_url_step(self):
+        self._clear(2)
+        bg = C["bg"]
+        tk.Label(self.body, text=t("lbl_sub_url"), font=("Segoe UI", 10, "bold"), fg=C["text"], bg=bg).pack(anchor="w", pady=(0, 6))
+        entry = tk.Entry(
+            self.body, textvariable=self.url_var, font=("Consolas", 10), width=56,
+            bg=C["card"], fg=C["text"], insertbackground=C["text"], relief=tk.FLAT,
+        )
+        entry.pack(fill=tk.X, ipady=4)
+        attach_clipboard_and_context_menu(entry)
+        entry.bind("<Return>", lambda e: self._url_next())
+        entry.focus_set()
+        tk.Label(self.body, text=t("sub_url_hint"), font=("Segoe UI", 8), fg=C["subtext"], bg=bg).pack(anchor="w", pady=(4, 0))
+        # side=RIGHT: packing after "Next" keeps "Back" to its left
+        self.back_btn.pack(side=tk.RIGHT, padx=(0, 6), after=self.next_btn)
+        self.back_btn.config(command=self.show_type_step)
+        self.next_btn.config(text=t("btn_sub_next"), command=self._url_next, state=tk.NORMAL)
+        self._fit()
+
+    def _url_next(self):
+        try:
+            self.url_var.set(subscriptions.validate_subscription_url(self.url_var.get()))
+        except subscriptions.SubscriptionError:
+            self.status_lbl.config(text=t("err_sub_bad_url"))
+            return
+        self.show_group_step()
+
+    def show_group_step(self):
+        self._clear(3)
+        bg = C["bg"]
+        groups = proxy_groups.load_groups()
+        self._groups = groups
+        if not self.group_mode_var.get():
+            self.group_mode_var.set("existing" if groups else "new")
+        if not groups and self.group_mode_var.get() == "existing":
+            self.group_mode_var.set("new")
+        if not self.new_group_var.get():
+            self.new_group_var.set(self.app.suggest_group_name())
+
+        tk.Label(self.body, text=t("lbl_sub_group"), font=("Segoe UI", 10, "bold"), fg=C["text"], bg=bg).pack(anchor="w", pady=(0, 6))
+        radio = dict(variable=self.group_mode_var, font=("Segoe UI", 9, "bold"), fg=C["text"], bg=bg,
+                     selectcolor=C["card"], activebackground=bg, activeforeground=C["blue"], command=self._sync_group_inputs)
+
+        row1 = tk.Frame(self.body, bg=bg)
+        row1.pack(fill=tk.X, pady=2)
+        tk.Radiobutton(row1, text=f" {t('sub_group_existing')}", value="existing",
+                       state=tk.NORMAL if groups else tk.DISABLED, **radio).pack(side=tk.LEFT)
+        self.group_combo = ttk.Combobox(row1, state="readonly", width=30, font=("Segoe UI", 9),
+                                        values=[g["name"] for g in groups])
+        if groups:
+            self.group_combo.current(0)
+        self.group_combo.pack(side=tk.RIGHT)
+
+        row2 = tk.Frame(self.body, bg=bg)
+        row2.pack(fill=tk.X, pady=2)
+        tk.Radiobutton(row2, text=f" {t('sub_group_new')}", value="new", **radio).pack(side=tk.LEFT)
+        self.new_group_entry = tk.Entry(
+            row2, textvariable=self.new_group_var, font=("Segoe UI", 9), width=32,
+            bg=C["card"], fg=C["text"], insertbackground=C["text"], relief=tk.FLAT,
+        )
+        self.new_group_entry.pack(side=tk.RIGHT, ipady=2)
+
+        tk.Checkbutton(
+            self.body, text=f" {t('sub_start_after')}", variable=self.start_after_var,
+            font=("Segoe UI", 9), fg=C["text"], bg=bg, selectcolor=C["card"],
+            activebackground=bg, activeforeground=C["blue"],
+        ).pack(anchor="w", pady=(10, 0))
+        tk.Label(
+            self.body, text=t("sub_ports_hint", port=subscriptions.get_start_port()),
+            font=("Segoe UI", 8), fg=C["subtext"], bg=bg,
+        ).pack(anchor="w", pady=(4, 0))
+
+        self._sync_group_inputs()
+        self.back_btn.config(command=self.show_url_step)
+        self.next_btn.config(text=t("btn_sub_add"), command=self.start_import, state=tk.NORMAL)
+        self._fit()
+
+    def _sync_group_inputs(self):
+        existing = self.group_mode_var.get() == "existing"
+        self.group_combo.config(state="readonly" if existing else tk.DISABLED)
+        self.new_group_entry.config(state=tk.DISABLED if existing else tk.NORMAL)
+
+    # Import
+    def _target_group(self) -> tuple[Optional[str], Optional[str]]:
+        """(existing group id, new group name); validates the new name up front."""
+        if self.group_mode_var.get() == "existing":
+            idx = self.group_combo.current()
+            if 0 <= idx < len(self._groups):
+                return self._groups[idx]["id"], None
+            raise proxy_groups.GroupNameError("empty")
+        name = self.new_group_var.get()
+        proxy_groups.validate_new_name(name)
+        return None, name
+
+    def start_import(self):
+        if self._busy:
+            return
+        try:
+            group_id, new_name = self._target_group()
+        except proxy_groups.GroupNameError as err:
+            key = "err_group_name_taken" if err.code == "taken" else "err_group_name_empty"
+            self.status_lbl.config(text=t(key, name=err.name), fg=C["red"])
+            return
+
+        self._busy = True
+        for b in (self.next_btn, self.back_btn):
+            b.config(state=tk.DISABLED)
+        self.status_lbl.config(text=f"⏳ {t('sub_loading')}", fg=C["yellow"])
+
+        url = self.url_var.get()
+        existing_urls = [str(inst.cfg.get("url", "")) for inst in self.app.instances]
+        fallback = self.app._subscription_fallback_proxies()
+        start_after = bool(self.start_after_var.get())
+
+        def worker():
+            try:
+                body, route = subscriptions.fetch_subscription(url, fallback, log=self.app._log)
+                parsed = subscriptions.extract_vless_links(subscriptions.decode_subscription(body), existing_urls)
+                outcome = ("ok", parsed, route)
+            except subscriptions.SubscriptionError as err:
+                outcome = ("error", err, None)
+            except Exception as err:  # never leave the dialog stuck in "loading"
+                outcome = ("error", subscriptions.SubscriptionError("network", str(err)), None)
+            self.app.after(0, lambda: self._finish_import(outcome, url, group_id, new_name, start_after))
+
+        threading.Thread(target=worker, daemon=True, name="subscription-import").start()
+
+    def _finish_import(self, outcome, url, group_id, new_name, start_after):
+        if not self.winfo_exists():
+            return
+        self._busy = False
+        kind, payload, route = outcome
+        if kind == "error":
+            self._show_error(payload)
+            return
+        parsed: subscriptions.ParsedSubscription = payload
+        if not parsed.links:
+            self._show_error(subscriptions.SubscriptionError("no_new_links"), parsed)
+            return
+        try:
+            result = self.app.add_subscription_proxies(url, parsed.links, group_id, new_name, start_after)
+        except subscriptions.SubscriptionError as err:
+            self._show_error(err)
+            return
+        except proxy_groups.GroupNameError as err:
+            self._show_error(subscriptions.SubscriptionError("group", t(
+                "err_group_name_taken" if err.code == "taken" else "err_group_name_empty", name=err.name)))
+            return
+        self.show_result(result, parsed, route)
+
+    def _show_error(self, err: "subscriptions.SubscriptionError", parsed=None):
+        messages = {
+            "bad_url": t("err_sub_bad_url"),
+            "network": t("err_sub_network"),
+            "http_status": t("err_sub_http", code=err.detail),
+            "bad_format": t("err_sub_format"),
+            "too_large": t("err_sub_format"),
+            "no_ports": t("err_sub_no_ports", count=err.detail),
+            "group": err.detail,
+        }
+        if err.code == "no_new_links" and parsed is not None:
+            text = t("err_sub_no_links", dup=parsed.duplicates, other=parsed.unsupported, bad=parsed.invalid)
+        else:
+            text = messages.get(err.code, str(err))
+        self.status_lbl.config(text=f"⚠️ {text}", fg=C["red"])
+        for b in (self.next_btn, self.back_btn):
+            b.config(state=tk.NORMAL)
+        self._fit()
+
+    def show_result(self, result: dict, parsed: "subscriptions.ParsedSubscription", route: str):
+        self._clear(0)
+        bg = C["bg"]
+        ports = result["ports"]
+        tk.Label(
+            self.body, text=f"✅ {t('sub_result_added', count=len(ports), first=ports[0], last=ports[-1], group=result['group_name'])}",
+            font=("Segoe UI", 10, "bold"), fg=C["green"], bg=bg, wraplength=480, justify=tk.LEFT,
+        ).pack(anchor="w", pady=(0, 6))
+        tk.Label(
+            self.body, text=t("sub_result_skipped", dup=parsed.duplicates, other=parsed.unsupported, bad=parsed.invalid),
+            font=("Segoe UI", 9), fg=C["subtext"], bg=bg, wraplength=480, justify=tk.LEFT,
+        ).pack(anchor="w")
+        tk.Label(
+            self.body, text=t("sub_result_route", route=t("sub_route_direct") if route == "direct" else route),
+            font=("Segoe UI", 8), fg=C["muted"], bg=bg,
+        ).pack(anchor="w", pady=(4, 0))
+        self.back_btn.pack_forget()
+        self.cancel_btn.pack_forget()
+        self.next_btn.config(text=t("btn_close_dialog"), command=self._close, state=tk.NORMAL)
+        self._fit()
+
+    def _close(self):
+        if self._busy:
+            return  # the import is still running; its result would have nowhere to go
+        self.destroy()
 
 
 # ── Custom Styled Orange Checkbox ──────────────────────────────
@@ -3471,7 +4375,6 @@ class VlessApp(tk.Tk):
     def sort_instances(self):
         """Sort instances ascending by numeric order (>= 0), then by global_id."""
         self.instances.sort(key=lambda inst: (inst.get_order(), inst.global_id))
-        self._cached_instances_signature = None
 
     def _load_saved_data(self):
         raw_instances = load_instances()
@@ -3583,9 +4486,18 @@ class VlessApp(tk.Tk):
             self._build_wsl_isolation_tab,
             self._build_localization_tab,
         ]
+        # Each tab is built the first time it is opened. Building them in the background
+        # right after launch landed in the middle of the proxies' start wave and froze the
+        # window for up to a second per tab.
+        self._tab_builder_for = {
+            str(self.proxies_frame): self._build_proxies_tab,
+            str(self.options_frame): self._build_options_tab,
+            str(self.backup_frame): self._build_backup_tab,
+            str(self.wsl_iso_frame): self._build_wsl_isolation_tab,
+            str(self.loc_frame): self._build_localization_tab,
+        }
         # Opening a tab that is not built yet builds everything that is still pending
         self.nav_notebook.bind("<<NotebookTabChanged>>", self._on_nav_tab_changed, add="+")
-        self.after_idle(lambda: self.after(30, self._build_next_deferred_tab))
 
         self._update_header_stats()
 
@@ -3593,6 +4505,12 @@ class VlessApp(tk.Tk):
         """Build one pending tab, then yield to the event loop before the next one."""
         pending = getattr(self, "_pending_tab_builders", None)
         if not pending:
+            return
+        quiet_since = getattr(self, "_start_queue_idle_at", None)
+        if getattr(self, "_start_queue_busy", False) or (
+                quiet_since is not None and (time.monotonic() - quiet_since) * 1000 < TAB_BUILD_QUIET_MS):
+            # proxies are (still) starting: building tabs now only adds GUI-thread stalls
+            self.after(500, self._build_next_deferred_tab)
             return
         builder = pending.pop(0)
         try:
@@ -3605,11 +4523,23 @@ class VlessApp(tk.Tk):
     def _on_nav_tab_changed(self, event=None):
         # The event also fires for the initial Overview selection, which needs nothing extra
         try:
-            if self.nav_notebook.select() == str(self.overview_frame):
-                return
+            selected = self.nav_notebook.select()
         except Exception:
             return
-        self._ensure_tabs_built()
+        if selected != str(self.overview_frame):
+            self._ensure_tab_built(selected)
+
+    def _ensure_tab_built(self, frame) -> None:
+        """Build one tab now if it has not been built yet (frame widget or its path)."""
+        builder = getattr(self, "_tab_builder_for", {}).get(str(frame))
+        pending = getattr(self, "_pending_tab_builders", None)
+        if builder is None or not pending or builder not in pending:
+            return
+        pending.remove(builder)
+        try:
+            builder()
+        except Exception as err:
+            self._log(f"⚠️ [GUI] Tab build failed ({builder.__name__}): {err}")
 
     def _ensure_tabs_built(self):
         """Synchronously build every tab that is still pending."""
@@ -3656,24 +4586,91 @@ class VlessApp(tk.Tk):
         self.zapret_watcher_widget = ZapretRecoveryWidget(self.overview_frame, watcher=self.zapret_watcher)
         self.zapret_watcher_widget.pack(fill=tk.X, padx=px, pady=(0, 8))
 
+        # View switcher (list / by groups) and the groups manager button
+        view_bar = tk.Frame(self.overview_frame, bg=bg)
+        view_bar.pack(fill=tk.X, padx=px, pady=(0, 2))
+
+        tk.Label(view_bar, text=t("lbl_view"), font=("Segoe UI", 9, "bold"), fg=C["subtext"], bg=bg).pack(side=tk.LEFT, padx=(0, 6))
+
+        self.overview_view_mode = proxy_groups.get_view_mode()
+        self._view_mode_buttons: dict[str, tk.Button] = {}
+        for mode, label_key in ((proxy_groups.VIEW_LIST, "view_list"), (proxy_groups.VIEW_GROUPS, "view_groups")):
+            if mode == proxy_groups.VIEW_GROUPS:
+                # Single-group tabs sit between "List" and "By groups"
+                self._group_tabs_frame = tk.Frame(view_bar, bg=bg)
+                self._group_tabs_frame.pack(side=tk.LEFT)
+            btn = tk.Button(
+                view_bar, text=t(label_key), font=("Segoe UI", 9, "bold"),
+                relief=tk.FLAT, padx=10, pady=2, cursor="hand2",
+                command=lambda m=mode: self.set_overview_view_mode(m),
+            )
+            btn.pack(side=tk.LEFT, padx=(0, 2))
+            self._view_mode_buttons[mode] = btn
+
+        tk.Button(
+            view_bar, text=t("btn_add_group_tab"), font=("Segoe UI", 9, "bold"),
+            bg=C["overlay"], fg=C["green"], activebackground=C["hover"], activeforeground=C["green"],
+            relief=tk.FLAT, padx=8, pady=2, cursor="hand2",
+            command=self.open_group_tab_picker,
+        ).pack(side=tk.LEFT, padx=(2, 0))
+        self._rebuild_group_tabs()
+
+        # Actions get their own row: open group tabs would push them off the view row
+        actions_bar = tk.Frame(self.overview_frame, bg=bg)
+        actions_bar.pack(fill=tk.X, padx=px, pady=(4, 2))
+
+        tk.Button(
+            actions_bar, text=t("btn_groups"), font=("Segoe UI", 9, "bold"),
+            bg=C["overlay"], fg=C["blue"], activebackground=C["hover"], activeforeground=C["blue"],
+            relief=tk.FLAT, padx=10, pady=2, cursor="hand2",
+            command=self.open_groups_manager,
+        ).pack(side=tk.RIGHT)
+
+        self._selection_mode = False
+        self._selected: set[ProxyInstance] = set()
+        self.select_mode_btn = tk.Button(
+            actions_bar, text=t("btn_select_mode"), font=("Segoe UI", 9, "bold"),
+            relief=tk.FLAT, padx=10, pady=2, cursor="hand2",
+            command=self.toggle_selection_mode,
+        )
+        self.select_mode_btn.pack(side=tk.RIGHT, padx=(0, 6))
+        self._style_select_mode_button()
+
+        tk.Button(
+            actions_bar, text=t("btn_add_subscription"), font=("Segoe UI", 9, "bold"),
+            bg=C["green"], fg="#1e1e2e", activebackground=C["teal"],
+            relief=tk.FLAT, padx=10, pady=2, cursor="hand2",
+            command=self.open_subscription_dialog,
+        ).pack(side=tk.RIGHT, padx=(0, 6))
+
+        # Bulk actions, shown only in selection mode
+        self.selection_bar = tk.Frame(self.overview_frame, bg=bg)
+        for label_key, command in (("btn_select_all", self.select_all_proxies), ("btn_clear_selection", self.clear_proxy_selection)):
+            tk.Button(
+                self.selection_bar, text=t(label_key), font=("Segoe UI", 9),
+                bg=C["overlay"], fg=C["text"], activebackground=C["hover"],
+                relief=tk.FLAT, padx=10, pady=2, cursor="hand2", command=command,
+            ).pack(side=tk.LEFT, padx=(0, 4))
+        self.selection_count_lbl = tk.Label(self.selection_bar, text="", font=("Segoe UI", 9, "bold"), fg=C["subtext"], bg=bg)
+        self.selection_count_lbl.pack(side=tk.LEFT, padx=(8, 0))
+        self.bulk_group_btn = tk.Button(
+            self.selection_bar, text=t("btn_move_to_group"), font=("Segoe UI", 9, "bold"),
+            bg=C["blue"], fg="#1e1e2e", activebackground=C["teal"], disabledforeground=C["muted"],
+            relief=tk.FLAT, padx=10, pady=2, cursor="hand2",
+        )
+        self.bulk_group_btn.config(command=lambda: self._open_bulk_group_menu(self.bulk_group_btn))
+        self.bulk_group_btn.pack(side=tk.RIGHT)
+
         # Scrollable container for proxy rows
         canvas_frame = tk.Frame(self.overview_frame, bg=bg)
         canvas_frame.pack(fill=tk.BOTH, expand=True, padx=px, pady=(4, 10))
+        self._overview_canvas_frame = canvas_frame
 
+        # The proxy list is drawn as canvas items (see overview_view.py): no widget per card
         self.overview_canvas = tk.Canvas(canvas_frame, bg=bg, highlightthickness=0)
         self.overview_scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=self.overview_canvas.yview)
-        self.overview_content = tk.Frame(self.overview_canvas, bg=bg)
-
-        self.overview_content.bind(
-            "<Configure>", lambda e: self.overview_canvas.configure(scrollregion=self.overview_canvas.bbox("all"))
-        )
-        self.overview_canvas_window = self.overview_canvas.create_window((0, 0), window=self.overview_content, anchor="nw", width=780)
         self.overview_canvas.configure(yscrollcommand=self.overview_scrollbar.set)
-
-        def _on_canvas_resize(e):
-            if hasattr(self, "overview_canvas_window") and self.overview_canvas.winfo_exists():
-                self.overview_canvas.itemconfig(self.overview_canvas_window, width=e.width)
-        self.overview_canvas.bind("<Configure>", _on_canvas_resize)
+        self.overview_view = OverviewView(self.overview_canvas, C)
 
         # Smooth mousewheel handling
         def _on_overview_mousewheel(event):
@@ -3691,8 +4688,6 @@ class VlessApp(tk.Tk):
 
         self.overview_canvas.bind("<Enter>", _bind_overview_wheel)
         self.overview_canvas.bind("<Leave>", _unbind_overview_wheel)
-        self.overview_content.bind("<Enter>", _bind_overview_wheel)
-        self.overview_content.bind("<Leave>", _unbind_overview_wheel)
 
         self.overview_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.overview_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -3700,312 +4695,671 @@ class VlessApp(tk.Tk):
         self.refresh_overview()
 
     def update_overview_card(self, inst: ProxyInstance):
-        """Update a single proxy card in-place without touching any other widgets."""
+        """Mark one proxy's card(s) for a redraw. Requests are collected and applied together
+        on the next idle moment: a proxy going through 4-6 states while starting costs one
+        redraw, and a status-only change is just new colors (see OverviewView.update_card)."""
         if threading.current_thread() is not threading.main_thread():
             try:
                 self.after(0, lambda: self.update_overview_card(inst))
             except Exception:
                 pass
             return
-        if not hasattr(self, "_overview_cards"):
-            self._overview_cards = {}
-        data = self._overview_cards.get(inst)
-        if data and data.get("card") and data["card"].winfo_exists():
-            self._update_overview_card_widgets(inst, data)
-        else:
-            self.refresh_overview()
+        view = getattr(self, "overview_view", None)
+        if view is None or inst not in view.card_slots:
+            return          # not on screen (another group's tab): nothing to draw
+        dirty = self.__dict__.setdefault("_dirty_cards", set())
+        dirty.add(inst)
+        if not getattr(self, "_card_flush_pending", False):
+            self._card_flush_pending = True
+            try:
+                self.after_idle(self._flush_card_updates)
+            except Exception:
+                self._card_flush_pending = False
 
-    def _update_overview_card_widgets(self, inst: ProxyInstance, data: dict):
-        try:
-            h, port = inst.get_listen()
-            http_port = inst.get_http_port()
-            display_name = inst.get_display_name()
-            order_str = format_order(inst.get_order())
-
-            flag = inst.geo_info.get("flag", "🌐")
-            country = inst.geo_info.get("country", "Unknown")
-            ip = inst.geo_info.get("ip", "")
-
-            # Dot indicator color
-            if inst.is_transitioning:
-                dot_color = C["yellow"]
-            elif inst.running and inst.healthy:
-                dot_color = C["green"]
-            elif inst.running:
-                dot_color = C["yellow"]
-            else:
-                dot_color = C["red"]
-
-            if data.get("dot") and data["dot"].winfo_exists():
-                data["dot"].config(fg=dot_color)
-
-            if data.get("order_btn") and data["order_btn"].winfo_exists():
-                data["order_btn"].config(text=f"#{order_str}")
-
-            if data.get("name_lbl") and data["name_lbl"].winfo_exists():
-                data["name_lbl"].config(text=display_name)
-
-            # Badges
-            if data.get("ks_badge") and data["ks_badge"].winfo_exists():
-                if inst.cfg.get("killswitch", False):
-                    if not data["ks_badge"].winfo_ismapped():
-                        data["ks_badge"].pack(side=tk.LEFT, padx=(6, 0))
-                else:
-                    if data["ks_badge"].winfo_ismapped():
-                        data["ks_badge"].pack_forget()
-
-            if data.get("system_badge") and data["system_badge"].winfo_exists():
-                if inst.is_system_proxy():
-                    if not data["system_badge"].winfo_ismapped():
-                        data["system_badge"].pack(side=tk.LEFT, padx=(6, 0))
-                else:
-                    if data["system_badge"].winfo_ismapped():
-                        data["system_badge"].pack_forget()
-
-            if data.get("work_badge") and data["work_badge"].winfo_exists():
-                if inst.is_work_proxy():
-                    if not data["work_badge"].winfo_ismapped():
-                        data["work_badge"].pack(side=tk.LEFT, padx=(6, 0))
-                else:
-                    if data["work_badge"].winfo_ismapped():
-                        data["work_badge"].pack_forget()
-
-            if data.get("ports_lbl") and data["ports_lbl"].winfo_exists():
-                data["ports_lbl"].config(text=f"SOCKS5: {h}:{port}  |  HTTP: {h}:{http_port}")
-
-            geo_str = f"{flag} {country}" + (f" ({ip})" if ip else "")
-            geo_color = C["yellow"] if country != "Unknown" else C["muted"]
-            if data.get("geo_lbl") and data["geo_lbl"].winfo_exists():
-                data["geo_lbl"].config(text=geo_str, fg=geo_color)
-
-            # Toggle button
-            if data.get("toggle_btn") and data["toggle_btn"].winfo_exists():
-                if inst.is_transitioning:
-                    btn_text = "⏳ ..."
-                    btn_bg = C["yellow"]
-                    btn_state = tk.DISABLED
-                elif inst.running:
-                    btn_text = t("btn_off")
-                    btn_bg = C["red"]
-                    btn_state = tk.NORMAL
-                else:
-                    btn_text = t("btn_on")
-                    btn_bg = C["green"]
-                    btn_state = tk.NORMAL
-                data["toggle_btn"].config(text=btn_text, bg=btn_bg, state=btn_state)
-        except Exception:
-            pass
+    def _flush_card_updates(self):
+        self._card_flush_pending = False
+        dirty = getattr(self, "_dirty_cards", set())
+        self._dirty_cards = set()
+        view = getattr(self, "overview_view", None)
+        if view is None or not dirty:
+            return
+        names = None
+        if self.overview_view_mode == proxy_groups.VIEW_LIST:
+            names = {g["id"]: g["name"] for g in proxy_groups.load_groups()}
+        index = {inst: i for i, inst in enumerate(self.instances)}
+        for inst in dirty:
+            if inst not in view.card_slots or inst not in index:
+                continue
+            badge = ", ".join(names[g] for g in inst.get_group_ids(set(names))) or None if names is not None else None
+            try:
+                view.update_card(self._card_model(inst, index[inst], badge))
+            except tk.TclError:
+                pass
 
     def refresh_overview(self):
-        """Render or update all proxy cards in the overview content frame."""
+        """Ask for a redraw of the Overview list. Calls are coalesced into one redraw on the
+        next idle moment, so a burst (dozens of proxies changing state) costs one redraw."""
         if threading.current_thread() is not threading.main_thread():
             try:
                 self.after(0, self.refresh_overview)
             except Exception:
                 pass
             return
+        if getattr(self, "_overview_refresh_pending", False):
+            return
+        self._overview_refresh_pending = True
+        try:
+            self.after_idle(self._render_overview)
+        except Exception:
+            self._overview_refresh_pending = False
 
-        if not hasattr(self, "overview_content") or not self.overview_content:
+    def _render_overview(self, reset_scroll: bool = False):
+        """Rebuild the row models for the current view and draw them (tens of ms)."""
+        self._overview_refresh_pending = False
+        view = getattr(self, "overview_view", None)
+        if view is None:
             return
         try:
-            if not self.overview_content.winfo_exists():
+            if not view.canvas.winfo_exists():
                 return
         except Exception:
             return
 
-        if not hasattr(self, "_overview_cards"):
-            self._overview_cards = {}
+        if not hasattr(self, "overview_view_mode"):
+            self.overview_view_mode = proxy_groups.get_view_mode()
+        if not hasattr(self, "_selected"):
+            self._selected = set()
+        self._selected &= set(self.instances)  # forget removed proxies
 
-        current_instances_signature = [id(inst) for inst in self.instances]
-        # In-place differential updates without tearing down the DOM or resetting scroll position
-        if getattr(self, "_cached_instances_signature", None) == current_instances_signature:
-            all_valid = True
+        groups = proxy_groups.load_groups()
+        known = {g["id"] for g in groups}
+        names = {g["id"]: g["name"] for g in groups}
+        index = {inst: i for i, inst in enumerate(self.instances)}
+        member_ids = {inst: inst.get_group_ids(known) for inst in self.instances}
+
+        tab_gid = proxy_groups.group_id_of_view(self.overview_view_mode)
+        tab_group = next((g for g in groups if g["id"] == tab_gid), None)
+        if tab_gid and tab_group is None:
+            # The tab's group vanished between refreshes: show all groups instead
+            self.overview_view_mode = proxy_groups.VIEW_GROUPS
+
+        rows: list = []
+        if tab_group is not None:
+            members = [inst for inst in self.instances if tab_group["id"] in member_ids[inst]]
+            rows.append(self._header_model(tab_group, members, first=True))
+            if not members:
+                rows.append(HintModel(t("group_empty_hint")))
+            rows.extend(self._card_model(inst, index[inst], None) for inst in members)
+        elif self.overview_view_mode == proxy_groups.VIEW_GROUPS:
+            if not self.instances and not groups:
+                rows.append(HintModel(t("empty_overview"), italic=False, big=True))
+            sections = proxy_groups.partition(self.instances, groups, lambda i: member_ids[i])
+            for sec_idx, (group, members) in enumerate(sections):
+                rows.append(self._header_model(group, members, first=(sec_idx == 0)))
+                if group is not None and not members:
+                    rows.append(HintModel(t("group_empty_hint")))
+                rows.extend(self._card_model(inst, index[inst], None) for inst in members)
+        else:
+            if not self.instances:
+                rows.append(HintModel(t("empty_overview"), italic=False, big=True))
             for inst in self.instances:
-                data = self._overview_cards.get(inst)
-                if not (data and data.get("card") and data["card"].winfo_exists()):
-                    all_valid = False
-                    break
-                self._update_overview_card_widgets(inst, data)
-            if all_valid:
-                return
+                badge = ", ".join(names[g] for g in member_ids[inst]) or None
+                rows.append(self._card_model(inst, index[inst], badge))
 
-        # Structure or count changed: full rebuild of overview cards
-        self._cached_instances_signature = current_instances_signature
-        self._overview_cards.clear()
+        view.render(rows, reset_scroll=reset_scroll)
+        self._sync_selection_bar()
 
-        for widget in self.overview_content.winfo_children():
+    def _card_model(self, inst: ProxyInstance, idx: int, group_badge: Optional[str]) -> CardModel:
+        """Everything one proxy card shows, as data."""
+        h, port = inst.get_listen()
+        http_port = inst.get_http_port()
+        flag = inst.geo_info.get("flag", "🌐")
+        country = inst.geo_info.get("country", "Unknown")
+        ip = inst.geo_info.get("ip", "")
+
+        if inst.is_transitioning:
+            dot = C["yellow"]
+        elif inst.running and inst.healthy:
+            dot = C["green"]
+        elif inst.running:
+            dot = C["yellow"]
+        else:
+            dot = C["red"]
+
+        badges = []
+        if inst.cfg.get("killswitch", False):
+            badges.append((" 🛡️ KS ", C["green"]))
+        if inst.is_system_proxy():
+            badges.append((f" {t('badge_system_proxy')} ", C["yellow"]))
+        if inst.is_work_proxy():
+            badges.append((f" {t('badge_work_proxy')} ", C["teal"]))
+        if inst.is_telegram_proxy():
+            badges.append((f" {t('badge_telegram_proxy')} ", C["peach"]))
+        if group_badge:
+            badges.append((f" 📁 {group_badge} ", C["blue"]))
+
+        # fixed width over all its labels: a status change then never moves other buttons
+        widths = (t("btn_on"), t("btn_off"), "⏳ ...")
+        if inst.is_transitioning:
+            toggle = OverviewButton("⏳ ...", None, bg=C["yellow"], fg="#1e1e2e", enabled=False, bold=True,
+                                    name="toggle", width_labels=widths)
+        elif inst.running:
+            toggle = OverviewButton(t("btn_off"), inst.toggle_async, bg=C["red"], fg="#1e1e2e", bold=True,
+                                    name="toggle", width_labels=widths)
+        else:
+            toggle = OverviewButton(t("btn_on"), inst.toggle_async, bg=C["green"], fg="#1e1e2e", bold=True,
+                                    name="toggle", width_labels=widths)
+        buttons = [toggle]
+        if inst.is_telegram_proxy():
+            buttons.append(OverviewButton(f"📋 {t('btn_copy_tg_socks')}", lambda i=inst: self._copy_tg_proxy_link(i),
+                                          fg=C["green"], bold=True, name="copy_tg"))
+        buttons += [
+            OverviewButton("📁", lambda i=inst: self._open_group_menu(i, None), name="groups"),
+            OverviewButton("🔍", inst.check_geo_now, name="geo"),
+            OverviewButton(t("btn_view_tab"), lambda n=idx: self._jump_to_instance(n), name="view"),
+        ]
+        for b in buttons:
+            if b.bg == "#313244":
+                b.bg = C["overlay"]
+            if b.fg == "#cdd6f4":
+                b.fg = C["text"]
+
+        selecting = getattr(self, "_selection_mode", False)
+        return CardModel(
+            key=inst,
+            dot=dot,
+            order_text=f"#{format_order(inst.get_order())}",
+            name=inst.get_display_name(),
+            ports=f"SOCKS5: {h}:{port}  |  HTTP: {h}:{http_port}",
+            geo=f"{flag} {country}" + (f" ({ip})" if ip else ""),
+            geo_fg=C["yellow"] if country != "Unknown" else C["muted"],
+            on_order=lambda i=inst: self.prompt_reorder_proxy(i),
+            on_rename=lambda i=inst: self.prompt_rename_proxy(i),
+            badges=badges,
+            buttons=buttons,
+            checked=(inst in self._selected) if selecting else None,
+            on_check=(lambda value, i=inst: self._on_card_selected(i, value)) if selecting else None,
+        )
+
+    # ── Proxy Groups ──────────────────────────────────────────
+    def _style_view_mode_buttons(self):
+        for mode, btn in getattr(self, "_view_mode_buttons", {}).items():
+            active = mode == self.overview_view_mode
+            btn.config(
+                bg=C["blue"] if active else C["overlay"],
+                fg="#1e1e2e" if active else C["text"],
+                activebackground=C["teal"] if active else C["hover"],
+            )
+        for gid, (tab, name_btn, close_btn) in getattr(self, "_group_tab_widgets", {}).items():
+            active = self.overview_view_mode == proxy_groups.group_view_mode(gid)
+            colors = dict(
+                bg=C["blue"] if active else C["overlay"],
+                fg="#1e1e2e" if active else C["text"],
+                activebackground=C["teal"] if active else C["hover"],
+            )
             try:
-                if widget.winfo_exists():
-                    widget.destroy()
+                tab.config(bg=colors["bg"])
+                name_btn.config(**colors)
+                close_btn.config(**colors)
             except Exception:
                 pass
 
-        if not self.instances:
-            tk.Label(
-                self.overview_content, text=t("empty_overview"),
-                font=("Segoe UI", 11), fg=C["subtext"], bg=C["bg"], pady=40,
-            ).pack()
+    def set_overview_view_mode(self, mode: str):
+        if mode == getattr(self, "overview_view_mode", None):
             return
+        self.overview_view_mode = mode
+        proxy_groups.set_view_mode(mode)
+        self._style_view_mode_buttons()
+        self._render_overview(reset_scroll=True)
 
-        for idx, inst in enumerate(self.instances):
-            h, port = inst.get_listen()
-            http_port = inst.get_http_port()
-            display_name = inst.get_display_name()
-            order_str = format_order(inst.get_order())
-
-            flag = inst.geo_info.get("flag", "🌐")
-            country = inst.geo_info.get("country", "Unknown")
-            ip = inst.geo_info.get("ip", "")
-
-            # Row Card
-            card = tk.Frame(self.overview_content, bg=C["card"], relief=tk.FLAT, borderwidth=1)
-            card.pack(fill=tk.X, pady=3, padx=2)
-
-            # Left badge & Index
-            left_badge = tk.Frame(card, bg=C["card"])
-            left_badge.pack(side=tk.LEFT, padx=(10, 6), pady=8)
-
-            dot_color = C["green"] if inst.running and inst.healthy else (C["yellow"] if inst.running else C["red"])
-            dot_lbl = tk.Label(left_badge, text="●", font=("Segoe UI", 14), fg=dot_color, bg=C["card"])
-            dot_lbl.pack(side=tk.LEFT, padx=(0, 4))
-            
-            # Interactive order badge (click to change order)
-            order_btn = tk.Button(
-                left_badge, text=f"#{order_str}", font=("Consolas", 10, "bold"),
-                fg=C["blue"], bg=C["card"], activebackground=C["card"], activeforeground=C["teal"],
-                relief=tk.FLAT, bd=0, cursor="hand2",
-                command=lambda i=inst: self.prompt_reorder_proxy(i),
+    # ── Overview Group Tabs ───────────────────────────────────
+    def _rebuild_group_tabs(self):
+        """Recreate the single-group tabs from settings; drop the view of a vanished tab."""
+        frame = getattr(self, "_group_tabs_frame", None)
+        if frame is None:
+            return
+        for w in frame.winfo_children():
+            w.destroy()
+        self._group_tab_widgets: dict[str, tuple] = {}
+        names = {g["id"]: g["name"] for g in proxy_groups.load_groups()}
+        tabs = proxy_groups.get_group_tabs()
+        for gid in tabs:
+            tab = tk.Frame(frame, bg=C["overlay"])
+            tab.pack(side=tk.LEFT, padx=(0, 2))
+            name_btn = tk.Button(
+                tab, text=f"📁 {names[gid]}", font=("Segoe UI", 9, "bold"),
+                relief=tk.FLAT, bd=0, padx=8, pady=2, cursor="hand2",
+                command=lambda g=gid: self.set_overview_view_mode(proxy_groups.group_view_mode(g)),
             )
-            order_btn.pack(side=tk.LEFT)
-
-            # Center Info: Name, Ports, Geo
-            info = tk.Frame(card, bg=C["card"])
-            info.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8, pady=6)
-
-            title_row = tk.Frame(info, bg=C["card"])
-            title_row.pack(anchor="w")
-
-            name_lbl = tk.Label(title_row, text=display_name, font=("Segoe UI", 10, "bold"), fg=C["text"], bg=C["card"])
-            name_lbl.pack(side=tk.LEFT)
-
-            # Pencil rename button
-            rename_btn = tk.Button(
-                title_row, text="✏️", font=("Segoe UI", 9),
-                bg=C["card"], fg=C["subtext"], activebackground=C["card"], activeforeground=C["text"],
-                relief=tk.FLAT, bd=0, padx=4, pady=0, cursor="hand2",
-                command=lambda i=inst: self.prompt_rename_proxy(i),
+            name_btn.pack(side=tk.LEFT)
+            close_btn = tk.Button(
+                tab, text="✕", font=("Segoe UI", 8, "bold"),
+                relief=tk.FLAT, bd=0, padx=6, pady=2, cursor="hand2",
+                command=lambda g=gid: self.close_group_tab(g),
             )
-            rename_btn.pack(side=tk.LEFT, padx=(4, 0))
+            close_btn.pack(side=tk.LEFT)
+            self._group_tab_widgets[gid] = (tab, name_btn, close_btn)
 
-            ks_badge = tk.Label(
-                title_row, text=" 🛡️ KS ", font=("Segoe UI", 7, "bold"),
-                bg=C["hover"], fg=C["green"], padx=4, pady=1
+        current_gid = proxy_groups.group_id_of_view(getattr(self, "overview_view_mode", None))
+        if current_gid and current_gid not in tabs:
+            self.overview_view_mode = proxy_groups.VIEW_GROUPS
+            proxy_groups.set_view_mode(self.overview_view_mode)
+            self._style_view_mode_buttons()
+
+    def open_group_tabs(self, group_ids: list[str]):
+        """Open tabs for the given groups and switch to the last one."""
+        if not group_ids:
+            return
+        proxy_groups.open_group_tabs(group_ids)
+        self._rebuild_group_tabs()
+        self.set_overview_view_mode(proxy_groups.group_view_mode(group_ids[-1]))
+
+    def close_group_tab(self, group_id: str):
+        """✕ on a tab: close it; if it was the shown view, fall back to "By groups"."""
+        was_active = self.overview_view_mode == proxy_groups.group_view_mode(group_id)
+        proxy_groups.close_group_tab(group_id)
+        if was_active:
+            self.overview_view_mode = proxy_groups.VIEW_GROUPS
+            proxy_groups.set_view_mode(self.overview_view_mode)
+        self._rebuild_group_tabs()
+        self.refresh_overview()
+
+    def open_group_tab_picker(self):
+        dlg = getattr(self, "_group_tab_picker", None)
+        if dlg is not None and dlg.winfo_exists():
+            dlg.lift()
+            dlg.focus_force()
+            return
+        self._group_tab_picker = GroupTabPickerDialog(self)
+
+    def _header_model(self, group: Optional[dict], members: list, first: bool) -> HeaderModel:
+        """Section header: a real group gets inline rename; in selection mode a non-empty
+        section gets a select/unselect button."""
+        select_button = None
+        if getattr(self, "_selection_mode", False) and members:
+            all_in = all(inst in self._selected for inst in members)
+            select_button = OverviewButton(
+                t("btn_unselect_group") if all_in else t("btn_select_group"),
+                lambda m=list(members): self.toggle_group_selection(m),
+                bg=C["overlay"], fg=C["blue"], bold=True, name="select_group",
             )
-            if inst.cfg.get("killswitch", False):
-                ks_badge.pack(side=tk.LEFT, padx=(6, 0))
+        on_rename = None
+        if group is not None:
+            gid, old_name = group["id"], group["name"]
 
-            system_badge = tk.Label(
-                title_row, text=f" {t('badge_system_proxy')} ", font=("Segoe UI", 7, "bold"),
-                bg=C["hover"], fg=C["yellow"], padx=4, pady=1
+            def on_rename(text: str, from_blur: bool, gid=gid, old_name=old_name) -> bool:
+                if proxy_groups.normalize_name(text) == old_name:
+                    return True
+                try:
+                    proxy_groups.rename_group(gid, text)
+                except proxy_groups.GroupNameError as err:
+                    if from_blur:
+                        return True          # clicking away with an invalid name just cancels
+                    self._show_group_name_error(err, self)
+                    return False             # keep editing after an explicit Enter
+                except KeyError:
+                    return True
+                self.after_idle(self.on_groups_changed)
+                return True
+
+        return HeaderModel(
+            key=group["id"] if group is not None else None,
+            icon="📁" if group is not None else "📂",
+            name=group["name"] if group is not None else t("group_unsorted"),
+            count_text=f"({len(members)})",
+            first=first,
+            on_rename=on_rename,
+            select_button=select_button,
+        )
+
+    # ── Overview Selection Mode ───────────────────────────────
+    def _style_select_mode_button(self):
+        btn = getattr(self, "select_mode_btn", None)
+        if btn is None:
+            return
+        active = getattr(self, "_selection_mode", False)
+        btn.config(
+            bg=C["blue"] if active else C["overlay"],
+            fg="#1e1e2e" if active else C["text"],
+            activebackground=C["teal"] if active else C["hover"],
+        )
+
+    def toggle_selection_mode(self):
+        """Show/hide checkboxes on proxy cards together with the bulk actions bar."""
+        self._selection_mode = not getattr(self, "_selection_mode", False)
+        self._selected = set()
+        self._style_select_mode_button()
+        bar = getattr(self, "selection_bar", None)
+        if bar is not None:
+            if self._selection_mode:
+                bar.pack(fill=tk.X, padx=12, pady=(4, 0), before=self._overview_canvas_frame)
+            else:
+                bar.pack_forget()
+        self._render_overview()
+
+    def _on_card_selected(self, inst: ProxyInstance, selected: bool):
+        if selected:
+            self._selected.add(inst)
+        else:
+            self._selected.discard(inst)
+        self._sync_selection_ui()
+
+    def select_all_proxies(self):
+        self._selected = set(self.instances)
+        self._sync_selection_ui()
+
+    def clear_proxy_selection(self):
+        self._selected = set()
+        self._sync_selection_ui()
+
+    def toggle_group_selection(self, members: list):
+        """Select every proxy of a section, or unselect them when all are already selected."""
+        alive = [inst for inst in members if inst in self.instances]
+        if alive and all(inst in self._selected for inst in alive):
+            self._selected.difference_update(alive)
+        else:
+            self._selected.update(alive)
+        self._sync_selection_ui()
+
+    def _sync_selection_ui(self):
+        """Selection changed: redraw the list (checkboxes, group buttons) and the bar."""
+        if not getattr(self, "_selection_mode", False):
+            return
+        self._render_overview()
+
+    def _sync_selection_bar(self):
+        if not getattr(self, "_selection_mode", False):
+            return
+        selected = getattr(self, "_selected", set())
+        try:
+            if hasattr(self, "selection_count_lbl") and self.selection_count_lbl.winfo_exists():
+                if not getattr(self, "_flash_active", False):
+                    self.selection_count_lbl.config(text=t("lbl_selected", count=len(selected)))
+            if hasattr(self, "bulk_group_btn") and self.bulk_group_btn.winfo_exists():
+                self.bulk_group_btn.config(state=tk.NORMAL if selected else tk.DISABLED)
+        except Exception:
+            pass
+
+    def selected_proxies(self) -> list[ProxyInstance]:
+        """Selected proxies in display order."""
+        return [inst for inst in self.instances if inst in getattr(self, "_selected", set())]
+
+    def add_selected_to_group(self, group_id: str) -> tuple[int, int]:
+        """“Add to group”: the selected proxies also join `group_id`, keeping their other groups.
+
+        Only references are added: no proxy is created and no port is taken.
+        Returns (added, already there); saves once.
+        """
+        chosen = self.selected_proxies()
+        added = sum(1 for inst in chosen if proxy_groups.add_group_ref(inst.cfg, group_id))
+        if added:
+            self.save_all()
+            self.on_groups_changed()
+        group = proxy_groups.get_group(group_id)
+        if group is not None and chosen:
+            self._flash_selection_info(t("added_to_group_info", name=group["name"], added=added, already=len(chosen) - added))
+        return added, len(chosen) - added
+
+    def _flash_selection_info(self, text: str, ms: int = 3000):
+        """Show a result in the selection bar for a moment, then the usual counter again."""
+        lbl = getattr(self, "selection_count_lbl", None)
+        if lbl is None:
+            return
+        try:
+            lbl.config(text=text, fg=C["green"])
+        except Exception:
+            return
+        self._flash_active = True
+
+        def restore():
+            self._flash_active = False
+            try:
+                if lbl.winfo_exists():
+                    lbl.config(fg=C["subtext"])
+            except Exception:
+                return
+            self._sync_selection_bar()
+
+        self.after(ms, restore)
+
+    def _open_bulk_group_menu(self, anchor: tk.Widget):
+        """“Add to group” for the selection: an existing group or a new one the app proposes."""
+        chosen = self.selected_proxies()
+        if not chosen:
+            return
+        menu = tk.Menu(
+            self, tearoff=0, bg=C["surface"], fg=C["text"],
+            activebackground=C["hover"], activeforeground=C["blue"], font=("Segoe UI", 9),
+        )
+        known = {g["id"] for g in proxy_groups.load_groups()}
+        for g in proxy_groups.load_groups():
+            all_in = all(g["id"] in inst.get_group_ids(known) for inst in chosen)
+            menu.add_command(
+                label=f"📁 {g['name']}" + (f"   {t('group_all_already_in')}" if all_in else ""),
+                state=tk.DISABLED if all_in else tk.NORMAL,
+                command=lambda gid=g["id"]: self.add_selected_to_group(gid),
             )
-            if inst.is_system_proxy():
-                system_badge.pack(side=tk.LEFT, padx=(6, 0))
+        menu.add_separator()
+        menu.add_command(label=t("group_menu_new"), command=self.add_selected_to_new_group)
+        try:
+            menu.tk_popup(anchor.winfo_rootx(), anchor.winfo_rooty() + anchor.winfo_height())
+        finally:
+            menu.grab_release()
 
-            work_badge = tk.Label(
-                title_row, text=f" {t('badge_work_proxy')} ", font=("Segoe UI", 7, "bold"),
-                bg=C["hover"], fg=C["teal"], padx=4, pady=1
+    def add_selected_to_new_group(self) -> Optional[dict]:
+        chosen = self.selected_proxies()
+        if not chosen:
+            return None
+        group = self.prompt_new_group(
+            self, suggested=self.suggest_group_name(),
+            prompt=t("new_group_for_selected_prompt", count=len(chosen)),
+        )
+        if group is not None:
+            self.add_selected_to_group(group["id"])
+        return group
+
+    def _open_group_menu(self, inst: ProxyInstance, anchor: tk.Widget):
+        """Popup on a card's 📁 button: tick the groups this proxy belongs to (several allowed)."""
+        groups = proxy_groups.load_groups()
+        member_of = set(inst.get_group_ids({g["id"] for g in groups}))
+        menu = tk.Menu(
+            self, tearoff=0, bg=C["surface"], fg=C["text"],
+            activebackground=C["hover"], activeforeground=C["blue"], font=("Segoe UI", 9),
+            selectcolor=C["blue"],
+        )
+        menu._vars = []  # keep the BooleanVars alive while the menu is shown
+        for g in groups:
+            var = tk.BooleanVar(value=g["id"] in member_of)
+            menu._vars.append(var)
+            menu.add_checkbutton(
+                label=f"📁 {g['name']}", variable=var,
+                command=lambda gid=g["id"], v=var: inst.set_group_membership(gid, bool(v.get())),
             )
-            if inst.is_work_proxy():
-                work_badge.pack(side=tk.LEFT, padx=(6, 0))
+        if groups:
+            menu.add_separator()
+        menu.add_command(label=f"📂 {t('group_menu_clear')}", command=inst.clear_groups)
 
-            tg_badge = tk.Label(
-                title_row, text=f" {t('badge_telegram_proxy')} ", font=("Segoe UI", 7, "bold"),
-                bg=C["hover"], fg=C["peach"], padx=4, pady=1
+        def create_and_add():
+            group = self.prompt_new_group(self, suggested=self.suggest_group_name())
+            if group is not None:
+                self.on_groups_changed()
+                inst.set_group_membership(group["id"], True)
+
+        menu.add_command(label=t("group_menu_new"), command=create_and_add)
+        try:
+            if anchor is not None:
+                menu.tk_popup(anchor.winfo_rootx(), anchor.winfo_rooty() + anchor.winfo_height())
+            else:
+                menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+        finally:
+            menu.grab_release()
+
+    def _show_group_name_error(self, err: "proxy_groups.GroupNameError", parent: tk.Misc):
+        key = "err_group_name_taken" if err.code == "taken" else "err_group_name_empty"
+        messagebox.showerror(t("app_title"), t(key, name=err.name), parent=parent)
+
+    def suggest_group_name(self) -> str:
+        """First free "Group N" name, offered when the app proposes a new group."""
+        taken = {g["name"].casefold() for g in proxy_groups.load_groups()}
+        n = 1
+        while t("group_suggest_name", n=n).casefold() in taken:
+            n += 1
+        return t("group_suggest_name", n=n)
+
+    def prompt_new_group(self, parent: tk.Misc, suggested: str = "", prompt: str = "") -> Optional[dict]:
+        """Ask for a name (pre-filled with `suggested`) and create the group; None if cancelled."""
+        initial = suggested
+        while True:
+            res = simpledialog.askstring(
+                t("new_group_title"), prompt or t("new_group_prompt"), initialvalue=initial, parent=parent,
             )
-            if inst.is_telegram_proxy():
-                tg_badge.pack(side=tk.LEFT, padx=(6, 0))
+            if res is None:
+                return None
+            try:
+                return proxy_groups.create_group(res)
+            except proxy_groups.GroupNameError as err:
+                self._show_group_name_error(err, parent)
+                initial = res
 
-            detail_row = tk.Frame(info, bg=C["card"])
-            detail_row.pack(anchor="w", pady=(2, 0))
-
-            ports_lbl = tk.Label(
-                detail_row,
-                text=f"SOCKS5: {h}:{port}  |  HTTP: {h}:{http_port}",
-                font=("Consolas", 9), fg=C["subtext"], bg=C["card"]
+    def prompt_rename_group(self, group: dict, parent: tk.Misc) -> bool:
+        initial = group["name"]
+        while True:
+            res = simpledialog.askstring(
+                t("rename_group_title"), t("rename_group_prompt", name=group["name"]),
+                initialvalue=initial, parent=parent,
             )
-            ports_lbl.pack(side=tk.LEFT, padx=(0, 12))
+            if res is None:
+                return False
+            try:
+                proxy_groups.rename_group(group["id"], res)
+                return True
+            except proxy_groups.GroupNameError as err:
+                self._show_group_name_error(err, parent)
+                initial = res
+            except KeyError:
+                return False
 
-            geo_str = f"{flag} {country}" + (f" ({ip})" if ip else "")
-            geo_lbl = tk.Label(
-                detail_row,
-                text=geo_str,
-                font=("Segoe UI", 9, "bold"), fg=C["yellow"] if country != "Unknown" else C["muted"], bg=C["card"]
-            )
-            geo_lbl.pack(side=tk.LEFT)
+    def on_groups_changed(self):
+        """Groups were created, renamed or deleted: refresh everything that shows them."""
+        self._rebuild_group_tabs()  # renamed tab titles, tabs of deleted groups
+        self.refresh_overview()
+        for inst in self.instances:
+            inst._sync_group_selector()
 
-            # Right action buttons
-            actions = tk.Frame(card, bg=C["card"])
-            actions.pack(side=tk.RIGHT, padx=10, pady=6)
+    def open_groups_manager(self):
+        dlg = getattr(self, "_groups_dialog", None)
+        if dlg is not None and dlg.winfo_exists():
+            dlg.lift()
+            dlg.focus_force()
+            return
+        self._groups_dialog = GroupsManagerDialog(self)
 
-            # Start/Stop toggle
-            toggle_btn_text = t("btn_off") if inst.running else t("btn_on")
-            toggle_btn_bg = C["red"] if inst.running else C["green"]
-            toggle_btn = tk.Button(
-                actions, text=toggle_btn_text, font=("Segoe UI", 9, "bold"),
-                bg=toggle_btn_bg, fg="#1e1e2e", relief=tk.FLAT, padx=8, pady=2,
-                command=lambda i=inst: i.toggle_async(),
-            )
-            toggle_btn.pack(side=tk.LEFT, padx=3)
+    def _ask_choice(self, parent: tk.Misc, title: str, message: str, options: list[tuple[str, str, str]]) -> Optional[str]:
+        """Modal dialog with one button per option (key, label, color key); None if closed."""
+        result: dict[str, Optional[str]] = {"key": None}
+        win = tk.Toplevel(parent)
+        win.title(title)
+        win.configure(bg=C["bg"])
+        win.resizable(False, False)
+        win.transient(parent)
 
-            # Copy TG_socks button (for TelegramProxy instances)
-            if inst.is_telegram_proxy():
-                copy_tg_btn = tk.Button(
-                    actions, text=f"📋 {t('btn_copy_tg_socks')}", font=("Segoe UI", 8, "bold"),
-                    bg=C["overlay"], fg=C["green"], activebackground=C["hover"], activeforeground=C["green"],
-                    relief=tk.FLAT, padx=8, pady=2, cursor="hand2",
-                    command=lambda i=inst: self._copy_tg_proxy_link(i),
-                )
-                copy_tg_btn.pack(side=tk.LEFT, padx=3)
+        tk.Label(
+            win, text=message, font=("Segoe UI", 10), fg=C["text"], bg=C["bg"],
+            wraplength=420, justify=tk.LEFT, anchor="w",
+        ).pack(fill=tk.X, padx=18, pady=(16, 12))
 
-            # Check Geo button
-            geo_btn = tk.Button(
-                actions, text="🔍", font=("Segoe UI", 9),
-                bg=C["overlay"], fg=C["text"], activebackground=C["hover"], relief=tk.FLAT, padx=6, pady=2,
-                command=lambda i=inst: i.check_geo_now(),
-            )
-            geo_btn.pack(side=tk.LEFT, padx=3)
+        for key, label, color in options:
+            def choose(k=key):
+                result["key"] = k
+                win.destroy()
+            tk.Button(
+                win, text=label, font=("Segoe UI", 9, "bold"),
+                bg=C[color], fg="#1e1e2e" if color != "overlay" else C["text"],
+                activebackground=C["hover"], relief=tk.FLAT, padx=12, pady=5, cursor="hand2",
+                anchor="w", command=choose,
+            ).pack(fill=tk.X, padx=18, pady=3)
+        tk.Frame(win, bg=C["bg"], height=12).pack()
 
-            # Jump to Account tab button
-            view_btn = tk.Button(
-                actions, text=t("btn_view_tab"), font=("Segoe UI", 9),
-                bg=C["overlay"], fg=C["text"], activebackground=C["hover"], relief=tk.FLAT, padx=8, pady=2,
-                command=lambda idx=idx: self._jump_to_instance(idx),
-            )
-            view_btn.pack(side=tk.LEFT, padx=3)
+        win.bind("<Escape>", lambda e: win.destroy())
+        _center_over(win, parent)
+        win.grab_set()
+        win.focus_force()
+        parent.wait_window(win)
+        return result["key"]
 
-            self._overview_cards[inst] = {
-                "card": card,
-                "dot": dot_lbl,
-                "order_btn": order_btn,
-                "name_lbl": name_lbl,
-                "ks_badge": ks_badge,
-                "system_badge": system_badge,
-                "work_badge": work_badge,
-                "tg_badge": tg_badge,
+    def delete_group_flow(self, group: dict, parent: tk.Misc) -> bool:
+        """Confirm and delete a group, either alone (proxies → Unsorted) or with its proxies."""
+        if not messagebox.askyesno(t("del_group_title"), t("del_group_confirm", name=group["name"]), parent=parent):
+            return False
 
-                "ports_lbl": ports_lbl,
-                "geo_lbl": geo_lbl,
-                "toggle_btn": toggle_btn,
-                "geo_btn": geo_btn,
-                "view_btn": view_btn,
-                "idx": idx,
-            }
+        known = {g["id"] for g in proxy_groups.load_groups()}
+        members = [inst for inst in self.instances if group["id"] in inst.get_group_ids(known)]
+        # Proxies are shared by reference: one that is also in another group is not deleted
+        # with this group, it only leaves it
+        exclusive = [inst for inst in members if inst.get_group_ids(known) == [group["id"]]]
+        shared = [inst for inst in members if inst not in exclusive]
+        choice = self._ask_choice(
+            parent, t("del_group_title"), t("del_group_choice", name=group["name"], count=len(members)),
+            [
+                ("with_proxies", t("btn_del_group_with_proxies"), "red"),
+                ("only_group", t("btn_del_group_only"), "blue"),
+                ("cancel", t("btn_cancel"), "overlay"),
+            ],
+        )
+        if choice == "only_group":
+            for inst in members:
+                proxy_groups.remove_group_ref(inst.cfg, group["id"])
+            proxy_groups.delete_group(group["id"])
+            self.save_all()
+            self.on_groups_changed()
+            return True
+
+        if choice == "with_proxies":
+            if exclusive:
+                names = "\n".join(f"• {inst.get_display_name()} (:{inst.get_listen()[1]})" for inst in exclusive[:15])
+                if len(exclusive) > 15:
+                    names += f"\n… +{len(exclusive) - 15}"
+                text = t("del_group_proxies_confirm", count=len(exclusive), names=names)
+                if shared:
+                    text += "\n\n" + t("del_group_shared_kept", count=len(shared))
+                if not messagebox.askyesno(t("del_group_title"), text, icon=messagebox.WARNING, parent=parent):
+                    return False
+            for inst in shared:
+                proxy_groups.remove_group_ref(inst.cfg, group["id"])
+            proxy_groups.delete_group(group["id"])
+            self._remove_instances(exclusive)  # saves, also the trimmed memberships of shared proxies
+            self.on_groups_changed()
+            return True
+        return False
+
+    def _remove_instances(self, members: list[ProxyInstance]):
+        """Remove proxies from the app now; their processes are stopped in the background."""
+        for inst in members:
+            if inst in self.instances:
+                self.instances.remove(inst)
+        self.save_all()
+        self.refresh_current_page_tabs()
+        self.refresh_overview()
+        self._update_header_stats()
+        self.update_tray_icon()
+
+        def stop_all_removed():
+            for inst in members:
+                try:
+                    inst.destroy()
+                except Exception as err:
+                    self._log(f"⚠️ [Groups] Failed to stop removed proxy {inst.get_display_name()}: {err}")
+            self.after(0, self.update_tray_icon)
+            self.after(0, self._update_telegram_dispatcher_pool)
+
+        threading.Thread(target=stop_all_removed, daemon=True, name="remove-group-proxies").start()
 
     def _jump_to_instance(self, global_idx: int):
         target_page = global_idx // PAGE_SIZE
         target_tab_idx = global_idx % PAGE_SIZE
         self.current_page = target_page
         self.nav_notebook.select(self.proxies_frame)
+        self._ensure_tab_built(self.proxies_frame)
         self.refresh_current_page_tabs()
         if target_tab_idx < len(self.sub_notebook.tabs()):
             self.sub_notebook.select(target_tab_idx)
@@ -4162,6 +5516,20 @@ class VlessApp(tk.Tk):
             except ValueError:
                 messagebox.showerror(t("app_title"), t("err_invalid_number"), parent=self)
 
+    def _save_start_port(self) -> bool:
+        """Options: persist the first port new proxies may take (part of settings.json, so of backups)."""
+        try:
+            port = subscriptions.parse_start_port(self.start_port_var.get())
+        except ValueError:
+            self.start_port_status.config(
+                text=t("err_start_port", min=subscriptions.MIN_START_PORT, max=subscriptions.MAX_START_PORT), fg=C["red"],
+            )
+            return False
+        subscriptions.set_start_port(port)
+        self.start_port_var.set(str(port))
+        self.start_port_status.config(text=t("start_port_saved", port=port), fg=C["green"])
+        return True
+
     def _on_options_auto_reconnect_toggled(self):
         val = bool(self.auto_reconnect_var.get()) if hasattr(self, "auto_reconnect_var") else bool(settings_manager.get_setting("auto_reconnect", True))
         settings_manager.set_setting("auto_reconnect", val)
@@ -4227,8 +5595,7 @@ class VlessApp(tk.Tk):
     def refresh_current_page_tabs(self):
         """Render the 10 instance tabs for the current page."""
         if not hasattr(self, "sub_notebook"):
-            # Proxies tab is still waiting in the deferred build queue
-            self._ensure_tabs_built()
+            # Not built yet: it renders its tabs itself when first opened
             return
         for tab_id in self.sub_notebook.tabs():
             self.sub_notebook.forget(tab_id)
@@ -4332,6 +5699,34 @@ class VlessApp(tk.Tk):
         tk.Label(
             card_launchers, text=t("lbl_launchers_guide_desc"), font=("Segoe UI", 8),
             fg=C["subtext"], bg=C["card"], wraplength=700, justify=tk.LEFT,
+        ).pack(anchor="w", padx=36, pady=(0, 10))
+
+        # 0.5. Start port for new proxies (manual "Add" and subscriptions)
+        card_port = tk.Frame(opt_content, bg=C["card"], relief=tk.FLAT, borderwidth=1)
+        card_port.pack(fill=tk.X, pady=6, padx=2)
+
+        port_row = tk.Frame(card_port, bg=C["card"])
+        port_row.pack(fill=tk.X, padx=12, pady=(10, 2))
+        tk.Label(
+            port_row, text=f"  {t('opt_start_port_title')}", font=("Segoe UI", 10, "bold"), fg=C["text"], bg=C["card"],
+        ).pack(side=tk.LEFT)
+        self.start_port_var = tk.StringVar(value=str(subscriptions.get_start_port()))
+        start_port_entry = tk.Entry(
+            port_row, textvariable=self.start_port_var, font=("Consolas", 10), width=7, justify=tk.CENTER,
+            bg=C["overlay"], fg=C["text"], insertbackground=C["text"], relief=tk.FLAT,
+        )
+        start_port_entry.pack(side=tk.LEFT, padx=(8, 6), ipady=2)
+        start_port_entry.bind("<Return>", lambda e: self._save_start_port())
+        tk.Button(
+            port_row, text=t("btn_save_start_port"), font=("Segoe UI", 9, "bold"),
+            bg=C["blue"], fg="#1e1e2e", activebackground=C["teal"],
+            relief=tk.FLAT, padx=10, pady=2, cursor="hand2", command=self._save_start_port,
+        ).pack(side=tk.LEFT)
+        self.start_port_status = tk.Label(port_row, text="", font=("Segoe UI", 8, "bold"), fg=C["green"], bg=C["card"])
+        self.start_port_status.pack(side=tk.LEFT, padx=(8, 0))
+        tk.Label(
+            card_port, text=t("opt_start_port_desc", min=subscriptions.MIN_START_PORT, max=subscriptions.MAX_START_PORT),
+            font=("Segoe UI", 8), fg=C["subtext"], bg=C["card"], wraplength=700, justify=tk.LEFT,
         ).pack(anchor="w", padx=36, pady=(0, 10))
 
         # 1. Force Port Takeover
@@ -5023,8 +6418,10 @@ class VlessApp(tk.Tk):
                 self.force_restart_var.set(settings_manager.get_setting("force_restart", True))
             if hasattr(self, "auto_reconnect_var"):
                 self.auto_reconnect_var.set(settings_manager.get_setting("auto_reconnect", True))
+            if hasattr(self, "start_port_var"):
+                self.start_port_var.set(str(subscriptions.get_start_port()))
             self.refresh_current_page_tabs()
-            self.refresh_overview()
+            self.on_groups_changed()  # restored settings.json brings its own groups
             self._update_header_stats()
             messagebox.showinfo("vless2socks", t("restore_success", count=count))
         except Exception as e:
@@ -5448,13 +6845,13 @@ class VlessApp(tk.Tk):
     # ── Global Actions & Startup Routines ─────────────────────
     def autostart_configured_proxies(self):
         """Auto-start all proxies with valid URLs if autostart option is enabled."""
-        started_count = 0
+        to_start = []
         for inst in self.instances:
             url = inst.cfg.get("url", "").strip()
             if (url.startswith("vless://") or url.startswith("socks5://") or url.startswith("socks://") or url.startswith("wireguard://") or url.startswith("wg://")) and not inst.running:
-                # Non-blocking: every proxy launches in its own worker thread, the window stays responsive
-                inst.start(blocking=False)
-                started_count += 1
+                to_start.append(inst)
+        # Non-blocking and throttled: a few at a time instead of every proxy in the same instant
+        started_count = self.start_proxies_throttled(to_start)
         if started_count > 0:
             self.refresh_overview()
             self.update_tray_icon()
@@ -5470,7 +6867,10 @@ class VlessApp(tk.Tk):
                 used_ports.add(int(p_str))
             except ValueError:
                 pass
-        free_port = find_free_port(BASE_PORT, exclude=used_ports)
+        try:
+            free_port = subscriptions.allocate_ports(1, subscriptions.get_start_port(), used_ports, is_port_free)[0]
+        except subscriptions.SubscriptionError:
+            free_port = find_free_port(subscriptions.get_start_port(), exclude=used_ports)
 
         base = load_base_config()
         base["listen"] = f"127.0.0.1:{free_port}"
@@ -5486,38 +6886,158 @@ class VlessApp(tk.Tk):
             base["name"] = "System Proxy"
             base["order"] = 0
 
-        new_id = len(self.instances)
+        new_id = self._next_global_id()
         new_inst = ProxyInstance(self, base, new_id)
         self.instances.append(new_inst)
         self.sort_instances()
 
         self.current_page = (len(self.instances) - 1) // PAGE_SIZE
         self.save_all()
-        self._cached_instances_signature = None
         self.refresh_current_page_tabs()
         self.refresh_overview()
         self._update_header_stats()
 
         tab_idx_on_page = (len(self.instances) - 1) % PAGE_SIZE
         self.nav_notebook.select(self.proxies_frame)
+        self._ensure_tab_built(self.proxies_frame)
+        self.refresh_current_page_tabs()
         if tab_idx_on_page < len(self.sub_notebook.tabs()):
             self.sub_notebook.select(tab_idx_on_page)
+
+    # ── Subscriptions ─────────────────────────────────────────
+    def open_subscription_dialog(self):
+        dlg = getattr(self, "_subscription_dialog", None)
+        if dlg is not None and dlg.winfo_exists():
+            dlg.lift()
+            dlg.focus_force()
+            return
+        self._subscription_dialog = SubscriptionDialog(self)
+
+    def _subscription_fallback_proxies(self) -> list[str]:
+        """HTTP inbounds of running proxies (System Proxy first): routes to fetch a
+        subscription through when the direct connection is blocked."""
+        running = [inst for inst in self.instances if inst.running]
+        running.sort(key=lambda inst: not inst.is_system_proxy())
+        return [f"http://127.0.0.1:{inst.get_http_port()}" for inst in running]
+
+    def add_subscription_proxies(
+        self,
+        url: str,
+        links: list[str],
+        group_id: Optional[str],
+        new_group_name: Optional[str] = None,
+        start_after: bool = False,
+    ) -> dict:
+        """Create ready-to-start vless proxies for `links` on free ports from the start port up.
+
+        Ports are allocated before anything is created, so a shortage changes nothing.
+        """
+        used_ports: set[int] = set()
+        for inst in self.instances:
+            try:
+                used_ports.add(int(inst.get_listen()[1]))
+            except ValueError:
+                pass
+        ports = subscriptions.allocate_ports(len(links), subscriptions.get_start_port(), used_ports, is_port_free)
+
+        if new_group_name:
+            group = proxy_groups.create_group(new_group_name)
+        else:
+            group = proxy_groups.get_group(group_id)
+        gid = group["id"] if group else None
+        record = subscriptions.record_subscription(url, subscriptions.TYPE_VLESS, gid, len(links))
+
+        base = load_base_config()
+        max_order = max((inst.get_order() for inst in self.instances), default=0.0)
+        first_order = float(int(max_order)) + 1.0
+        created: list[ProxyInstance] = []
+        for offset, (link, port) in enumerate(zip(links, ports)):
+            cfg = subscriptions.build_proxy_config(base, link, port, first_order + offset, gid, record["id"])
+            inst = ProxyInstance(self, cfg, self._next_global_id())
+            self.instances.append(inst)
+            created.append(inst)
+
+        self.sort_instances()
+        self.save_all()
+        self.refresh_current_page_tabs()
+        self.on_groups_changed()
+        self._update_header_stats()
+        self._log(f"🔗 [Subscription] Added {len(created)} vless proxies on ports {ports[0]}-{ports[-1]}")
+
+        if start_after:
+            for inst in created:
+                inst.start_async()
+        return {
+            "instances": created,
+            "ports": ports,
+            "group_id": gid,
+            "group_name": group["name"] if group else t("group_unsorted"),
+            "subscription": record,
+        }
+
+    def _next_global_id(self) -> int:
+        """Id for a new proxy. Ids name the .instance_<id>.json config files, so after a
+        deletion len(instances) may belong to a live proxy; max + 1 never does."""
+        return max((inst.global_id for inst in self.instances), default=-1) + 1
 
     def remove_instance(self, inst: ProxyInstance):
         if inst in self.instances:
             self.instances.remove(inst)
         self.save_all()
-        self._cached_instances_signature = None
         self.refresh_current_page_tabs()
         self.refresh_overview()
         self._update_header_stats()
         self.update_tray_icon()
 
+    def start_proxies_throttled(self, instances: list) -> int:
+        """Start proxies at most START_CONCURRENCY at a time, the next one as soon as a
+        start finishes. Launching dozens together started every launcher, xray and
+        helper tool in the same instant. Returns how many were queued."""
+        pending = deque(inst for inst in instances if not inst.running and not inst.is_transitioning)
+        queued = len(pending)
+        lock = threading.Lock()
+        state = {"active": 0}
+        if queued:
+            self._start_queue_busy = True
+
+        def launch_next():
+            while True:
+                with lock:
+                    if not pending and state["active"] == 0 and getattr(self, "_start_queue_busy", False):
+                        self._start_queue_busy = False
+                        self._start_queue_idle_at = time.monotonic()
+                    if state["active"] >= START_CONCURRENCY or not pending:
+                        return
+                    inst = pending.popleft()
+                    if inst not in self.instances or inst.running or inst.is_transitioning:
+                        continue
+                    state["active"] += 1
+                done = {"v": False}
+
+                def finish(*_args, d=done):
+                    with lock:
+                        if d["v"]:
+                            return
+                        d["v"] = True
+                        state["active"] -= 1
+                    # "Started" means the launcher process exists; give its own start-up a moment
+                    self.after(START_SPACING_MS, launch_next)
+
+                try:
+                    inst.start_async(callback=finish)
+                except Exception as err:
+                    self._log(f"⚠️ [Start] {inst.get_display_name()}: {err}")
+                if not inst.is_transitioning:
+                    finish()                    # refused (no URL...) or already done
+                else:
+                    self.after(20000, finish)   # a start that never reports back must not hold a slot
+
+        launch_next()
+        return queued
+
     def start_all(self):
         """Asynchronously start all proxies that are not running without blocking GUI."""
-        for inst in self.instances:
-            if not inst.running and not inst.is_transitioning:
-                inst.start_async()
+        self.start_proxies_throttled(list(self.instances))
         self.update_tray_icon()
         self._update_header_stats()
 
@@ -5533,17 +7053,46 @@ class VlessApp(tk.Tk):
         for inst in self.instances:
             inst.check_geo_now()
 
+    def request_save(self, delay_ms: int = 1000):
+        """Save instances.json soon, once for a whole burst (e.g. dozens of proxies starting)."""
+        if threading.current_thread() is not threading.main_thread():
+            self.after(0, lambda: self.request_save(delay_ms))
+            return
+        if getattr(self, "_save_pending", False):
+            return
+        self._save_pending = True
+
+        def do_save():
+            self._save_pending = False
+            self.save_all()
+        try:
+            self.after(delay_ms, do_save)
+        except Exception:
+            self._save_pending = False
+            self.save_all()
+
     def save_all(self):
         data = [inst.get_config() for inst in self.instances]
         save_instances(data)
 
     def _update_header_stats(self):
+        """Refresh the "Accounts | Active" counter once per burst of state changes."""
         if threading.current_thread() is not threading.main_thread():
             try:
                 self.after(0, self._update_header_stats)
             except Exception:
                 pass
             return
+        if getattr(self, "_header_stats_pending", False):
+            return
+        self._header_stats_pending = True
+        try:
+            self.after_idle(self._update_header_stats_now)
+        except Exception:
+            self._update_header_stats_now()
+
+    def _update_header_stats_now(self):
+        self._header_stats_pending = False
         running = sum(1 for inst in self.instances if inst.running)
         total = len(self.instances)
         try:
@@ -6254,33 +7803,119 @@ class VlessApp(tk.Tk):
                 self.restart_hud_win.close()
             except Exception:
                 pass
-        for inst in self.instances:
-            inst.destroy()
         self.save_all()
-        if self._tray_icon:
+        # Out of sight at once: the proxies go down in the background, all together
+        try:
+            self.withdraw()
+        except Exception:
+            pass
+        shutdown = self.shutdown_all_proxies()
+        deadline = time.monotonic() + EXIT_TIMEOUT_S
+
+        def finish():
+            if shutdown.is_alive() and time.monotonic() < deadline:
+                self.after(50, finish)
+                return
+            if self._tray_icon:
+                try:
+                    self._tray_icon.stop()
+                except Exception:
+                    pass
+            self.destroy()
+
+        finish()
+
+    def shutdown_all_proxies(self) -> threading.Thread:
+        """Kill every proxy at once on exit, in a background thread.
+
+        Stopping them one by one cost a taskkill, a wait of up to 2 s and two netstat
+        runs per proxy on the GUI thread. Here all launcher/xray trees are terminated
+        in one pass through the Win32 API, then a single port sweep catches leftovers
+        (proxies adopted from an older session, orphaned xray).
+        """
+        procs = []
+        ports: set[int] = set()
+        files = []
+        for inst in self.instances:
+            inst._manual_stop = True
+            inst._should_run = False
             try:
-                self._tray_icon.stop()
+                inst._cancel_reconnect()
             except Exception:
                 pass
-        self.destroy()
+            if inst.process is not None:
+                procs.append(inst.process)
+            try:
+                port = int(inst.get_listen()[1])
+                ports.update((port, inst.get_http_port()))
+                files.append(ROOT_DIR / "runtime" / f"xray-config-{port}.json")
+            except ValueError:
+                pass
+            files.append(inst.config_path)
+            inst.process = None
+            inst.running = False
+            inst.healthy = False
+
+        def worker():
+            try:
+                kill_process_trees([p.pid for p in procs])
+            except Exception:
+                pass
+            end = time.monotonic() + 3.0
+            for proc in procs:
+                try:
+                    proc.wait(timeout=max(0.05, end - time.monotonic()))
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+            try:
+                free_ports(ports)
+            except Exception:
+                pass
+            for path in files:
+                try:
+                    if path.exists():
+                        path.unlink()
+                except Exception:
+                    pass
+
+        thread = threading.Thread(target=worker, daemon=True, name="shutdown-proxies")
+        thread.start()
+        return thread
 
     # ── Background Poll Loop ──────────────────────────────────
     # ── Background Poll Loop (Non-blocking Asynchronous) ──────
     def _poll_loop(self):
-        def _bg_poll():
-            statuses = []
-            for inst in list(self.instances):
-                try:
-                    alive = inst.check_health_sync(timeout=0.6)
-                    statuses.append((inst, alive))
-                except Exception:
-                    pass
-            try:
-                self.after(0, lambda: self._apply_poll_results(statuses))
-            except Exception:
-                pass
+        # One sweep at a time: a sweep over dozens of proxies (up to 0.6 s port check plus a
+        # 1 s tunnel probe each) used to outlast the 4 s period, so sweeps piled up as
+        # parallel threads competing with the GUI thread.
+        if not getattr(self, "_poll_sweep_running", False):
+            self._poll_sweep_running = True
+            instances = list(self.instances)
 
-        threading.Thread(target=_bg_poll, daemon=True).start()
+            def _bg_poll():
+                statuses = []
+                try:
+                    from concurrent.futures import ThreadPoolExecutor
+
+                    def check(inst):
+                        try:
+                            return inst, inst.check_health_sync(timeout=0.6)
+                        except Exception:
+                            return inst, None
+
+                    # Checks wait on sockets, not on the CPU: run them side by side
+                    with ThreadPoolExecutor(max_workers=HEALTH_CHECK_WORKERS, thread_name_prefix="health") as pool:
+                        statuses = [(inst, alive) for inst, alive in pool.map(check, instances) if alive is not None]
+                finally:
+                    try:
+                        self.after(0, lambda: self._apply_poll_results(statuses))
+                    except Exception:
+                        self._poll_sweep_running = False
+
+            threading.Thread(target=_bg_poll, daemon=True, name="health-sweep").start()
 
         # Check periodic auto-backup asynchronously
         def _bg_backup():
@@ -6295,6 +7930,7 @@ class VlessApp(tk.Tk):
         self.after(4000, self._poll_loop)
 
     def _apply_poll_results(self, statuses):
+        self._poll_sweep_running = False
         changed = False
         for inst, alive in statuses:
             if inst in self.instances:

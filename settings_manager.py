@@ -17,6 +17,7 @@ Stores persistent user preferences in settings.json:
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "zapret2_watcher_enabled": True,
     "zapret2_watch_main": True,
     "zapret2_watch_tg": True,
+    "proxy_start_port": 1080,
 }
 
 
@@ -77,15 +79,32 @@ def parse_reconnect_intervals(raw_val: Any) -> list[int]:
     return [10, 15, 30, 60, 120, 180, 30]
 
 
+#: Parsed settings.json, reused while the file is unchanged (path, mtime, size). The GUI
+#: asks for settings constantly (every status check reads auto_reconnect, ...); parsing
+#: the file each time cost GUI-thread time under load.
+_cache: tuple[str, tuple[int, int], dict[str, Any]] | None = None
+
+
 def load_settings() -> dict[str, Any]:
     """Load settings from settings.json, falling back to defaults."""
+    global _cache
+    path = SETTINGS_FILE
+    try:
+        st = path.stat()
+        stamp = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        stamp = None
+    if _cache is not None and stamp is not None and _cache[0] == str(path) and _cache[1] == stamp:
+        return copy.deepcopy(_cache[2])
+
     cfg = dict(DEFAULT_SETTINGS)
-    if SETTINGS_FILE.exists():
+    if stamp is not None:
         try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
                     cfg.update(data)
+            _cache = (str(path), stamp, copy.deepcopy(cfg))
         except Exception:
             pass
     return cfg
@@ -93,12 +112,14 @@ def load_settings() -> dict[str, Any]:
 
 def save_settings(settings: dict[str, Any]) -> None:
     """Save full settings dict to settings.json."""
+    global _cache
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2, ensure_ascii=False)
             f.write("\n")
     except Exception:
         pass
+    _cache = None
 
 
 def get_setting(key: str, default: Any = None) -> Any:

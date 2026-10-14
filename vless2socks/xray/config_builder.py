@@ -47,11 +47,11 @@ _LOG_LEVELS = {
 
 def get_physical_gateway_ip() -> str | None:
     """Определить локальный IP физического шлюза в Windows, минуя виртуальные адаптеры (TUN)."""
-    import subprocess
     import sys
+    from ..winroute import route_print_default
     if sys.platform == "win32":
         try:
-            out = subprocess.check_output("route print 0.0.0.0", shell=True, text=True)
+            out = route_print_default()
             for line in out.splitlines():
                 parts = line.strip().split()
                 if len(parts) >= 5 and parts[0] == "0.0.0.0" and parts[1] == "0.0.0.0":

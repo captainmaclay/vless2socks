@@ -33,6 +33,10 @@ class MockApp:
     def refresh_overview(self):
         self.overview_refreshed = True
 
+    def update_overview_card(self, inst):
+        # a status/flag/name change redraws just that proxy's card
+        self.overview_refreshed = True
+
     def refresh_current_page_tabs(self):
         self.tabs_refreshed = True
 
