@@ -14,11 +14,12 @@ from typing import Tuple
 
 TARGETS = [
     ("1.1.1.1", 53),
+    ("1.1.1.1", 80),
     ("8.8.8.8", 53),
 ]
 
 
-def probe_socks5_tunnel(host: str, port: int, timeout: float = 1.5) -> Tuple[bool, str]:
+def probe_socks5_tunnel(host: str, port: int, timeout: float = 2.5) -> Tuple[bool, str]:
     """Tests if the SOCKS5 proxy can successfully establish an outbound TCP tunnel.
 
     Returns (True, message) if tunnel is active, (False, reason) if broken.

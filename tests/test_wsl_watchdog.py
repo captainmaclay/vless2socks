@@ -56,7 +56,9 @@ class WslWatchdogTest(unittest.TestCase):
     def make(self, wsl, **kwargs):
         self.now = 1000.0
         self.logs, self.alerts = [], []
-        return WslWatchdog(runner=wsl, clock=lambda: self.now, on_log=self.logs.append, on_alert=self.alerts.append, **kwargs)
+        self.free_commit = 40 * 1024 ** 3
+        return WslWatchdog(runner=wsl, clock=lambda: self.now, on_log=self.logs.append, on_alert=self.alerts.append,
+                           free_commit=lambda: self.free_commit, **kwargs)
 
     def run_ticks(self, dog, count, step=10.0):
         for _ in range(count):
@@ -192,6 +194,33 @@ class WslWatchdogTest(unittest.TestCase):
         self.run_ticks(dog, WslWatchdog.FAILURES_TO_RECOVER)
         self.assertTrue(any(c[0] == "taskkill.exe" for c in wsl.calls))
         self.assertTrue(any("administrator" in m for m in self.logs))
+
+    def test_out_of_memory_is_not_mistaken_for_a_hung_wsl(self):
+        """Windows out of virtual memory: wsl.exe cannot even start. No probes (no error boxes), no restart."""
+        wsl = FakeWsl()
+        wsl.hung = True  # what a probe would look like if it were launched
+        dog = self.make(wsl)
+        self.free_commit = 300 * 1024 ** 2
+        self.run_ticks(dog, 8)
+        self.assertEqual(wsl.calls, [])
+        self.assertEqual(dog.get_state()["status"], ww.STATUS_LOW_MEMORY)
+        self.assertEqual(len(self.alerts), 1)
+        self.assertIn("memory", self.alerts[0])
+
+        self.free_commit = 40 * 1024 ** 3
+        wsl.hung = False
+        dog.tick()
+        self.assertEqual(dog.get_state()["status"], ww.STATUS_OK)
+
+    def test_wsl_exe_that_fails_to_start_does_not_trigger_recovery(self):
+        def loader_failure(args, timeout):
+            if args[1] == "--list":
+                return CommandResult(0, LIST_RUNNING.encode("utf-16le"))
+            return CommandResult(0xC0000142)
+        dog = self.make(loader_failure)
+        self.run_ticks(dog, 8)
+        self.assertEqual(dog.get_state()["status"], ww.STATUS_UNAVAILABLE)
+        self.assertEqual(self.alerts, [])
 
     def test_missing_wsl_is_quietly_ignored(self):
         def no_wsl(args, timeout):

@@ -31,6 +31,7 @@ WSL_OPERATION_LOCK = threading.Lock()
 STATUS_OK = "ok"
 STATUS_IDLE = "idle"                # no distro running: nothing to watch, nothing to fix
 STATUS_UNAVAILABLE = "unavailable"  # WSL not installed / wsl.exe answers with an error
+STATUS_LOW_MEMORY = "low_memory"    # Windows is out of virtual memory: nothing starts, WSL is not the culprit
 STATUS_SERVICE_HUNG = "service_hung"
 STATUS_DISTRO_HUNG = "distro_hung"
 STATUS_GUI_DOWN = "gui_down"        # distro answers, WSLg display socket is gone
@@ -87,6 +88,50 @@ def run_command(args: list[str], timeout: float) -> CommandResult:
         return CommandResult(None)
 
 
+def launch_failed(result: CommandResult) -> bool:
+    """wsl.exe died in the Windows loader (NTSTATUS exit code such as 0xC0000142) - it never reached WSL."""
+    return result.returncode is not None and (result.returncode & 0xFFFFFFFF) >= 0xC0000000
+
+
+def free_commit_bytes() -> Optional[int]:
+    """Virtual memory (RAM + page file) Windows can still hand out; None when unknown."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong)] + [
+                (name, ctypes.c_ulonglong) for name in (
+                    "ullTotalPhys", "ullAvailPhys", "ullTotalPageFile", "ullAvailPageFile",
+                    "ullTotalVirtual", "ullAvailVirtual", "ullAvailExtendedVirtual")]
+
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(status)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+        return int(status.ullAvailPageFile)
+    except Exception:
+        return None
+
+
+def suppress_child_error_dialogs() -> None:
+    """Make a child that cannot start exit with an error code instead of showing a modal "application error" box.
+
+    The error mode is inherited by the processes we spawn; without it a probe launched while Windows is
+    out of memory leaves a 0xc0000142 dialog on screen and looks like a hung WSL.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        # SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX
+        kernel32.SetErrorMode(kernel32.SetErrorMode(0) | 0x0001 | 0x0002 | 0x8000)
+    except Exception:
+        pass
+
+
 def parse_running_distros(list_output: str) -> list[str]:
     """Names of running distros from `wsl --list --verbose` text."""
     running = []
@@ -111,6 +156,7 @@ class WslWatchdog:
     EXEC_TIMEOUT = 10.0
     WAKE_TIMEOUT = 40.0
     SHUTDOWN_TIMEOUT = 25.0
+    MIN_FREE_COMMIT = 2 * 1024 ** 3  # below this new processes fail to start system-wide
 
     def __init__(
         self,
@@ -122,6 +168,7 @@ class WslWatchdog:
         on_change: Optional[Callable[[], None]] = None,
         runner: Callable[[list[str], float], CommandResult] = run_command,
         clock: Callable[[], float] = time.monotonic,
+        free_commit: Callable[[], Optional[int]] = free_commit_bytes,
     ) -> None:
         self.enabled = bool(enabled)
         self.auto_recover = bool(auto_recover)
@@ -132,6 +179,7 @@ class WslWatchdog:
         self.on_change = on_change
         self._run = runner
         self._clock = clock
+        self._free_commit = free_commit
 
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -154,6 +202,7 @@ class WslWatchdog:
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
+        suppress_child_error_dialogs()
         self._thread = threading.Thread(target=self._run_loop, name="WslWatchdogThread", daemon=True)
         self._thread.start()
 
@@ -191,7 +240,7 @@ class WslWatchdog:
         if listing.timed_out:
             return WslHealth(STATUS_SERVICE_HUNG, "wsl --list did not answer", running=list(self._known_running))
         if listing.returncode != 0:
-            return WslHealth(STATUS_UNAVAILABLE, f"wsl --list exit code {listing.returncode}")
+            return WslHealth(STATUS_UNAVAILABLE, f"wsl --list exit code {listing.returncode & 0xFFFFFFFF:#x}")
 
         running = [d for d in parse_running_distros(listing.stdout.decode("utf-16le", errors="replace"))
                    if not d.startswith("docker-desktop")]
@@ -202,6 +251,9 @@ class WslWatchdog:
         for distro in running:
             res = self._run(["wsl.exe", "-d", distro, "-e", "/bin/sh", "-c", _PROBE_SCRIPT], self.EXEC_TIMEOUT)
             out = res.stdout.decode("utf-8", errors="replace")
+            if launch_failed(res):
+                # Windows could not start wsl.exe at all; restarting WSL would not help and may hurt
+                return WslHealth(STATUS_UNAVAILABLE, f"wsl.exe failed to start ({res.returncode & 0xFFFFFFFF:#x})")
             if res.timed_out:
                 return WslHealth(STATUS_DISTRO_HUNG, f"{distro} did not run a command in {self.EXEC_TIMEOUT:.0f}s", running, distro)
             if _ALIVE_MARK not in out:
@@ -221,6 +273,18 @@ class WslWatchdog:
         now = self._clock()
         if now < self._grace_until:
             return max(1.0, min(self.RECHECK_INTERVAL, self._grace_until - now))
+
+        free = self._free_commit()
+        if free is not None and free < self.MIN_FREE_COMMIT:
+            # Not even probing: wsl.exe would fail to start and the failure would look like a hang
+            self._failures = 0
+            self._set_state(STATUS_LOW_MEMORY, f"{free / 1024 ** 3:.1f} GB of virtual memory left")
+            if self._alerted_for != STATUS_LOW_MEMORY:
+                self._alerted_for = STATUS_LOW_MEMORY
+                self._emit("🛑 [WslWatchdog] Windows is almost out of virtual memory "
+                           f"({free / 1024 ** 3:.1f} GB left). WSL and other apps cannot start until some program "
+                           "is closed; WSL itself is not restarted.", alert=True)
+            return self.POLL_INTERVAL
 
         if not WSL_OPERATION_LOCK.acquire(blocking=False):
             # RestartServices is restarting WSL right now

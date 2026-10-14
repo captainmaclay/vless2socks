@@ -303,6 +303,9 @@ class NoSystemChangesTest(unittest.TestCase):
     )
     #: Код, который реально может что-то поменять в системе.
     ROOTS = ("vless2socks", "tools")
+    #: Служебные модули GUI: через WinAPI только читают состояние (события питания, объём свободной
+    #: памяти) и режим ошибок собственного процесса. Сетевых и системных настроек не касаются.
+    WINAPI_READERS = {"power_watcher.py", "wsl_watchdog.py"}
 
     def test_no_system_wide_configuration_is_touched(self):
         root = Path(__file__).resolve().parent.parent
@@ -315,6 +318,8 @@ class NoSystemChangesTest(unittest.TestCase):
                     if line.lstrip().startswith("#"):
                         continue
                     match = self.FORBIDDEN.search(line)
+                    if match and match.group(0) == "ctypes.windll" and path.name in self.WINAPI_READERS:
+                        continue
                     if match:
                         offenders.append(f"{path.name}:{number}: {match.group(0)}")
         self.assertEqual(

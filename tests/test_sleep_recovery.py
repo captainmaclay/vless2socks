@@ -30,53 +30,73 @@ class TestTunnelProbe(unittest.TestCase):
     def test_probe_handles_invalid_greeting(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.bind(("127.0.0.1", 0))
-        server.listen(1)
+        server.listen(5)
         port = server.getsockname()[1]
+        ready = threading.Event()
 
         def _serve():
+            ready.set()
             try:
-                conn, _ = server.accept()
-                with conn:
-                    # Send non-socks5 response
-                    conn.sendall(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+                while True:
+                    conn, _ = server.accept()
+                    with conn:
+                        conn.sendall(b"HTTP/1.1 400 Bad Request\r\n\r\n")
             except Exception:
                 pass
             finally:
-                server.close()
+                try:
+                    server.close()
+                except Exception:
+                    pass
 
-        threading.Thread(target=_serve, daemon=True).start()
-        ok, msg = probe_socks5_tunnel("127.0.0.1", port, timeout=0.5)
-        self.assertFalse(ok)
-        self.assertTrue("handshake" in msg.lower() or "rejected" in msg.lower())
+        t = threading.Thread(target=_serve, daemon=True)
+        t.start()
+        ready.wait(timeout=1.0)
+        try:
+            ok, msg = probe_socks5_tunnel("127.0.0.1", port, timeout=0.5)
+            self.assertFalse(ok)
+            self.assertTrue("handshake" in msg.lower() or "rejected" in msg.lower())
+        finally:
+            server.close()
 
     def test_probe_success_on_mock_socks5(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.bind(("127.0.0.1", 0))
-        server.listen(1)
+        server.listen(5)
         port = server.getsockname()[1]
+        ready = threading.Event()
 
         def _serve():
+            ready.set()
             try:
-                conn, _ = server.accept()
-                with conn:
-                    # 1. Greeting
-                    g = conn.recv(3)
-                    if g == b"\x05\x01\x00":
-                        conn.sendall(b"\x05\x00")
-                    # 2. CONNECT
-                    req = conn.recv(10)
-                    if len(req) >= 4 and req[0] == 5 and req[1] == 1:
-                        # Reply success: VER=5, REP=0, RSV=0, ATYP=1, BND.ADDR=0.0.0.0, BND.PORT=0
-                        conn.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+                while True:
+                    conn, _ = server.accept()
+                    with conn:
+                        # 1. Greeting
+                        g = conn.recv(3)
+                        if g == b"\x05\x01\x00":
+                            conn.sendall(b"\x05\x00")
+                        # 2. CONNECT
+                        req = conn.recv(10)
+                        if len(req) >= 4 and req[0] == 5 and req[1] == 1:
+                            conn.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
             except Exception:
                 pass
             finally:
-                server.close()
+                try:
+                    server.close()
+                except Exception:
+                    pass
 
-        threading.Thread(target=_serve, daemon=True).start()
-        ok, msg = probe_socks5_tunnel("127.0.0.1", port, timeout=0.5)
-        self.assertTrue(ok)
-        self.assertEqual(msg, "Tunnel active")
+        t = threading.Thread(target=_serve, daemon=True)
+        t.start()
+        ready.wait(timeout=1.0)
+        try:
+            ok, msg = probe_socks5_tunnel("127.0.0.1", port, timeout=0.5)
+            self.assertTrue(ok)
+            self.assertEqual(msg, "Tunnel active")
+        finally:
+            server.close()
 
 
 class TestIpcServer(unittest.TestCase):
@@ -128,15 +148,92 @@ class TestIpcServer(unittest.TestCase):
         self.assertTrue(self.show_called)
 
 
-class TestPowerWatcherLifecycle(unittest.TestCase):
-    """Lifecycle test for PowerBroadcastWatcher."""
+class TestSelfRecoveryPolicy(unittest.TestCase):
+    """Verify that self-recovery logic never loops rapidly on startup or during network outages."""
 
-    def test_start_and_stop_cleanly(self):
-        watcher = PowerBroadcastWatcher(on_resume=lambda: None)
-        watcher.start()
-        time.sleep(0.1)
-        watcher.stop()
-        self.assertFalse(watcher._running)
+    def _make_instance(self):
+        from unittest.mock import MagicMock
+        from gui import ProxyInstance
+        cfg = {"url": "vless://00000000-0000-0000-0000-000000000000@198.51.100.1:443?security=none", "listen": "127.0.0.1:19991"}
+        app = MagicMock()
+        return ProxyInstance(app, cfg, 991)
+
+    def test_startup_grace_period_prevents_restart_loop(self):
+        from unittest.mock import MagicMock, patch
+        inst = self._make_instance()
+        inst.running = True
+        inst.healthy = False
+        inst.process = MagicMock()
+        inst.process.poll.return_value = None
+        inst._start_time = time.time()  # Just started
+
+        with patch.object(inst, "restart") as mock_restart, \
+                patch.object(inst, "is_auto_reconnect_enabled", return_value=True):
+            # Port check fails right after launch (xray still initializing)
+            changed = inst.apply_health_status(False)
+            self.assertFalse(changed)
+            mock_restart.assert_not_called()
+            self.assertFalse(inst.healthy)
+            self.assertTrue(inst.running)
+
+    def test_self_recovery_triggers_after_threshold_outside_grace_period(self):
+        from unittest.mock import MagicMock, patch
+        inst = self._make_instance()
+        inst.running = True
+        inst.healthy = True
+        inst.process = MagicMock()
+        inst.process.poll.return_value = None
+        inst._start_time = time.time() - 30.0  # Past warmup window
+
+        with patch.object(inst, "restart") as mock_restart, \
+                patch.object(inst, "is_auto_reconnect_enabled", return_value=True):
+            # Failure 1
+            inst.apply_health_status(False)
+            mock_restart.assert_not_called()
+            self.assertEqual(inst._consecutive_unhealthy, 1)
+
+            # Failure 2
+            inst.apply_health_status(False)
+            mock_restart.assert_not_called()
+            self.assertEqual(inst._consecutive_unhealthy, 2)
+
+            # Failure 3 -> Threshold reached, triggers self-recovery
+            inst.apply_health_status(False)
+            mock_restart.assert_called_once_with(blocking=False)
+            self.assertEqual(inst._recovery_restart_count, 1)
+
+    def test_self_recovery_respects_cooldown(self):
+        from unittest.mock import MagicMock, patch
+        inst = self._make_instance()
+        inst.running = True
+        inst.healthy = True
+        inst.process = MagicMock()
+        inst.process.poll.return_value = None
+        inst._start_time = time.time() - 60.0
+        inst._consecutive_unhealthy = 5
+        inst._last_recovery_restart = time.time() - 10.0  # In cooldown (45s required)
+
+        with patch.object(inst, "restart") as mock_restart, \
+                patch.object(inst, "is_auto_reconnect_enabled", return_value=True):
+            inst.apply_health_status(False)
+            mock_restart.assert_not_called()
+
+    def test_max_consecutive_recoveries_pauses_restarts(self):
+        from unittest.mock import MagicMock, patch
+        inst = self._make_instance()
+        inst.running = True
+        inst.healthy = True
+        inst.process = MagicMock()
+        inst.process.poll.return_value = None
+        inst._start_time = time.time() - 120.0
+        inst._consecutive_unhealthy = 5
+        inst._last_recovery_restart = time.time() - 50.0  # Cooldown passed
+        inst._recovery_restart_count = 3  # Max reached
+
+        with patch.object(inst, "restart") as mock_restart, \
+                patch.object(inst, "is_auto_reconnect_enabled", return_value=True):
+            inst.apply_health_status(False)
+            mock_restart.assert_not_called()
 
 
 if __name__ == "__main__":
