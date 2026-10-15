@@ -3,9 +3,9 @@
 
 Функционал:
 1. Создание ссылок для Telegram:
-   - tg://proxy?server=127.0.0.1&port=1353&secret=dd648b061090960667e2620c7949495503 (MTProto)
-   - tg://socks?server=127.0.0.1&port=1353 (SOCKS5)
-2. Внутренний диспетчер Telegram Proxy на порту 127.0.0.1:1353:
+   - tg://proxy?server=127.0.0.1&port=9910&secret=dd648b061090960667e2620c7949495503 (MTProto)
+   - tg://socks?server=127.0.0.1&port=9910 (SOCKS5)
+2. Внутренний диспетчер Telegram Proxy на порту 127.0.0.1:9910:
    - Обслуживает подключения Telegram (SOCKS5 и MTProto)
    - Автоматическая ротация: направляет трафик на активный прокси с флагом TelegramProxy
    - При сбое текущего прокси автоматически переключается (ротируется) на следующий рабочий прокси из пула.
@@ -30,7 +30,7 @@ from .socks_client import Socks5ClientError, open_via_socks5
 logger = logging.getLogger("vless2socks.telegram_proxy")
 
 DEFAULT_TG_HOST = "127.0.0.1"
-DEFAULT_TG_PORT = 1373
+DEFAULT_TG_PORT = 9910
 DEFAULT_TG_SECRET = "dd648b061090960667e2620c7949495503"
 
 # Датацентры Telegram (IP и порт)
@@ -44,7 +44,7 @@ TELEGRAM_DCS: Dict[int, Tuple[str, int]] = {
 
 
 def get_current_tg_port() -> int:
-    """Получить текущий порт виртуального сокета из настроек (по умолчанию 1373)."""
+    """Получить текущий порт виртуального сокета из настроек (по умолчанию 9910)."""
     try:
         import settings_manager
         return settings_manager.get_telegram_proxy_port()
@@ -96,8 +96,16 @@ def is_endpoint_reachable(host: str, port: int, timeout: float = 0.6) -> bool:
 class TelegramProxyDispatcher:
     """
     Диспетчер внутреннего Telegram Proxy с пулом прокси и автоматической ротацией.
-    Слушает порт 1353 и проксирует трафик через здоровые прокси vless2socks.
+    Слушает порт get_current_tg_port() и проксирует трафик через здоровые прокси vless2socks.
+
+    A proxy is skipped when its local port is closed, when the GUI's tunnel probe found it
+    unhealthy, or after FAIL_THRESHOLD relays in a row that got nothing back from upstream.
+    The last case matters with xray: it answers a SOCKS CONNECT with "success" at once even
+    when its server is down, so a dead server is only visible as a relay that stays silent.
     """
+
+    FAIL_THRESHOLD = 2
+    FAIL_COOLDOWN_S = 60.0
 
     def __init__(
         self,
@@ -120,6 +128,10 @@ class TelegramProxyDispatcher:
         self._running = False
         self._rotation_count: int = 0
         self._last_rotated_name: str = ""
+        # Health the GUI measured end to end (tunnel probe), per (host, port)
+        self._health: Dict[Tuple[str, int], bool] = {}
+        # Consecutive relays through a proxy that got nothing back: (count, last time)
+        self._failures: Dict[Tuple[str, int], Tuple[int, float]] = {}
 
     def is_running(self) -> bool:
         return self._running and is_endpoint_reachable(self.listen_host, self.listen_port, timeout=0.3)
@@ -136,6 +148,10 @@ class TelegramProxyDispatcher:
                 name = name_getter() if callable(name_getter) else cfg.get("name", "")
                 name = name or f"Proxy-{p}"
                 is_tp = item.is_telegram_proxy()
+                if is_tp and getattr(item, "running", None) is not None:
+                    # a running proxy whose tunnel probe has not passed yet is not counted as down
+                    healthy = bool(item.running) and getattr(item, "healthy", True) is not False
+                    self._health[(h, int(p))] = healthy if item.running else False
             elif isinstance(item, dict):
                 cfg = item
                 listen = cfg.get("listen", "127.0.0.1:1081")
@@ -169,45 +185,75 @@ class TelegramProxyDispatcher:
         with self._lock:
             return list(self._pool)
 
+    @staticmethod
+    def _key(proxy: Dict[str, Any]) -> Tuple[str, int]:
+        return (proxy["host"], int(proxy["port"]))
+
+    def set_health(self, host: str, port: int, healthy: bool) -> None:
+        """End-to-end health from the GUI (tunnel probe / process state)."""
+        with self._lock:
+            self._health[(host, int(port))] = bool(healthy)
+            if healthy:
+                self._failures.pop((host, int(port)), None)
+
+    def _usable(self, proxy: Dict[str, Any]) -> bool:
+        key = self._key(proxy)
+        if self._health.get(key) is False:
+            return False
+        count, when = self._failures.get(key, (0, 0.0))
+        return not (count >= self.FAIL_THRESHOLD and time.monotonic() - when < self.FAIL_COOLDOWN_S)
+
+    def _switch_to(self, idx: int, reason: str) -> Dict[str, Any]:
+        cand = self._pool[idx]
+        if idx != self._current_index:
+            self._current_index = idx
+            self._rotation_count += 1
+            self._last_rotated_name = cand.get("name", "")
+            logger.info("Telegram Proxy: %s -> '%s' (%s:%d)", reason, cand.get("name"), cand["host"], cand["port"])
+        return cand
+
     def get_active_proxy(self) -> Optional[Dict[str, Any]]:
-        """Получить текущий рабочий прокси с проверкой доступности и ротацией."""
+        """Текущий рабочий прокси; при сбое — ротация на следующий отмеченный TelegramProxy.
+
+        First choice: healthy (by the GUI and by recent relays) and reachable, starting from
+        the current one in pool order. If none is, any reachable one, so Telegram still gets
+        a chance through a proxy the probe may have misjudged."""
         with self._lock:
             if not self._pool:
                 return None
-
             total = len(self._pool)
-            start_idx = self._current_index
+            order = [(self._current_index + step) % total for step in range(total)]
+            reachable: Dict[int, bool] = {}
 
-            # 1. Проверяем текущий
-            curr = self._pool[start_idx]
-            if is_endpoint_reachable(curr["host"], curr["port"]):
-                return curr
+            def is_up(idx: int) -> bool:
+                if idx not in reachable:
+                    cand = self._pool[idx]
+                    reachable[idx] = is_endpoint_reachable(cand["host"], cand["port"])
+                return reachable[idx]
 
-            # 2. Текущий упал — запускаем ротацию по остальным в пуле
-            logger.warning(
-                "Telegram Proxy: текущий прокси '%s' (%s:%d) недоступен. Запуск ротации...",
-                curr.get("name"),
-                curr["host"],
-                curr["port"],
-            )
+            for idx in order:
+                if self._usable(self._pool[idx]) and is_up(idx):
+                    return self._switch_to(idx, "РОТАЦИЯ (текущий недоступен)")
+            for idx in order:
+                if is_up(idx):
+                    return self._switch_to(idx, "РОТАЦИЯ (нет здоровых, берём доступный)")
+            return self._pool[self._current_index]
 
-            for step in range(1, total):
-                cand_idx = (start_idx + step) % total
-                cand = self._pool[cand_idx]
-                if is_endpoint_reachable(cand["host"], cand["port"]):
-                    self._current_index = cand_idx
-                    self._rotation_count += 1
-                    self._last_rotated_name = cand.get("name", "")
-                    logger.info(
-                        "Telegram Proxy: РОТАЦИЯ УСПЕШНА -> переключено на '%s' (%s:%d)",
-                        cand.get("name"),
-                        cand["host"],
-                        cand["port"],
-                    )
-                    return cand
-
-            # Все упали, возвращаем текущий как fallback
-            return curr
+    def report_result(self, proxy: Optional[Dict[str, Any]], ok: bool) -> None:
+        """Outcome of one relay. After FAIL_THRESHOLD silent relays in a row the proxy
+        is skipped for FAIL_COOLDOWN_S and the dispatcher moves on to the next one."""
+        if not proxy:
+            return
+        key = self._key(proxy)
+        with self._lock:
+            if ok:
+                self._failures.pop(key, None)
+                return
+            count = self._failures.get(key, (0, 0.0))[0] + 1
+            self._failures[key] = (count, time.monotonic())
+            if count >= self.FAIL_THRESHOLD:
+                logger.warning("Telegram Proxy: '%s' %d раз(а) подряд без ответа от сервера — исключён на %ds",
+                               proxy.get("name"), count, int(self.FAIL_COOLDOWN_S))
 
     def rotate_to_next(self) -> Optional[Dict[str, Any]]:
         """Принудительно переключиться на следующий рабочий прокси."""
@@ -217,23 +263,40 @@ class TelegramProxyDispatcher:
             total = len(self._pool)
             if total <= 1:
                 return self._pool[0]
-
-            start_idx = self._current_index
-            for step in range(1, total + 1):
-                next_idx = (start_idx + step) % total
-                cand = self._pool[next_idx]
-                if is_endpoint_reachable(cand["host"], cand["port"]):
-                    self._current_index = next_idx
-                    self._rotation_count += 1
-                    self._last_rotated_name = cand.get("name", "")
-                    logger.info(
-                        "Telegram Proxy: ручная ротация -> переключено на '%s' (%s:%d)",
-                        cand.get("name"),
-                        cand["host"],
-                        cand["port"],
-                    )
-                    return cand
+            order = [(self._current_index + step) % total for step in range(1, total + 1)]
+            for usable_only in (True, False):
+                for idx in order:
+                    cand = self._pool[idx]
+                    if (not usable_only or self._usable(cand)) and is_endpoint_reachable(cand["host"], cand["port"]):
+                        return self._switch_to(idx, "ручная ротация")
             return self._pool[self._current_index]
+
+    async def _in_thread(self, fn, *args):
+        """Run a blocking pool operation (it connects to local ports) off the event loop."""
+        return await asyncio.get_running_loop().run_in_executor(None, fn, *args)
+
+    async def _open_upstream(self, dst_host: str, dst_port: int):
+        """Connect through the active proxy; on failure go through the rest of the pool.
+        Returns (proxy, reader, writer) or (None, None, None)."""
+        tried = set()
+        for _ in range(max(1, len(self.get_pool()))):
+            active = await self._in_thread(self.get_active_proxy)
+            if not active or self._key(active) in tried:
+                break
+            tried.add(self._key(active))
+            try:
+                up_reader, up_writer = await open_via_socks5(
+                    active["host"], active["port"], dst_host, dst_port,
+                    username=active.get("username", ""), password=active.get("password", ""),
+                    timeout=12.0,
+                )
+                return active, up_reader, up_writer
+            except Exception as e:
+                logger.warning("Сбой подключения через '%s': %s. Ротация...", active.get("name"), e)
+                self.report_result(active, False)
+                self.report_result(active, False)    # a refused CONNECT is a clear failure
+                await self._in_thread(self.rotate_to_next)
+        return None, None, None
 
     def start(self):
         """Запустить сервер диспетчера в фоновом потоке."""
@@ -309,12 +372,19 @@ class TelegramProxyDispatcher:
             finally:
                 self._running = False
 
+        loop = self._loop
         try:
-            self._loop.run_until_complete(_main())
+            loop.run_until_complete(_main())
         except Exception:
             pass
         finally:
             self._running = False
+            # every port change restarts the listener: without this each restart left
+            # an unclosed event loop behind
+            try:
+                loop.close()
+            except Exception:
+                pass
 
     async def _handle_client(
         self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter
@@ -381,61 +451,22 @@ class TelegramProxyDispatcher:
         port_bytes = await client_reader.readexactly(2)
         dst_port = struct.unpack(">H", port_bytes)[0]
 
-        # 3. Получаем активный прокси из пула ротации
-        active = self.get_active_proxy()
+        # 3. Подключаемся через активный прокси пула (с ротацией по всему пулу)
+        active, up_reader, up_writer = await self._open_upstream(dst_host, dst_port)
         if not active:
-            client_writer.write(b"\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00")
+            client_writer.write(b"\x05\x04\x00\x01\x00\x00\x00\x00\x00\x00")
             await client_writer.drain()
             client_writer.close()
             return
-
-        # 4. Соединяемся через апстрим SOCKS5
-        try:
-            up_reader, up_writer = await open_via_socks5(
-                active["host"],
-                active["port"],
-                dst_host,
-                dst_port,
-                username=active.get("username", ""),
-                password=active.get("password", ""),
-                timeout=12.0,
-            )
-        except Exception as e:
-            logger.warning(
-                "Сбой подключения через '%s': %s. Ротация...",
-                active.get("name"),
-                e,
-            )
-            # Пробуем ротацию на запасной
-            active_next = self.rotate_to_next()
-            if active_next and active_next != active:
-                try:
-                    up_reader, up_writer = await open_via_socks5(
-                        active_next["host"],
-                        active_next["port"],
-                        dst_host,
-                        dst_port,
-                        username=active_next.get("username", ""),
-                        password=active_next.get("password", ""),
-                        timeout=12.0,
-                    )
-                except Exception:
-                    client_writer.write(b"\x05\x04\x00\x01\x00\x00\x00\x00\x00\x00")
-                    await client_writer.drain()
-                    client_writer.close()
-                    return
-            else:
-                client_writer.write(b"\x05\x04\x00\x01\x00\x00\x00\x00\x00\x00")
-                await client_writer.drain()
-                client_writer.close()
-                return
 
         # Отправляем подтверждение успеха клиенту
         client_writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
         await client_writer.drain()
 
-        # Двунаправленный обмен
-        await self._pipe_streams(client_reader, client_writer, up_reader, up_writer)
+        # Двунаправленный обмен; молчащий апстрим = мёртвый сервер за живым локальным портом
+        sent, received = await self._pipe_streams(client_reader, client_writer, up_reader, up_writer)
+        if sent:
+            self.report_result(active, received > 0)
 
     async def _handle_mtproto(
         self,
@@ -483,41 +514,11 @@ class TelegramProxyDispatcher:
             dc_id = 2
         dc_host, dc_port = TELEGRAM_DCS[dc_id]
 
-        active = self.get_active_proxy()
+        # 2. Подключение к датацентру через рабочий upstream SOCKS5 (с ротацией по всему пулу)
+        active, up_reader, up_writer = await self._open_upstream(dc_host, dc_port)
         if not active:
             client_writer.close()
             return
-
-        # 2. Подключение к датацентру через рабочий upstream SOCKS5
-        try:
-            up_reader, up_writer = await open_via_socks5(
-                active["host"],
-                active["port"],
-                dc_host,
-                dc_port,
-                username=active.get("username", ""),
-                password=active.get("password", ""),
-                timeout=12.0,
-            )
-        except Exception:
-            active_next = self.rotate_to_next()
-            if active_next and active_next != active:
-                try:
-                    up_reader, up_writer = await open_via_socks5(
-                        active_next["host"],
-                        active_next["port"],
-                        dc_host,
-                        dc_port,
-                        username=active_next.get("username", ""),
-                        password=active_next.get("password", ""),
-                        timeout=12.0,
-                    )
-                except Exception:
-                    client_writer.close()
-                    return
-            else:
-                client_writer.close()
-                return
 
         # 3. Формируем легитимный заголовок MTProto для датацентра Telegram (БЕЗ секрета!)
         dc_header = bytearray(os.urandom(64))
@@ -540,10 +541,12 @@ class TelegramProxyDispatcher:
         await up_writer.drain()
 
         # 4. Двунаправленный обмен с непрерывной перешифровкой (re-encryption):
-        await self._pipe_encrypted_streams(
+        _sent, received = await self._pipe_encrypted_streams(
             client_reader, client_writer, client_dec, client_enc,
             up_reader, up_writer, dc_dec, dc_enc
         )
+        # the DC header was sent, so a working path always brings something back
+        self.report_result(active, received > 0)
 
     async def _pipe_encrypted_streams(
         self,
@@ -556,13 +559,17 @@ class TelegramProxyDispatcher:
         dc_dec: Any,
         dc_enc: Any,
     ):
-        """Двунаправленная перекачка с AES-CTR перешифровкой между клиентом и датацентром."""
+        """Двунаправленная перекачка с AES-CTR перешифровкой между клиентом и датацентром.
+        Returns (bytes sent to the DC, bytes received from it)."""
+        counts = [0, 0]
+
         async def _client_to_dc():
             try:
                 while True:
                     data = await client_r.read(32768)
                     if not data:
                         break
+                    counts[0] += len(data)
                     plain = client_dec.update(data)
                     for_dc = dc_enc.update(plain)
                     dc_w.write(for_dc)
@@ -581,6 +588,7 @@ class TelegramProxyDispatcher:
                     data = await dc_r.read(32768)
                     if not data:
                         break
+                    counts[1] += len(data)
                     plain = dc_dec.update(data)
                     for_client = client_enc.update(plain)
                     client_w.write(for_client)
@@ -596,6 +604,7 @@ class TelegramProxyDispatcher:
         t1 = asyncio.create_task(_client_to_dc())
         t2 = asyncio.create_task(_dc_to_client())
         await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
+        return counts[0], counts[1]
 
     async def _pipe_streams(
         self,
@@ -604,14 +613,17 @@ class TelegramProxyDispatcher:
         r2: asyncio.StreamReader,
         w2: asyncio.StreamWriter,
     ):
-        """Двунаправленная перекачка байт между клиентом и апстримом."""
+        """Двунаправленная перекачка байт между клиентом и апстримом.
+        Returns (bytes sent upstream, bytes received from upstream)."""
+        counts = [0, 0]
 
-        async def _forward(src, dst):
+        async def _forward(src, dst, slot):
             try:
                 while True:
                     data = await src.read(32768)
                     if not data:
                         break
+                    counts[slot] += len(data)
                     dst.write(data)
                     await dst.drain()
             except Exception:
@@ -622,9 +634,10 @@ class TelegramProxyDispatcher:
                 except Exception:
                     pass
 
-        t1 = asyncio.create_task(_forward(r1, w2))
-        t2 = asyncio.create_task(_forward(r2, w1))
+        t1 = asyncio.create_task(_forward(r1, w2, 0))
+        t2 = asyncio.create_task(_forward(r2, w1, 1))
         await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
+        return counts[0], counts[1]
 
 
 # ── Глобальный экземпляр диспетчера ─────────────────────────────────

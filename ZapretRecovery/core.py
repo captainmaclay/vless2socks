@@ -25,7 +25,7 @@ PRESETS_DIR = os.path.join(ZAPRET_DIR, "presets", "winws2_builtin")
 CONFIG_TMP_DIR = os.path.join(USER_DIR, "tmp", "winws2_at_config")
 
 DEFAULT_PRESET = "Default v1 (game filter).txt"
-DEFAULT_TG_PORT = 1373
+DEFAULT_TG_PORT = 9910
 DEFAULT_TG_HOST = "127.0.0.1"
 
 
@@ -138,7 +138,7 @@ def is_tg_proxy_running(host: str = DEFAULT_TG_HOST, port: int = DEFAULT_TG_PORT
     if not proxies:
         return False
 
-    # 1. Проверяем, слушает ли виртуальный порт TelegramProxy диспетчера (1373)
+    # 1. Проверяем, слушает ли виртуальный порт TelegramProxy диспетчера (9910 по умолчанию)
     if not is_endpoint_reachable(host, actual_port):
         return False
 
@@ -320,6 +320,14 @@ def detect_tg_proxy_relay_error(*args, **kwargs) -> Tuple[bool, str]:
     return False, ""
 
 
+def _current_tg_port() -> int:
+    try:
+        from vless2socks import telegram_proxy
+        return telegram_proxy.get_current_tg_port()
+    except Exception:
+        return DEFAULT_TG_PORT
+
+
 def get_system_status() -> Dict[str, Any]:
     """Получить общий статус компонентов (Main winws2 и внутренний TG Proxy)."""
     has_relay_err, relay_err_msg = detect_tg_proxy_relay_error()
@@ -327,7 +335,7 @@ def get_system_status() -> Dict[str, Any]:
         "winws2_running": is_winws2_running(),
         "winws2_pids": get_process_pids("winws2.exe"),
         "tg_proxy_running": is_tg_proxy_running(),
-        "tg_port": DEFAULT_TG_PORT,
+        "tg_port": _current_tg_port(),
         "relay_error": has_relay_err,
         "relay_error_msg": relay_err_msg,
     }

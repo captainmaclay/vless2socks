@@ -182,11 +182,31 @@ def set_restart_services_flags(
     save_settings(cfg)
 
 
-DEFAULT_TELEGRAM_PROXY_PORT = 1373
+DEFAULT_TELEGRAM_PROXY_PORT = 9910
+#: The default before 9910; a saved value equal to it is moved to the new default once
+LEGACY_TELEGRAM_PROXY_PORT = 1373
+
+
+def migrate_legacy_telegram_port() -> bool:
+    """One-time move of a saved 1373 (the old default) to 9910. A port the user chose
+    explicitly, anything other than 1373, is kept. Returns True if it changed the setting."""
+    if get_setting("telegram_proxy_port_migrated", False):
+        return False
+    cfg = load_settings()
+    changed = False
+    try:
+        if int(cfg.get("telegram_proxy_port", DEFAULT_TELEGRAM_PROXY_PORT)) == LEGACY_TELEGRAM_PROXY_PORT:
+            cfg["telegram_proxy_port"] = DEFAULT_TELEGRAM_PROXY_PORT
+            changed = True
+    except (TypeError, ValueError):
+        pass
+    cfg["telegram_proxy_port_migrated"] = True
+    save_settings(cfg)
+    return changed
 
 
 def get_telegram_proxy_port() -> int:
-    """Return user-configured TelegramProxy virtual socket port (default 1373)."""
+    """Return user-configured TelegramProxy virtual socket port (default 9910)."""
     val = get_setting("telegram_proxy_port", DEFAULT_TELEGRAM_PROXY_PORT)
     try:
         p = int(val)

@@ -110,12 +110,23 @@ class TestTelegramProxyFlagAndBackup(unittest.TestCase):
 
 
 class TestTelegramProxyUrlGenerator(unittest.TestCase):
+    # A temporary settings.json: these tests read and change the Telegram port
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="vless_tg_url_")
+        self._orig_settings = settings_manager.SETTINGS_FILE
+        settings_manager.SETTINGS_FILE = Path(self._tmp) / "settings.json"
+
+    def tearDown(self):
+        settings_manager.SETTINGS_FILE = self._orig_settings
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
 
     def test_build_tg_proxy_url_format(self):
-        """Создание корректной ссылки формата tg://proxy?server=...&port=1373&secret=..."""
-        # По умолчанию без явного указания порта должен быть 1373
+        """Создание корректной ссылки формата tg://proxy?server=...&port=9910&secret=..."""
+        # По умолчанию без явного указания порта должен быть 9910
         url_default = build_tg_proxy_url("127.0.0.1")
-        self.assertIn("&port=1373&", url_default)
+        self.assertIn("&port=9910&", url_default)
 
         # С кастомным портом
         url_custom = build_tg_proxy_url("127.0.0.1", 1373, "dd648b061090960667e2620c7949495503")
@@ -123,9 +134,9 @@ class TestTelegramProxyUrlGenerator(unittest.TestCase):
         self.assertEqual(url_custom, expected)
 
     def test_build_tg_socks_url_format(self):
-        """Создание корректной ссылки формата tg://socks?server=...&port=1373"""
+        """Создание корректной ссылки формата tg://socks?server=...&port=9910"""
         url_default = build_tg_socks_url("127.0.0.1")
-        self.assertEqual(url_default, "tg://socks?server=127.0.0.1&port=1373")
+        self.assertEqual(url_default, "tg://socks?server=127.0.0.1&port=9910")
 
         url_custom = build_tg_socks_url("127.0.0.1", 1373)
         self.assertEqual(url_custom, "tg://socks?server=127.0.0.1&port=1373")
@@ -252,15 +263,15 @@ class TestTelegramProxyUIIntegration(unittest.TestCase):
             # Создаем UI таба настроек
             row.build_tab_ui(root)
 
-            # Проверяем наличие кнопки Copy TG_socks в настройках выбранного прокси
-            self.assertIsNotNone(row.btn_copy_tg)
-            self.assertTrue(row.btn_copy_tg.winfo_exists())
-            self.assertIn("Copy TG_socks", row.btn_copy_tg.cget("text"))
-
-            # Проверяем работу копирования
-            with patch.object(app, "_copy_tg_proxy_link") as mock_copy:
-                row.btn_copy_tg.invoke()
-                mock_copy.assert_called_once_with(row)
+            # Per-proxy "Copy TG_socks" buttons are gone: every one copied the same link to the
+            # shared Telegram port, which now has a single button on the Overview / in Options
+            self.assertFalse(hasattr(row, "btn_copy_tg"))
+            def walk(w):
+                yield w
+                for c in w.winfo_children():
+                    yield from walk(c)
+            texts = [w.cget("text") for w in walk(row.frame) if isinstance(w, tk.Button)]
+            self.assertFalse(any("Copy TG_socks" in s for s in texts))
 
         finally:
             root.destroy()

@@ -141,6 +141,7 @@ _BORROWED = [
     "clear_proxy_selection", "toggle_group_selection", "_sync_selection_ui", "selected_proxies",
     "add_selected_to_group", "_open_bulk_group_menu", "add_selected_to_new_group", "suggest_group_name",
     "_flash_selection_info", "_flush_card_updates",
+    "_copy_tg_proxy_link", "_open_card_context_menu", "_report_telegram_health",
     "_rebuild_group_tabs", "open_group_tabs", "close_group_tab", "open_group_tab_picker",
 ]
 

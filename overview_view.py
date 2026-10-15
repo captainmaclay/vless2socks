@@ -16,6 +16,11 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Hashable, Optional
 
 
+#: Selection checkboxes: a saturated blue (the palette's blue is a pale pastel)
+CHECK_BLUE = "#1e66f5"
+CHECKED_TAG = "chk_on"
+
+
 @dataclass
 class Button:
     label: str
@@ -99,7 +104,8 @@ class OverviewView:
         self._layout_metrics()
         self._button_bg: dict[str, str] = {}      # button tag -> normal fill
         self._owner_buttons: dict[str, list[str]] = {}   # card/header tag -> its button tags
-        self._slot_live: dict[str, dict[str, Any]] = {}   # card tag -> model + item ids for in-place status
+        self._slot_live: dict[str, dict[str, Any]] = {}
+        self._card_owner: dict[str, Hashable] = {}             # card tag -> its key   # card tag -> model + item ids for in-place status
         self._hovered: Optional[str] = None
         self._measure_cache: dict[tuple[int, str], int] = {}
         self._fit_cache: dict[tuple[int, str, int], str] = {}
@@ -108,6 +114,9 @@ class OverviewView:
         # cost thousands of tag_bind calls per redraw
         canvas.bind("<Button-1>", self._on_click, add="+")
         canvas.bind("<Motion>", self._on_motion, add="+")
+        # Right click on a card: the app shows its menu for that card's key
+        self.on_card_context: Optional[Callable[[Hashable, int, int], Any]] = None
+        canvas.bind("<Button-3>", self._on_context, add="+")
         canvas.bind("<Leave>", lambda _e: self._set_hover(None), add="+")
 
     # ── public ──────────────────────────────────────────────
@@ -129,6 +138,7 @@ class OverviewView:
         self._button_bg.clear()
         self._owner_buttons.clear()
         self._slot_live.clear()
+        self._card_owner.clear()
         self._hovered = None
         self.card_slots = {}
         self.header_slots = {}
@@ -140,6 +150,7 @@ class OverviewView:
                 tag = self._new_tag("card")
                 self._draw_card(row, y, width, tag)
                 self.card_slots.setdefault(row.key, []).append((y, tag))
+                self._card_owner[tag] = row.key
                 y += self.CARD_H + self.CARD_GAP
             elif isinstance(row, HeaderModel):
                 y += self.FIRST_HEADER_GAP if row.first else self.HEADER_GAP
@@ -251,8 +262,7 @@ class OverviewView:
             boxes = [b for b in self.buttons("check", key) if self.canvas.find_withtag(b)
                      and tag in self.canvas.gettags(self.canvas.find_withtag(b)[0])]
             for b in boxes:
-                out.append(any(self.canvas.type(i) == "text" and self.canvas.itemcget(i, "text") == "✓"
-                               for i in self.canvas.find_withtag(b)))
+                out.append(any(CHECKED_TAG in self.canvas.gettags(i) for i in self.canvas.find_withtag(b)))
         return out
 
     def invoke(self, tag: str) -> None:
@@ -398,6 +408,22 @@ class OverviewView:
         if tag is not None:
             self.invoke(tag)
 
+    def card_key_at(self, x: float, y: float) -> Optional[Hashable]:
+        """Key of the card drawn at canvas coordinates (x, y), if any."""
+        for item in reversed(self.canvas.find_overlapping(x, y, x, y)):
+            for tg in self.canvas.gettags(item):
+                key = self._card_owner.get(tg)
+                if key is not None:
+                    return key
+        return None
+
+    def _on_context(self, event) -> None:
+        if self.on_card_context is None:
+            return
+        key = self.card_key_at(self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
+        if key is not None:
+            self.on_card_context(key, event.x_root, event.y_root)
+
     def _on_motion(self, event) -> None:
         self._set_hover(self._button_tag_at(event))
 
@@ -414,7 +440,8 @@ class OverviewView:
         if tag:
             bg = self._button_bg.get(tag, "")
             plain = (self.C.get("overlay"), self.C.get("card"), self.C.get("bg"), self.C.get("surface"))
-            if bg in plain:
+            is_checkbox = self._button_index.get(tag, ("", None))[0] == "check"
+            if bg in plain and not is_checkbox:          # checkboxes keep their color under the mouse
                 for item in cv.find_withtag(tag):
                     if cv.type(item) == "rectangle":
                         cv.itemconfig(item, fill=self.C.get("hover", bg))
@@ -436,14 +463,23 @@ class OverviewView:
 
         if m.checked is not None:
             box = self._new_tag("btn")
-            half = px(7)
-            cv.create_rectangle(x, mid - half, x + 2 * half, mid + half, fill=C["surface"], outline=C["blue"], tags=(tag, box))
+            half = px(8)
+            side = 2 * half
+            # Checked: a solid saturated-blue box with a white tick drawn as a line (a font
+            # glyph rendered thin and pale); unchecked: dark box with the same blue border
+            fill = CHECK_BLUE if m.checked else C["surface"]
+            cv.create_rectangle(x, mid - half, x + side, mid + half, fill=fill, outline=CHECK_BLUE,
+                                width=max(1, px(1.5)), tags=(tag, box))
             if m.checked:
-                cv.create_text(x + half, mid, text="✓", font=self.f_small_b, fill=C["blue"], tags=(tag, box))
+                tick = [(x + side * 0.22, mid + side * 0.02), (x + side * 0.42, mid + side * 0.22),
+                        (x + side * 0.78, mid - side * 0.20)]
+                cv.create_line(*[c for pt in tick for c in pt], fill="#ffffff", width=max(2, px(2.2)),
+                               capstyle=tk.ROUND, joinstyle=tk.ROUND, tags=(tag, box, CHECKED_TAG))
             on_check = m.on_check
+            # registered with its own fill: hovering never darkens the box
             self._register(box, Button("☐", (lambda v=not m.checked: on_check(v)) if on_check else None,
-                                       bg=C["surface"], name="check"), m.key, C["surface"], tag)
-            x += 2 * half + px(8)
+                                       bg=fill, name="check"), m.key, fill, tag)
+            x += side + px(8)
 
         dot_item = cv.create_text(x, mid, text="●", font=self.f_dot, fill=m.dot, anchor="w", tags=(tag,))
         x += self._w(self.f_dot, "●") + px(4)

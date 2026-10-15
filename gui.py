@@ -403,6 +403,9 @@ def submit_lifecycle(fn, *args):
 #: After the last proxy of a start wave was launched, background tab building waits
 #: this long: geo lookups and killswitch checks of the new proxies are still arriving
 TAB_BUILD_QUIET_MS = 8000
+#: Telegram port field: applied this long after typing stops (or on Enter / leaving the field)
+TG_PORT_APPLY_DELAY_MS = 800
+TG_PORT_MIN = 1024
 #: Upper bound for the exit; the window is already hidden while proxies are killed
 EXIT_TIMEOUT_S = 8.0
 #: Proxy health checks run in parallel during one status sweep
@@ -765,6 +768,35 @@ def _restart_wsl_unlocked() -> tuple[bool, str]:
 
 
 # ── Tray Icon ──────────────────────────────────────────────────
+def make_telegram_icon(size: int) -> Optional["Image.Image"]:
+    """Telegram logo (white paper plane on a blue circle), drawn at 4x and scaled down
+    for smooth edges. None when Pillow is missing."""
+    if not HAS_TRAY:
+        return None
+    big = size * 4
+    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse((0, 0, big - 1, big - 1), fill=(42, 171, 238, 255))
+    s = big / 100.0
+    plane = [(22, 49), (76, 27), (67, 73), (51, 61), (43, 70), (41, 58), (64, 36), (37, 55)]
+    draw.polygon([(x * s, y * s) for x, y in plane], fill=(255, 255, 255, 255))
+    fold = [(41, 58), (43, 70), (47, 60)]
+    draw.polygon([(x * s, y * s) for x, y in fold], fill=(200, 218, 234, 255))
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def telegram_photo(widget: tk.Misc, size: int):
+    """Tk image of the Telegram logo (kept alive by the caller), or None."""
+    img = make_telegram_icon(size)
+    if img is None:
+        return None
+    try:
+        from PIL import ImageTk
+        return ImageTk.PhotoImage(img, master=widget)
+    except Exception:
+        return None
+
+
 @functools.lru_cache(maxsize=8)
 def make_tray_icon(color: str = "green") -> "Image.Image":
     """Create system tray icon image (cached: it is asked for on every status change)."""
@@ -1449,14 +1481,6 @@ class ProxyInstance:
         )
         tp_chk.pack(side=tk.LEFT, padx=(0, 12))
 
-        self.btn_copy_tg = tk.Button(
-            flags_frame, text=f"📋 {t('btn_copy_tg_socks')}", font=("Segoe UI", 8, "bold"),
-            bg=C["overlay"], fg=C["green"], activebackground=C["hover"], activeforeground=C["green"],
-            relief=tk.FLAT, padx=8, pady=2, cursor="hand2",
-            command=lambda: self.app._copy_tg_proxy_link(self),
-        )
-        self.btn_copy_tg.pack(side=tk.LEFT, padx=(4, 0))
-
         # 3.7. Group membership
         group_frame = tk.Frame(self.frame, bg=bg)
         group_frame.pack(fill=tk.X, padx=px, pady=(2, 4))
@@ -1699,8 +1723,16 @@ class ProxyInstance:
         if self.socks_summary_lbl:
             self.socks_summary_lbl.config(text=self._format_socks_summary())
 
+    def set_killswitch(self, val: bool) -> None:
+        """Turn the killswitch on/off from anywhere (Overview menu, Proxies tab checkbox)."""
+        if self.killswitch_var is not None:
+            self.killswitch_var.set(bool(val))
+        self._apply_killswitch(bool(val))
+
     def _on_killswitch_toggled(self):
-        val = bool(self.killswitch_var.get() if self.killswitch_var else False)
+        self._apply_killswitch(bool(self.killswitch_var.get() if self.killswitch_var else False))
+
+    def _apply_killswitch(self, val: bool) -> None:
         self.cfg["killswitch"] = val
         if self.ks_badge:
             self.ks_badge.config(
@@ -4298,6 +4330,12 @@ class VlessApp(tk.Tk):
     def __init__(self):
         super().__init__()
 
+        # Telegram port: the old default 1373 becomes 9910 (once; a custom port is kept)
+        try:
+            settings_manager.migrate_legacy_telegram_port()
+        except Exception:
+            pass
+
         # Worker threads never touch Tk directly: their after() calls land in this queue
         self._ui_queue: queue.SimpleQueue = queue.SimpleQueue()
         self._drain_ui_queue()
@@ -4636,6 +4674,18 @@ class VlessApp(tk.Tk):
         self.select_mode_btn.pack(side=tk.RIGHT, padx=(0, 6))
         self._style_select_mode_button()
 
+        # One Telegram button: copies the link to the shared Telegram port (dispatcher)
+        size = max(16, int(round(22 * float(self.winfo_fpixels("1i")) / 96.0)))
+        self._tg_icon_main = telegram_photo(self, size)
+        tg_btn = tk.Button(
+            actions_bar, image=self._tg_icon_main, text="" if self._tg_icon_main else "✈",
+            font=("Segoe UI", 10, "bold"), bg=C["overlay"], fg=C["blue"],
+            activebackground=C["hover"], relief=tk.FLAT, padx=10, pady=5, cursor="hand2",
+            command=self._copy_tg_proxy_link,
+        )
+        tg_btn.pack(side=tk.RIGHT, padx=(0, 6), fill=tk.Y)
+        self.tg_link_button = tg_btn
+
         tk.Button(
             actions_bar, text=t("btn_add_subscription"), font=("Segoe UI", 9, "bold"),
             bg=C["green"], fg="#1e1e2e", activebackground=C["teal"],
@@ -4671,6 +4721,7 @@ class VlessApp(tk.Tk):
         self.overview_scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=self.overview_canvas.yview)
         self.overview_canvas.configure(yscrollcommand=self.overview_scrollbar.set)
         self.overview_view = OverviewView(self.overview_canvas, C)
+        self.overview_view.on_card_context = self._open_card_context_menu
 
         # Smooth mousewheel handling
         def _on_overview_mousewheel(event):
@@ -4850,9 +4901,6 @@ class VlessApp(tk.Tk):
             toggle = OverviewButton(t("btn_on"), inst.toggle_async, bg=C["green"], fg="#1e1e2e", bold=True,
                                     name="toggle", width_labels=widths)
         buttons = [toggle]
-        if inst.is_telegram_proxy():
-            buttons.append(OverviewButton(f"📋 {t('btn_copy_tg_socks')}", lambda i=inst: self._copy_tg_proxy_link(i),
-                                          fg=C["green"], bold=True, name="copy_tg"))
         buttons += [
             OverviewButton("📁", lambda i=inst: self._open_group_menu(i, None), name="groups"),
             OverviewButton("🔍", inst.check_geo_now, name="geo"),
@@ -5157,6 +5205,100 @@ class VlessApp(tk.Tk):
         if group is not None:
             self.add_selected_to_group(group["id"])
         return group
+
+    def _open_card_context_menu(self, inst: ProxyInstance, x_root: int, y_root: int):
+        """Right click on a proxy card: per-proxy switches."""
+        if inst not in self.instances:
+            return
+        menu = tk.Menu(
+            self, tearoff=0, bg=C["surface"], fg=C["text"],
+            activebackground=C["hover"], activeforeground=C["blue"], font=("Segoe UI", 9),
+            selectcolor=C["blue"],
+        )
+        ks_var = tk.BooleanVar(value=bool(inst.cfg.get("killswitch", False)))
+        tg_var = tk.BooleanVar(value=inst.is_telegram_proxy())
+        menu._vars = (ks_var, tg_var)  # keep them alive while the menu is open
+        menu.add_command(label=inst.get_display_name(), state=tk.DISABLED)
+        menu.add_separator()
+        menu.add_checkbutton(label=f"🛡️ {t('ctx_killswitch')}", variable=ks_var,
+                             command=lambda: inst.set_killswitch(bool(ks_var.get())))
+        menu.add_checkbutton(label=f"✈️ {t('ctx_telegram_proxy')}", variable=tg_var,
+                             command=lambda: inst.set_telegram_proxy(bool(tg_var.get())))
+        self._card_context_menu = menu
+        try:
+            menu.tk_popup(x_root, y_root)
+        finally:
+            menu.grab_release()
+
+    def apply_telegram_port(self, raw) -> bool:
+        """Validate and apply the Telegram port right away: save it and move the running
+        dispatcher to it in the background (a restart of its listener takes a moment)."""
+        status = getattr(self, "tg_port_status", None)
+
+        def show(text: str, color: str):
+            try:
+                if status is not None and status.winfo_exists():
+                    status.config(text=text, fg=C[color])
+            except Exception:
+                pass
+
+        try:
+            port = int(str(raw).strip())
+        except (TypeError, ValueError):
+            show(t("tg_port_invalid", min=TG_PORT_MIN, max=65535), "red")
+            return False
+        if not TG_PORT_MIN <= port <= 65535:
+            show(t("tg_port_invalid", min=TG_PORT_MIN, max=65535), "red")
+            return False
+
+        from vless2socks import telegram_proxy
+        disp = telegram_proxy.get_tg_dispatcher()
+        current = settings_manager.get_telegram_proxy_port()
+        if port == current and disp.listen_port == port:
+            show(t("tg_port_applied", port=port), "green")
+            return True
+        if port != disp.listen_port and not is_port_free(port):
+            show(t("tg_port_busy", port=port), "red")
+            return False
+
+        settings_manager.set_telegram_proxy_port(port)
+        show(t("tg_port_applying", port=port), "yellow")
+
+        def move():
+            ok = True
+            try:
+                disp.set_listen_port(port)       # restarts the listener if it was running
+                if disp._running:
+                    ok = disp.is_running()
+            except Exception:
+                ok = False
+            self.after(0, lambda: show(t("tg_port_applied" if ok else "tg_port_failed", port=port),
+                                       "green" if ok else "red"))
+            if hasattr(self, "zapret_watcher") and self.zapret_watcher:
+                try:
+                    self.zapret_watcher.trigger_immediate_check()
+                except Exception:
+                    pass
+
+        submit_background(move)
+        return True
+
+    def _report_telegram_health(self):
+        """Tell the Telegram dispatcher which Telegram proxies passed their tunnel probe,
+        so it rotates away from a proxy whose server is down even if its port is open."""
+        try:
+            from vless2socks import telegram_proxy
+            disp = telegram_proxy.get_tg_dispatcher()
+        except Exception:
+            return
+        for inst in self.instances:
+            if not inst.is_telegram_proxy():
+                continue
+            try:
+                host, port = inst.get_listen()
+                disp.set_health(host or "127.0.0.1", int(port), bool(inst.running and inst.healthy))
+            except Exception:
+                pass
 
     def _open_group_menu(self, inst: ProxyInstance, anchor: tk.Widget):
         """Popup on a card's 📁 button: tick the groups this proxy belongs to (several allowed)."""
@@ -5871,30 +6013,31 @@ class VlessApp(tk.Tk):
         self.tg_port_entry.insert(0, str(curr_tg_port))
         attach_clipboard_and_context_menu(self.tg_port_entry)
 
-        def _on_tg_port_change(event=None):
-            val = self.tg_port_entry.get().strip()
-            if val.isdigit() and 1 <= int(val) <= 65535:
-                p = int(val)
-                settings_manager.set_telegram_proxy_port(p)
+        def _apply_typed_port(event=None):
+            self._tg_port_job = None
+            self.apply_telegram_port(self.tg_port_entry.get())
+
+        def _on_tg_port_typing(event=None):
+            # applied when typing pauses, not on every key: "9910" must not go through 9, 99, 991
+            if event is not None and event.keysym in ("Return", "KP_Enter", "Tab"):
+                return
+            job = getattr(self, "_tg_port_job", None)
+            if job:
                 try:
-                    from vless2socks import telegram_proxy
-                    disp = telegram_proxy.get_tg_dispatcher()
-                    disp.set_listen_port(p)
+                    self.after_cancel(job)
                 except Exception:
                     pass
+            self._tg_port_job = self.after(TG_PORT_APPLY_DELAY_MS, _apply_typed_port)
 
-        self.tg_port_entry.bind("<KeyRelease>", _on_tg_port_change)
+        self.tg_port_entry.bind("<KeyRelease>", _on_tg_port_typing)
+        self.tg_port_entry.bind("<Return>", _apply_typed_port)
+        self.tg_port_entry.bind("<KP_Enter>", _apply_typed_port)
+        self.tg_port_entry.bind("<FocusOut>", _apply_typed_port)
 
         def _reset_tg_port():
             self.tg_port_entry.delete(0, tk.END)
             self.tg_port_entry.insert(0, str(settings_manager.DEFAULT_TELEGRAM_PROXY_PORT))
-            settings_manager.set_telegram_proxy_port(settings_manager.DEFAULT_TELEGRAM_PROXY_PORT)
-            try:
-                from vless2socks import telegram_proxy
-                disp = telegram_proxy.get_tg_dispatcher()
-                disp.set_listen_port(settings_manager.DEFAULT_TELEGRAM_PROXY_PORT)
-            except Exception:
-                pass
+            self.apply_telegram_port(settings_manager.DEFAULT_TELEGRAM_PROXY_PORT)
 
         reset_tg_btn = tk.Button(
             tg_port_row, text=t("btn_reset_tg_port"), font=("Segoe UI", 8, "bold"),
@@ -5902,6 +6045,21 @@ class VlessApp(tk.Tk):
             padx=8, pady=2, command=_reset_tg_port,
         )
         reset_tg_btn.pack(side=tk.LEFT)
+
+        self.tg_port_status = tk.Label(tg_port_row, text="", font=("Segoe UI", 8, "bold"), fg=C["green"], bg=C["card"])
+        self.tg_port_status.pack(side=tk.LEFT, padx=(10, 0))
+
+        tg_link_row = tk.Frame(card5, bg=C["card"])
+        tg_link_row.pack(fill=tk.X, padx=36, pady=(0, 10))
+        size = max(16, int(round(16 * float(self.winfo_fpixels("1i")) / 96.0)))
+        self._tg_icon_options = telegram_photo(self, size)
+        self.tg_link_options_button = tk.Button(
+            tg_link_row, image=self._tg_icon_options, compound=tk.LEFT,
+            text=f"  {t('btn_copy_tg_link_options')}" if self._tg_icon_options else f"✈  {t('btn_copy_tg_link_options')}",
+            font=("Segoe UI", 9, "bold"), bg=C["blue"], fg="#1e1e2e", activebackground=C["teal"],
+            relief=tk.FLAT, padx=10, pady=3, cursor="hand2", command=self._copy_tg_proxy_link,
+        )
+        self.tg_link_options_button.pack(side=tk.LEFT)
 
         # Footer note
         tk.Label(
@@ -6420,6 +6578,21 @@ class VlessApp(tk.Tk):
                 self.auto_reconnect_var.set(settings_manager.get_setting("auto_reconnect", True))
             if hasattr(self, "start_port_var"):
                 self.start_port_var.set(str(subscriptions.get_start_port()))
+            # The restored Telegram port is what the user had: never "migrate" it later,
+            # and move the running dispatcher to it now
+            settings_manager.set_setting("telegram_proxy_port_migrated", True)
+            restored_tg_port = settings_manager.get_telegram_proxy_port()
+            if hasattr(self, "tg_port_entry"):
+                try:
+                    self.tg_port_entry.delete(0, tk.END)
+                    self.tg_port_entry.insert(0, str(restored_tg_port))
+                except Exception:
+                    pass
+            self.apply_telegram_port(restored_tg_port)
+            # ...and its language
+            restored_lang = settings_manager.get_setting("language", get_current_language())
+            if restored_lang != get_current_language():
+                self.after_idle(lambda lang=restored_lang: self._apply_language(lang))
             self.refresh_current_page_tabs()
             self.on_groups_changed()  # restored settings.json brings its own groups
             self._update_header_stats()
@@ -6778,10 +6951,14 @@ class VlessApp(tk.Tk):
 
         self.lang_var = tk.StringVar(value=get_current_language())
 
+        # Picking a language applies it at once (after this click is handled: the
+        # rebuild replaces these very radio buttons)
+        on_pick = lambda: self.after_idle(self._apply_language)
         r_en = tk.Radiobutton(
             opt_frame, text=t("lang_en"), variable=self.lang_var, value="en",
             font=("Segoe UI", 10, "bold"), fg=C["text"], bg=C["card"], selectcolor=C["overlay"],
             activebackground=C["card"], activeforeground=C["blue"], padx=14, pady=10,
+            command=on_pick,
         )
         r_en.pack(anchor="w")
 
@@ -6789,51 +6966,35 @@ class VlessApp(tk.Tk):
             opt_frame, text=t("lang_ru"), variable=self.lang_var, value="ru",
             font=("Segoe UI", 10, "bold"), fg=C["text"], bg=C["card"], selectcolor=C["overlay"],
             activebackground=C["card"], activeforeground=C["blue"], padx=14, pady=10,
+            command=on_pick,
         )
         r_ru.pack(anchor="w")
 
-        apply_lang_btn = tk.Button(
-            self.loc_frame, text=t("btn_apply_lang"), font=("Segoe UI", 9, "bold"),
-            bg=C["blue"], fg="#1e1e2e", activebackground=C["teal"], relief=tk.FLAT, padx=16, pady=4,
-            command=self._apply_language,
-        )
-        apply_lang_btn.pack(anchor="w", padx=px, pady=12)
-
-    def _apply_language(self):
-        selected = self.lang_var.get()
+    def _apply_language(self, lang: Optional[str] = None):
+        """Switch the interface language now. Tabs that were opened are rebuilt in the new
+        language; tabs never opened stay unbuilt and come up in it when first opened."""
+        selected = lang or (self.lang_var.get() if hasattr(self, "lang_var") else get_current_language())
+        if selected == get_current_language():
+            return
         save_language_preference(selected)
 
         self.title(t("app_title"))
-        self.nav_notebook.tab(self.overview_frame, text=t("nav_overview"))
-        self.nav_notebook.tab(self.proxies_frame, text=t("nav_proxies"))
-        self.nav_notebook.tab(self.options_frame, text=t("nav_options"))
-        self.nav_notebook.tab(self.backup_frame, text=t("nav_backup"))
-        self.nav_notebook.tab(self.wsl_iso_frame, text=t("nav_wsl_isolation"))
-        self.nav_notebook.tab(self.loc_frame, text=t("nav_localization"))
-
-        for widget in self.overview_frame.winfo_children():
-            widget.destroy()
-        self._build_overview_tab()
-
-        for widget in self.proxies_frame.winfo_children():
-            widget.destroy()
-        self._build_proxies_tab()
-
-        for widget in self.options_frame.winfo_children():
-            widget.destroy()
-        self._build_options_tab()
-
-        for widget in self.backup_frame.winfo_children():
-            widget.destroy()
-        self._build_backup_tab()
-
-        for widget in self.wsl_iso_frame.winfo_children():
-            widget.destroy()
-        self._build_wsl_isolation_tab()
-
-        for widget in self.loc_frame.winfo_children():
-            widget.destroy()
-        self._build_localization_tab()
+        frames = [
+            ("nav_overview", self.overview_frame, self._build_overview_tab),
+            ("nav_proxies", self.proxies_frame, self._build_proxies_tab),
+            ("nav_options", self.options_frame, self._build_options_tab),
+            ("nav_backup", self.backup_frame, self._build_backup_tab),
+            ("nav_wsl_isolation", self.wsl_iso_frame, self._build_wsl_isolation_tab),
+            ("nav_localization", self.loc_frame, self._build_localization_tab),
+        ]
+        pending = getattr(self, "_pending_tab_builders", [])
+        for key, frame, builder in frames:
+            self.nav_notebook.tab(frame, text=t(key))
+            if builder in pending:
+                continue                      # not built yet: it will be, in the new language
+            for widget in frame.winfo_children():
+                widget.destroy()
+            builder()
 
         self._update_header_stats()
         if hasattr(self, "btn_restart_services") and self.btn_restart_services and self.btn_restart_services.winfo_exists():
@@ -7936,6 +8097,7 @@ class VlessApp(tk.Tk):
             if inst in self.instances:
                 if inst.apply_health_status(alive):
                     changed = True
+        self._report_telegram_health()
         if changed:
             self.update_tray_icon()
             self._update_header_stats()
