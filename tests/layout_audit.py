@@ -55,6 +55,11 @@ def _label(w: tk.Misc) -> str:
     return f"{w.winfo_class()} {str(w)[-40:]}"
 
 
+def _master(w: tk.Misc) -> str:
+    info = w.pack_info() if w.winfo_manager() == "pack" else w.grid_info()
+    return str(info.get("in", w.master))
+
+
 def audit(root: tk.Misc, skip: Iterable[tk.Misc] = (), tolerance: int = 1) -> list[Issue]:
     """Walk the mapped widget tree under root. Scrolling canvases are not entered
     (their content is meant to extend beyond the viewport); use audit_overview for it."""
@@ -83,11 +88,16 @@ def audit(root: tk.Misc, skip: Iterable[tk.Misc] = (), tolerance: int = 1) -> li
         placed = [c for c in kids if c.winfo_manager() in ("pack", "grid")]
         for i, a in enumerate(placed):
             for b in placed[i + 1:]:
+                # only widgets laid out by the same master can collide (pack(in_=...) moves
+                # a child into another frame, which then legitimately contains it)
+                if _master(a) != _master(b):
+                    continue
                 if _area(_inter(_rect(a), _rect(b))) > tolerance * tolerance * 4:
                     issues.append(Issue("overlap", f"{_label(a)} × {_label(b)}", f"{_rect(a)} ∩ {_rect(b)}"))
         inner = _inter(clip, r) or r
         if isinstance(w, tk.Canvas) and getattr(w, "is_scroll_host", False):
-            return
+            # scrolling area: content may run past the bottom, never past the sides
+            inner = (inner[0], -10 ** 9, inner[2], 10 ** 9)
         for c in kids:
             visit(c, inner)
 

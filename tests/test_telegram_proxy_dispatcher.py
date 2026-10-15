@@ -278,12 +278,15 @@ class TestTelegramProxyUIIntegration(unittest.TestCase):
 
     def test_restart_services_context_menu_has_telegram_proxy_socket(self):
         """Проверка пункта TelegramProxy в контекстном меню RestartServices."""
-        from gui import VlessApp
         # Tk roots destroyed by earlier tests must be finalized here, on the main thread: VlessApp starts
         # background threads, and a GC pass in one of them would tear down a Tcl interpreter from the wrong thread.
         import gc
         gc.collect()
-        app = VlessApp()
+        # Never a bare VlessApp(): it loaded the user's real settings / instances, adopted the running
+        # proxies on their ports and killed them on exit. The sandbox has temp files and no kill paths.
+        from tests.ui_sandbox import Sandbox
+        sb = Sandbox(language="ru")
+        app = sb.app
         app.deiconify()
         app.update()
         try:
@@ -322,8 +325,9 @@ class TestTelegramProxyUIIntegration(unittest.TestCase):
                 self.assertIsNotNone(found_tg_active)
                 self.assertIn("TelegramProxy (127.0.0.1:1085)", found_tg_active)
                 app.close_restart_services_menu()
+            self.assertEqual(sb.kill_attempts, [])
         finally:
-            app.destroy()
+            sb.close()
 
 
     def test_copy_tg_proxy_link_copies_socks_format(self):

@@ -185,8 +185,9 @@ class AsyncGuiOperationsTest(unittest.TestCase):
         changed = self.inst.apply_health_status(True)
         self.assertFalse(changed)
 
-        # Transition to dead
-        changed = self.inst.apply_health_status(False)
+        # Transition to dead (no reconnect: the mocked after() would run a real start() at once)
+        with patch.object(self.inst, "_schedule_reconnect"):
+            changed = self.inst.apply_health_status(False)
         self.assertTrue(changed)
         self.assertFalse(self.inst.healthy)
 

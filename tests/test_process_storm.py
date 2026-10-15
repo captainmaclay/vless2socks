@@ -534,6 +534,7 @@ class TestLazyTabs(unittest.TestCase):
             fn.__name__ = f"_build_{name}_tab"
         app._pending_tab_builders = list(builders.values())
         app._tab_builder_for = {frames[n]: builders[n] for n in frames}
+        app._run_tab_builder = lambda b: gui.VlessApp._run_tab_builder(app, b)
         gui.VlessApp._ensure_tab_built(app, frames["options"])
         gui.VlessApp._ensure_tab_built(app, frames["options"])   # second open: nothing to do
         self.assertEqual(built, ["options"])

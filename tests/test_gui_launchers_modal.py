@@ -17,16 +17,27 @@ import i18n
 class TestLaunchersGuideModal(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        # We need Tkinter root; on Windows headless CI or desktop this works natively
-        cls.app = gui.VlessApp()
+        # Never a bare VlessApp(): it loaded the user's real settings / instances and adopted
+        # (then killed on exit) the running proxies. The sandbox has temp files, no kill paths.
+        from unittest import mock
+        from tests.ui_sandbox import Sandbox
+        import vless2socks.ink as ink
+        # The generator writes launchers into the real C:\MyFiles\Proxy: record the call instead
+        cls.generated = []
+        cls._gen_patch = mock.patch.object(
+            ink, "generate_proxy_workspace",
+            side_effect=lambda **kw: cls.generated.append(kw) or {"proxy_dir": kw.get("target_dir")})
+        cls._gen_patch.start()
+        cls.sb = Sandbox(language="ru")
+        cls.app = cls.sb.app
         cls.app.withdraw()  # keep window hidden during tests
 
     @classmethod
     def tearDownClass(cls):
         try:
-            cls.app.destroy()
-        except Exception:
-            pass
+            cls.sb.close()
+        finally:
+            cls._gen_patch.stop()
 
     def test_options_tab_has_launchers_card_as_first_item(self):
         """Verify the launchers guide card exists in options tab."""
@@ -68,12 +79,12 @@ class TestLaunchersGuideModal(unittest.TestCase):
 
         # Verify buttons exist (Copy, Generate, Open folder, Close)
         button_texts = " ".join(all_buttons)
-        self.assertTrue(any("Копир" in b or "Copy" in b for b in all_buttons))
+        self.assertTrue(any("копир" in b.lower() or "copy" in b.lower() for b in all_buttons))
         self.assertTrue(any("Сгенерировать" in b or "Generate" in b for b in all_buttons))
         self.assertTrue(any("Открыть" in b or "Open" in b for b in all_buttons))
 
         # Find first copy button and invoke it
-        copy_buttons = [b for b in descendants if isinstance(b, gui.tk.Button) and ("Копир" in b.cget("text") or "Copy" in b.cget("text"))]
+        copy_buttons = [b for b in descendants if isinstance(b, gui.tk.Button) and ("копир" in b.cget("text").lower() or "copy" in b.cget("text").lower())]
         self.assertGreaterEqual(len(copy_buttons), 1)
         copy_buttons[0].invoke()
         self.app.update()
@@ -92,7 +103,13 @@ class TestLaunchersGuideModal(unittest.TestCase):
         import tkinter as tk
         dummy_lbl = tk.Label(self.app, text="ready")
         self.app.run_quick_launcher_generation(status_lbl=dummy_lbl)
-        self.app.update()
+        import time
+        deadline = time.monotonic() + 5
+        while not self.generated and time.monotonic() < deadline:
+            self.app.update()
+            time.sleep(0.02)
+        self.assertEqual(len(self.generated), 1)                  # the (stubbed) generator was called
+        self.assertEqual(self.sb.kill_attempts, [])
 
 
 if __name__ == "__main__":

@@ -150,7 +150,8 @@ def draw_rounded(canvas: tk.Canvas, x0: float, y0: float, x1: float, y1: float, 
                  fill: str, border: str = "", gloss: bool = True, tags: Sequence[str] = ()) -> int:
     """Rounded rectangle on a canvas: a smooth image, or a polygon without Pillow."""
     w, h = int(round(x1 - x0)), int(round(y1 - y0))
-    photo = rounded_photo(canvas, w, h, fill, int(radius), border, gloss)
+    # a widget can be configured to ~1 px for a moment (relayout, minimized window)
+    photo = rounded_photo(canvas, w, h, fill, int(radius), border, gloss) if w >= 4 and h >= 4 else None
     if photo is not None:
         item = canvas.create_image(x0, y0, image=photo, anchor="nw", tags=tuple(tags))
         canvas._mac_refs = getattr(canvas, "_mac_refs", set()) | {photo}
@@ -165,6 +166,8 @@ def set_rounded_fill(canvas: tk.Canvas, item: int, w: int, h: int, radius: int, 
                      border: str = "", gloss: bool = True) -> None:
     """Recolor a shape made by draw_rounded."""
     if canvas.type(item) == "image":
+        if w < 4 or h < 4:
+            return
         photo = rounded_photo(canvas, w, h, fill, radius, border, gloss)
         if photo is not None:
             canvas.itemconfig(item, image=photo)
@@ -218,6 +221,20 @@ class MacButton(tk.Canvas):
         iw = self._image.width() if self._image is not None else 0
         gap = self.px(6) if (iw and tw) else 0
         return tw + iw + gap
+
+    def width_for(self, text: Optional[str] = None) -> int:
+        """Width this button would need with `text` (current label if None), without changing it."""
+        saved = self._text
+        if text is not None:
+            self._text = text
+        try:
+            line = int(self._font.metrics("linespace"))
+            ih = self._image.height() if self._image is not None else 0
+            h = max(line, ih) + 2 * self.px(self._pady)
+            return max(self._content_width() + 2 * self.px(self._padx), self.px(self._min_width),
+                       h if not self._text else 0)
+        finally:
+            self._text = saved
 
     def _size(self) -> None:
         line = int(self._font.metrics("linespace"))
@@ -436,6 +453,16 @@ class MacSegmented(tk.Canvas):
 
     def set_value(self, key: str):
         self.select(key, notify=False)
+
+    def width_for(self, labels: Optional[Sequence[str]] = None) -> int:
+        labels = list(labels) if labels is not None else [label for _k, label in self.segments]
+        return sum(self._font.measure(label) + 2 * self.px(self._padx) for label in labels) + 2 * self.px(2)
+
+    def set_labels(self, labels: Sequence[str]) -> None:
+        """Relabel the segments in order (keys unchanged)."""
+        new = [(k, label) for (k, _old), label in zip(self.segments, labels)]
+        if new != self.segments:
+            self.configure_labels(new)
 
     def configure_labels(self, segments: Sequence[tuple[str, str]]):
         self.segments = list(segments)

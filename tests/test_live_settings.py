@@ -279,6 +279,7 @@ class TestInstantLanguage(_Base):
         app.overview_frame, app.proxies_frame, app.options_frame = frames["ov"], frames["px"], frames["op"]
         app.backup_frame, app.wsl_iso_frame, app.loc_frame = frames["bk"], frames["ws"], frames["lc"]
         app._pending_tab_builders = [app._build_proxies_tab, app._build_backup_tab]   # never opened
+        app._run_tab_builder = lambda b: gui.VlessApp._run_tab_builder(app, b)
         gui.VlessApp._apply_language(app)
         self.assertEqual(i18n.get_current_language(), "ru")
         self.assertEqual(settings_manager.get_setting("language"), "ru")

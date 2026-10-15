@@ -3,6 +3,11 @@
 Temp ROOT_DIR / settings / instances with synthetic proxies (long names, groups, flags:
 the worst cases for the layout); no proxy is started, tray / IPC / power watcher are
 stubbed, watchers that would touch the system are disabled.
+
+The sandbox must never touch the user's real proxies: the app has a built-in System
+Proxy on 1015, and a real vless2socks is usually running on this machine. Port probes
+and process lookups report nothing, and every kill path is replaced by a recorder
+(`kill_attempts`), so a sandboxed app can neither adopt nor stop a real process.
 """
 
 from __future__ import annotations
@@ -74,8 +79,15 @@ class Sandbox:
         import gui
         import i18n
         self.gui = gui
+        self.kill_attempts: list[tuple] = []
+        guarded = ("_terminate_pid", "kill_process_trees", "free_ports", "kill_processes_on_port")
         self._saved = {n: getattr(gui, n) for n in ("ROOT_DIR", "INSTANCES_FILE", "CONFIG_FILE", "HAS_TRAY",
-                                                    "SingleInstanceIpcServer", "PowerBroadcastWatcher")}
+                                                    "SingleInstanceIpcServer", "PowerBroadcastWatcher",
+                                                    "is_port_alive", "listening_pids_by_port") + guarded}
+        for name in guarded:
+            setattr(gui, name, self._recorder(name))
+        gui.is_port_alive = lambda *a, **k: False          # never adopt a real proxy on the same port
+        gui.listening_pids_by_port = lambda ports: {}
         gui.ROOT_DIR = self.tmp
         gui.INSTANCES_FILE = self.tmp / "instances.json"
         gui.CONFIG_FILE = self.tmp / "config.json"
@@ -86,6 +98,12 @@ class Sandbox:
         i18n.load_language_preference()
         self.app = gui.VlessApp()
         self.app.after_cancel  # noqa: B018 - keep a strong ref in tests
+
+    def _recorder(self, name):
+        def record(*args, **kwargs):
+            self.kill_attempts.append((name, args))
+            return set() if name in ("kill_process_trees", "free_ports") else (False if name == "_terminate_pid" else (False, ""))
+        return record
 
     def resize(self, width: int, height: int):
         self.app.geometry(f"{width}x{height}+10+10")
@@ -100,12 +118,17 @@ class Sandbox:
     def close(self):
         import i18n
         import settings_manager
+        # No shutdown_all_proxies(): the sandbox never starts a proxy, and its final port
+        # sweep would kill whatever listens on the instances' ports - the user's real ones.
         try:
-            th = self.app.shutdown_all_proxies()
-            th.join(5)
-        except Exception:
-            pass
-        try:
+            # pending timers of a destroyed app fire in the next test's event loop
+            # ("invalid command name ...") and can crash Tcl: cancel them first
+            for job in self.app.tk.splitlist(self.app.tk.call("after", "info")):
+                try:
+                    self.app.after_cancel(job)
+                except Exception:
+                    pass
+            self.app.update_idletasks()
             self.app.destroy()
         except Exception:
             pass

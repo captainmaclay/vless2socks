@@ -35,6 +35,9 @@ class Button:
     # Every label this button can show (e.g. Start / Stop / ⏳): it is drawn as wide as the
     # widest, so a status change never shifts the other buttons and can be applied in place
     width_labels: tuple[str, ...] = ()
+    # compact label used when the card is narrow ("▶" for "▶  Start"); "" = same as label
+    short: str = ""
+    short_width_labels: tuple[str, ...] = ()
 
 
 @dataclass
@@ -137,6 +140,8 @@ class OverviewView:
         self._close_editor()
         self.rows = rows
         cv = self.canvas
+        self.density = self._pick_density(rows, self._current_width())
+        self.CARD_H = self.BASE_CARD_H + (self.STACK_EXTRA if self.density[1] else 0)
         cv.delete("all")
         self._commands.clear()
         self._button_index.clear()
@@ -217,7 +222,7 @@ class OverviewView:
         cv.itemconfig(live["dot"], fill=m.dot)
         self._button_shape.setdefault(btn_tag, (rect, *self._button_shape.get(btn_tag, (rect, 0, 0))[1:]))
         self._paint_button(btn_tag, btn.bg)
-        cv.itemconfig(text, text=btn.label, fill=btn.fg if btn.enabled else self.C["muted"])
+        cv.itemconfig(text, text=self._label(btn), fill=btn.fg if btn.enabled else self.C["muted"])
         # the click target follows the new state (e.g. Start -> disabled -> Stop)
         self._commands.pop(btn_tag, None)
         self._button_bg[btn_tag] = btn.bg
@@ -306,13 +311,18 @@ class OverviewView:
         self.LINE_GAP = px(4)
         self.NAME_H = max(line(self.f_name), line(self.f_badge) + px(6))
         self.DETAIL_H = max(line(self.f_mono), line(self.f_small_b))
-        self.CARD_H = self.CARD_PAD * 2 + self.NAME_H + self.LINE_GAP + self.DETAIL_H
+        self.BASE_CARD_H = self.CARD_PAD * 2 + self.NAME_H + self.LINE_GAP + self.DETAIL_H
+        self.CARD_H = self.BASE_CARD_H
         self.CARD_GAP = px(3)                           # above and below every card
         self.BTN_H = line(self.f_small_b) + px(6)
         self.HEADER_H = max(line(self.f_head), self.BTN_H) + px(8)
         self.HEADER_GAP = px(18)
         self.FIRST_HEADER_GAP = px(4)
         self.HINT_H = line(self.f_hint) + px(6)
+        self.STACK_EXTRA = self.LINE_GAP * 2 + self.BTN_H
+        # narrowest text column (name + ports) a card may keep before its buttons move
+        # to their own line
+        self.MIN_TEXT_W = px(430)   # name / ports + country without cutting
         self.EMPTY_H = px(90)
 
     def px(self, value: float) -> int:
@@ -387,14 +397,17 @@ class OverviewView:
                 font: Optional[tkfont.Font] = None, pad: int = 6) -> int:
         """Draw a button whose right edge is x_right; returns its left edge."""
         font = font or (self.f_small_b if btn.bold else self.f_small)
-        w = max(self._w(font, label) for label in (btn.label,) + tuple(btn.width_labels)) + 2 * self.px(pad)
+        short = getattr(self, "density", (False, False))[0] and bool(btn.short)
+        label_now = btn.short if short else btn.label
+        extra = btn.short_width_labels if short else btn.width_labels
+        w = max(self._w(font, label) for label in (label_now,) + tuple(extra)) + 2 * self.px(pad)
         x0 = x_right - w
         tag = self._new_tag("btn")
         bg = btn.bg
         cv = self.canvas
         # rounded, anti-aliased, with the faint macOS gloss (see macui.draw_rounded)
         rect = draw_rounded(cv, x0, y, x_right, y + h, self.px(self.RADIUS), bg, tags=(owner_tag, tag))
-        text = cv.create_text(x0 + w / 2, y + h / 2, text=btn.label, font=font,
+        text = cv.create_text(x0 + w / 2, y + h / 2, text=label_now, font=font,
                               fill=btn.fg if btn.enabled else self.C["muted"], tags=(owner_tag, tag))
         self._register(tag, btn, owner_key, bg, owner_tag)
         self._button_shape[tag] = (rect, int(round(w)), int(round(h)))
@@ -471,11 +484,50 @@ class OverviewView:
         self._register(tag, Button(text, command, bg="", fg=fill, name=name), owner_key, "", owner_tag)
         return x + self._w(font, text)
 
+    # density = (short_labels, stacked)
+    DENSITIES = ((False, False), (True, False), (False, True), (True, True))
+
+    def _label(self, btn: Button) -> str:
+        return btn.short if (getattr(self, "density", (False, False))[0] and btn.short) else btn.label
+
+    def _btn_width(self, btn: Button, short: bool) -> int:
+        font = self.f_small_b if btn.bold else self.f_small
+        label = btn.short if (short and btn.short) else btn.label
+        extra = btn.short_width_labels if (short and btn.short) else btn.width_labels
+        return max(self._w(font, lab) for lab in (label,) + tuple(extra)) + 2 * self.px(6)
+
+    def _buttons_width(self, m: CardModel, short: bool) -> int:
+        return sum(self._btn_width(b, short) + self.px(4) for b in m.buttons)
+
+    def _lead_width(self, m: CardModel) -> int:
+        """Checkbox, dot and order number in front of the text column."""
+        px = self.px
+        w = self.PAD_X + px(10)
+        if m.checked is not None:
+            w += px(16) + px(8)
+        return w + self._w(self.f_dot, "●") + px(4) + self._w(self.f_order, m.order_text) + px(14)
+
+    def _pick_density(self, rows: list[Any], width: int) -> tuple[bool, bool]:
+        cards = [r for r in rows if isinstance(r, CardModel)]
+        if not cards:
+            return (False, False)
+        lead = max(self._lead_width(m) for m in cards)
+        for short, stacked in self.DENSITIES:
+            if stacked:
+                # buttons get their own line: it must hold them
+                if lead + max(self._buttons_width(m, short) for m in cards) + self.px(20) <= width:
+                    return (short, stacked)
+                continue
+            need = lead + self.MIN_TEXT_W + max(self._buttons_width(m, short) for m in cards) + self.px(28)
+            if need <= width:
+                return (short, stacked)
+        return (True, True)
+
     def _draw_card(self, m: CardModel, y: int, width: int, tag: str) -> None:
         cv, C, px = self.canvas, self.C, self.px
         x1 = width - self.PAD_X
         cv.create_rectangle(self.PAD_X, y, x1, y + self.CARD_H, fill=C["card"], outline="", tags=(tag,))
-        mid = y + self.CARD_H / 2
+        mid = y + self.BASE_CARD_H / 2
         x = self.PAD_X + px(10)
 
         if m.checked is not None:
@@ -502,14 +554,23 @@ class OverviewView:
         x += self._w(self.f_dot, "●") + px(4)
         x = self._text_button(x, mid, m.order_text, self.f_order, C["blue"], m.on_order, tag, m.key, "order") + px(14)
 
-        # right side buttons, laid out from the right edge; text on the left stops before them
+        # buttons: on the right of the text, or (narrow window) on their own line below it
+        short, stacked = getattr(self, "density", (False, False))
         right = x1 - px(10)
         first_button = None
-        for btn in reversed(m.buttons):
-            right = self._button(right, mid - self.BTN_H / 2, self.BTN_H, btn, tag, m.key) - px(4)
-            first_button = self._last_button
+        if stacked:
+            by = y + self.BASE_CARD_H - self.CARD_PAD + self.LINE_GAP
+            bx_right = x + self._buttons_width(m, short)
+            for btn in reversed(m.buttons):
+                bx_right = self._button(bx_right, by, self.BTN_H, btn, tag, m.key) - px(4)
+                first_button = self._last_button
+            limit = right
+        else:
+            for btn in reversed(m.buttons):
+                right = self._button(right, mid - self.BTN_H / 2, self.BTN_H, btn, tag, m.key) - px(4)
+                first_button = self._last_button
+            limit = right - px(8)
         self._slot_live[tag] = {"model": m, "dot": dot_item, "button": first_button}
-        limit = right - px(8)
 
         # name row + badges
         ty = y + self.CARD_PAD + self.NAME_H / 2

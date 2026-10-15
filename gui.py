@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 import traceback
 from collections import deque
 from pathlib import Path
@@ -40,6 +41,8 @@ import settings_manager
 import subscriptions
 from ZapretRecovery import Zapret2Watcher, ZapretRecoveryWidget
 from macui import MAC, MacButton, MacDivider, MacSegmented, MacTabChip, ui_font
+import responsive
+from responsive import Adaptive, AdaptiveRow, variants
 from overview_view import Button as OverviewButton, CardModel, HeaderModel, HintModel, OverviewView
 from i18n import get_current_language, load_language_preference, save_language_preference, t
 from vless2socks.paths import APP_DIR, FROZEN, bundled, unpack_bundled_bin
@@ -4344,8 +4347,7 @@ class VlessApp(tk.Tk):
         self._drain_ui_queue()
 
         self.title(t("app_title"))
-        self.geometry("820x620")
-        self.minsize(680, 480)
+        self._init_window_geometry()
         self.configure(bg=C["bg"])
 
         # State
@@ -4547,7 +4549,7 @@ class VlessApp(tk.Tk):
             return
         builder = pending.pop(0)
         try:
-            builder()
+            self._run_tab_builder(builder)
         except Exception as err:
             self._log(f"⚠️ [GUI] Tab build failed ({builder.__name__}): {err}")
         if pending:
@@ -4570,9 +4572,19 @@ class VlessApp(tk.Tk):
             return
         pending.remove(builder)
         try:
-            builder()
+            self._run_tab_builder(builder)
         except Exception as err:
             self._log(f"⚠️ [GUI] Tab build failed ({builder.__name__}): {err}")
+
+    def _run_tab_builder(self, builder) -> None:
+        """Build a tab, then let its long descriptions wrap to the window width."""
+        builder()
+        for path, b in getattr(self, "_tab_builder_for", {}).items():
+            if b == builder:
+                try:
+                    responsive.autowrap(self.nametowidget(path))
+                except (KeyError, tk.TclError):
+                    pass
 
     def _ensure_tabs_built(self):
         """Synchronously build every tab that is still pending."""
@@ -4591,8 +4603,12 @@ class VlessApp(tk.Tk):
         info_box = tk.Frame(header, bg=bg)
         info_box.pack(side=tk.LEFT)
 
-        tk.Label(info_box, text=t("overview_title"), font=("Segoe UI", 12, "bold"), fg=C["text"], bg=bg).pack(anchor="w")
-        tk.Label(info_box, text=t("overview_subtitle"), font=("Segoe UI", 8), fg=C["subtext"], bg=bg).pack(anchor="w")
+        family = ui_font(self).cget("family")
+        self.overview_title_lbl = tk.Label(info_box, text=t("overview_title"), font=(family, 12, "bold"), fg=C["text"], bg=bg)
+        self.overview_title_lbl.pack(anchor="w")
+        self.overview_subtitle_lbl = tk.Label(info_box, text=t("overview_subtitle"), font=(family, 8), fg=C["subtext"], bg=bg)
+        self.overview_subtitle_lbl.pack(anchor="w")
+        self.overview_header, self.overview_info_box = header, info_box
 
         btn_box = tk.Frame(header, bg=bg)
         btn_box.pack(side=tk.RIGHT)
@@ -4613,6 +4629,18 @@ class VlessApp(tk.Tk):
         # View switcher (list / by groups) and the groups manager button
         view_bar = tk.Frame(self.overview_frame, bg=bg)
         view_bar.pack(fill=tk.X, padx=px, pady=(0, 2))
+        self.view_bar = view_bar
+
+        def _on_view_bar_width(event, last=[0]):
+            # tabs placed before the window got its size (or after a resize) re-fit on
+            # width changes only: placing them may change the bar's height, not its width
+            if event.width != last[0]:
+                last[0] = event.width
+                self._place_group_tabs()
+
+        view_bar.bind("<Configure>", _on_view_bar_width, add="+")
+        # second line for the group tabs when they do not fit next to the view switch
+        self.view_line2 = tk.Frame(self.overview_frame, bg=bg)
 
         # [ List | By groups ]  |  [Finland ×] [ALL ×]  [+ Group]
         # The view switch is one segmented control; open group tabs live after a divider
@@ -4626,7 +4654,8 @@ class VlessApp(tk.Tk):
         self.view_segmented.pack(side=tk.LEFT)
         self.view_divider = MacDivider(view_bar, height=22)
         self.view_divider.pack(side=tk.LEFT, fill=tk.Y)
-        self._group_tabs_frame = tk.Frame(view_bar, bg=bg)   # packed only while it has tabs
+        # child of the Overview (not of view_bar) so it can be packed on either line
+        self._group_tabs_frame = tk.Frame(self.overview_frame, bg=bg)   # packed only while it has tabs
         self.add_group_tab_btn = MacButton(
             view_bar, text=t("btn_add_group_tab"), variant="tinted", command=self.open_group_tab_picker,
         )
@@ -4636,6 +4665,7 @@ class VlessApp(tk.Tk):
         # Actions get their own row: open group tabs would push them off the view row
         actions_bar = tk.Frame(self.overview_frame, bg=bg)
         actions_bar.pack(fill=tk.X, padx=px, pady=(4, 2))
+        self.actions_bar = actions_bar
 
         self.groups_btn = MacButton(actions_bar, text=t("btn_groups"), variant="secondary",
                                     command=self.open_groups_manager)
@@ -4683,6 +4713,9 @@ class VlessApp(tk.Tk):
         self.overview_scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=self.overview_canvas.yview)
         self.overview_canvas.configure(yscrollcommand=self.overview_scrollbar.set)
         self.overview_view = OverviewView(self.overview_canvas, C)
+        self.overview_canvas.is_scroll_host = True      # layout audit: content scrolls
+        self._rows_cache = None
+        self.after_idle(self._relayout)
         self.overview_view.on_card_context = self._open_card_context_menu
 
         # Smooth mousewheel handling
@@ -4853,20 +4886,20 @@ class VlessApp(tk.Tk):
 
         # fixed width over all its labels: a status change then never moves other buttons
         widths = (t("btn_on"), t("btn_off"), "⏳ ...")
+        shorts = ("▶", "⏹", "⏳")
+        common = dict(bold=True, name="toggle", width_labels=widths, short_width_labels=shorts)
         if inst.is_transitioning:
-            toggle = OverviewButton("⏳ ...", None, bg=MAC["orange"], fg="#1d1d1f", enabled=False, bold=True,
-                                    name="toggle", width_labels=widths)
+            toggle = OverviewButton("⏳ ...", None, bg=MAC["orange"], fg="#1d1d1f", enabled=False, short="⏳", **common)
         elif inst.running:
-            toggle = OverviewButton(t("btn_off"), inst.toggle_async, bg=MAC["red"], fg="#ffffff", bold=True,
-                                    name="toggle", width_labels=widths)
+            toggle = OverviewButton(t("btn_off"), inst.toggle_async, bg=MAC["red"], fg="#ffffff", short="⏹", **common)
         else:
-            toggle = OverviewButton(t("btn_on"), inst.toggle_async, bg=MAC["green"], fg="#ffffff", bold=True,
-                                    name="toggle", width_labels=widths)
+            toggle = OverviewButton(t("btn_on"), inst.toggle_async, bg=MAC["green"], fg="#ffffff", short="▶", **common)
         buttons = [toggle]
         buttons += [
             OverviewButton("📁", lambda i=inst: self._open_group_menu(i, None), name="groups"),
             OverviewButton("🔍", inst.check_geo_now, name="geo"),
-            OverviewButton(t("btn_view_tab"), lambda n=idx: self._jump_to_instance(n), name="view"),
+            OverviewButton(t("btn_view_tab"), lambda n=idx: self._jump_to_instance(n), name="view",
+                           short=responsive.icon_of(t("btn_view_tab"))),
         ]
         for b in buttons:
             if b.bg == "#313244":
@@ -4916,6 +4949,311 @@ class VlessApp(tk.Tk):
         self._style_view_mode_buttons()
         self._render_overview(reset_scroll=True)
 
+    # ── Responsive layout ─────────────────────────────────────
+    def _ui_scale(self) -> float:
+        try:
+            return max(1.0, float(self.winfo_fpixels("1i")) / 96.0)
+        except Exception:
+            return 1.0
+
+    def _init_window_geometry(self):
+        """Start size in logical pixels (the old "820x620" meant physical pixels: a tiny
+        window at 200% scaling), the remembered size if any, a minimum and sane proportions."""
+        s = self._ui_scale()
+        sw, sh = self.winfo_screenwidth() / s, self.winfo_screenheight() / s
+        saved = settings_manager.get_setting("window_size_dip", None)
+        if isinstance(saved, (list, tuple)) and len(saved) == 2:
+            w, h = int(saved[0]), int(saved[1])
+        else:
+            w, h = responsive.fit_preset(responsive.COMPACT, int(sw), int(sh))
+        w = max(responsive.MIN_SIZE[0], min(w, int(sw)))
+        h = max(responsive.MIN_SIZE[1], min(h, int(sh) - 40))
+        self.geometry(f"{int(w * s)}x{int(h * s)}")
+        self.minsize(int(responsive.MIN_SIZE[0] * s), int(responsive.MIN_SIZE[1] * s))
+        self._apply_aspect_lock(settings_manager.get_setting("window_aspect_lock", True))
+        self._layout_key = None
+        self._relayout_job = None
+        self._size_save_job = None
+        self.bind("<Configure>", self._on_root_configure, add="+")
+        for n, lay in enumerate(responsive.LAYOUTS, start=1):
+            self.bind_all(f"<Control-Key-{n}>", lambda e, k=lay.key: self.apply_layout_preset(k))
+
+    def _apply_aspect_lock(self, enabled: bool):
+        """Soft proportion range while resizing (not a fixed ratio: Snap halves and
+        maximizing on any common screen still work)."""
+        try:
+            if enabled:
+                lo, hi = responsive.ASPECT_RANGE
+                self.wm_aspect(int(lo * 100), 100, int(hi * 100), 100)
+            else:
+                self.wm_aspect("", "", "", "")
+        except tk.TclError:
+            pass
+
+    def apply_layout_preset(self, key: str):
+        """Resize the window to one of the five classic proportions."""
+        s = self._ui_scale()
+        sw, sh = int(self.winfo_screenwidth() / s), int(self.winfo_screenheight() / s)
+        w, h = responsive.fit_preset(key, sw, sh)
+        try:
+            if self.state() in ("zoomed", "iconic", "withdrawn"):
+                self.state("normal")      # a maximized / minimized window ignores the new size
+        except tk.TclError:
+            pass
+        self.geometry(f"{int(w * s)}x{int(h * s)}")
+
+    def current_layout(self) -> tuple[str, int, int]:
+        s = self._ui_scale()
+        w, h = self.winfo_width() / s, self.winfo_height() / s
+        return responsive.classify(round(w), round(h)), round(w), round(h)
+
+    def _on_root_configure(self, event):
+        if event.widget is not self:
+            return
+        if getattr(self, "_relayout_job", None):
+            try:
+                self.after_cancel(self._relayout_job)
+            except Exception:
+                pass
+        self._relayout_job = self.after(60, self._relayout)
+        if getattr(self, "_size_save_job", None):
+            try:
+                self.after_cancel(self._size_save_job)
+            except Exception:
+                pass
+        self._size_save_job = self.after(1500, self._save_window_size)
+
+    def _save_window_size(self):
+        self._size_save_job = None
+        try:
+            if self.state() != "normal":
+                return
+        except tk.TclError:
+            return
+        _key, w, h = self.current_layout()
+        if [w, h] != settings_manager.get_setting("window_size_dip", None):
+            settings_manager.set_setting("window_size_dip", [w, h])
+
+    def _adaptive_rows(self) -> dict:
+        """Built once per UI build: which controls shorten together, and their variants."""
+        rows = getattr(self, "_rows_cache", None)
+        if rows is not None and all(
+                getattr(item.widget, "winfo_exists", lambda: 0)() for row in rows.values() for item in row.items):
+            return rows
+        rows = {}
+        s = self._ui_scale()
+        if hasattr(self, "btn_restart_services"):
+            rows["top"] = AdaptiveRow(
+                items=[
+                    Adaptive(self.title_badge, variants(t("app_badge"), t("app_badge"), ""), hide_at=2),
+                    Adaptive(self.count_label, self._count_variants()),
+                    Adaptive(self.btn_restart_services, variants(f"🔄 {t('btn_restart_services')}", t("short_restart"))),
+                    Adaptive(self.add_proxy_btn, variants(t("btn_new_tab"), t("short_new_tab"), "＋")),
+                ],
+                fixed=[self.btn_restart_arrow], gap=int(60 * s))
+        if hasattr(self, "start_all_btn"):
+            rows["header"] = AdaptiveRow(
+                items=[
+                    Adaptive(self.start_all_btn, variants(t("btn_start_all"), t("short_start_all"))),
+                    Adaptive(self.stop_all_btn, variants(t("btn_stop_all"), t("short_stop_all"))),
+                    Adaptive(self.refresh_geo_btn, variants(t("btn_refresh_all_geo"), t("short_refresh_geo"))),
+                ], gap=int(24 * s))
+            rows["title"] = AdaptiveRow(
+                items=[Adaptive(self.overview_title_lbl, [t("overview_title"), t("short_overview_title")])], levels=2)
+            rows["view"] = AdaptiveRow(
+                items=[
+                    Adaptive(self.view_segmented, [[t("view_list"), t("view_groups")],
+                                                   [t("view_list"), t("view_groups")],
+                                                   [responsive.icon_of(t("view_list")), responsive.icon_of(t("view_groups"))]]),
+                    Adaptive(self.add_group_tab_btn, variants(t("btn_add_group_tab"), t("btn_add_group_tab"), "+")),
+                ], fixed=[self.view_divider], gap=int(8 * s))
+            rows["actions"] = AdaptiveRow(
+                items=[
+                    Adaptive(self.add_subscription_btn, variants(t("btn_add_subscription"), t("short_add_subscription"))),
+                    Adaptive(self.select_mode_btn, variants(t("btn_select_mode"), t("btn_select_mode"))),
+                    Adaptive(self.groups_btn, variants(t("btn_groups"), t("btn_groups"))),
+                ], fixed=[self.tg_link_button], gap=int(30 * s))
+            bulk_labels = variants(t("btn_move_to_group"), t("short_move_to_group"), "📁 ▾")
+            sel_items = [Adaptive(w, v) for w, v in zip(
+                [c for c in self.selection_bar.winfo_children() if isinstance(c, MacButton) and c is not self.bulk_group_btn],
+                [variants(t("btn_select_all"), t("short_select_all"), "☑"),
+                 variants(t("btn_clear_selection"), t("short_clear_selection"), "☐")])]
+            rows["selection"] = AdaptiveRow(
+                items=sel_items + [Adaptive(self.selection_count_lbl, self._selected_variants()),
+                                   Adaptive(self.bulk_group_btn, bulk_labels)],
+                gap=int(40 * s))
+        self._rows_cache = rows
+        return rows
+
+    def _count_variants(self):
+        running = sum(1 for inst in self.instances if inst.running)
+        total = len(self.instances)
+        full = t("count_summary", total=total, running=running)
+        short = t("short_count_summary", total=total, running=running)
+        return [full, short, short]
+
+    def _selected_variants(self):
+        count = len(getattr(self, "_selected", ()))
+        return [t("lbl_selected", count=count), t("lbl_selected", count=count), t("short_selected", count=count)]
+
+    def _fit_notebook_tabs(self):
+        """Navigation tab labels: full, short, icons - whichever fits the window width."""
+        nb = getattr(self, "nav_notebook", None)
+        if nb is None:
+            return
+        frames = [(self.overview_frame, "nav_overview", None), (self.proxies_frame, "nav_proxies", None),
+                  (self.options_frame, "nav_options", None), (self.backup_frame, "nav_backup", "nav_backup_short"),
+                  (self.wsl_iso_frame, "nav_wsl_isolation", "nav_wsl_short"),
+                  (self.loc_frame, "nav_localization", "nav_localization_short")]
+        levels = [[t(k) for _f, k, _s in frames],
+                  [t(sk) if sk else t(k) for _f, k, sk in frames],
+                  [responsive.icon_of(t(k)) for _f, k, _s in frames]]
+        family = ui_font(self).cget("family")
+        font = tkfont.Font(root=self, family=family, size=9, weight="bold")
+        pad = 2 * 14 + 6          # ttk tab padding [14, 7] and borders, pixels
+        width = nb.winfo_width() or self.winfo_width()
+        chosen = levels[-1]
+        for labels in levels:
+            if sum(font.measure(label) + pad for label in labels) <= width - 4:
+                chosen = labels
+                break
+        for (frame, _k, _s), label in zip(frames, chosen):
+            try:
+                if nb.tab(frame, "text") != label:
+                    nb.tab(frame, text=label)
+            except tk.TclError:
+                pass
+
+    def _place_group_tabs(self):
+        """Group tab chips: after the view switch when they fit, otherwise on their own
+        line, wrapping into rows. An empty strip is not shown at all."""
+        frame = getattr(self, "_group_tabs_frame", None)
+        if frame is None or not frame.winfo_exists():
+            return
+        # tab order (not stacking order: chips are raised above their line frames)
+        chips = [c for c in getattr(self, "_group_tab_widgets", {}).values() if c.winfo_exists()]
+        line2 = getattr(self, "view_line2", None)
+        bar = getattr(self, "view_bar", None)
+        if not chips:
+            frame.pack_forget()
+            if line2 is not None:
+                line2.pack_forget()
+            return
+        s = self._ui_scale()
+        gap = int(6 * s)
+        if bar is None:          # no view bar built (tests with a bare root)
+            for c in chips:
+                c.pack(side=tk.LEFT, padx=(0, gap))
+            if not frame.winfo_manager():
+                frame.pack(side=tk.LEFT)
+            return
+        chips_w = sum(c.req_size()[0] for c in chips) + gap * len(chips)
+        bar_w = bar.winfo_width() if bar is not None else 0
+        used = sum((w.req_size()[0] if hasattr(w, "req_size") else w.winfo_reqwidth())
+                   for w in (self.view_segmented, self.view_divider, self.add_group_tab_btn)) + int(12 * s)
+        inline = bar_w > 1 and used + chips_w <= bar_w
+        # rows of chips within the available width
+        avail = (bar_w - used) if inline else (bar_w if bar_w > 1 else self.winfo_width())
+        # one frame per line: a grid would align columns across lines and push chips out
+        lines, x = [[]], 0
+        for c in chips:
+            cw = c.req_size()[0] + gap
+            if x and x + cw > avail:
+                lines.append([])
+                x = 0
+            lines[-1].append(c)
+            x += cw
+        rows = getattr(self, "_group_tab_rows", [])
+        rows = [r for r in rows if r.winfo_exists()]
+        while len(rows) < len(lines):
+            rows.append(tk.Frame(frame, bg=C["bg"]))
+        self._group_tab_rows = rows
+        for c in chips:
+            c.pack_forget()
+        for n, r in enumerate(rows):
+            if n < len(lines):
+                r.pack(side=tk.TOP, anchor="w", pady=(0, gap if (not inline and n < len(lines) - 1) else 0))
+                for c in lines[n]:
+                    c.pack(in_=r, side=tk.LEFT, padx=(0, gap))
+                    c.tk.call("raise", c._w, r._w)   # created before the line frame: keep it on top (Canvas.lift raises items)
+            else:
+                r.pack_forget()
+        if inline:
+            if line2 is not None and line2.winfo_manager():
+                line2.pack_forget()
+            frame.pack(in_=bar, side=tk.LEFT, before=self.add_group_tab_btn)
+        else:
+            if line2 is not None and not line2.winfo_manager():
+                line2.pack(fill=tk.X, padx=12, pady=(4, 0), after=bar)
+            frame.pack(in_=line2, side=tk.LEFT, anchor="w")
+
+    def _relayout(self):
+        """Fit every row to the current window; called (debounced) on resize."""
+        self._relayout_job = None
+        if not hasattr(self, "nav_notebook"):
+            return
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            return
+        key, _w, _h = self.current_layout()
+        s = self._ui_scale()
+        self._layout_key = key
+        rows = self._adaptive_rows()
+        self._fit_notebook_tabs()
+
+        top = rows.get("top")
+        if top is not None:
+            top.items[1].variants = self._count_variants()
+            top.fit(self.top_bar.winfo_width())
+
+        if "header" in rows:
+            header_w = self.overview_header.winfo_width()
+            gap = int(16 * s)
+            title, sub = self.overview_title_lbl, self.overview_subtitle_lbl
+            info, btns = self.overview_info_box, self.overview_btn_box
+            # 1) title: full unless it does not fit even alone; subtitle only if it fits whole
+            rows["title"].fit(header_w)
+            show_sub = key != responsive.MINI and sub.winfo_reqwidth() <= header_w
+            if show_sub and not sub.winfo_manager():
+                sub.pack(anchor="w")
+            elif not show_sub and sub.winfo_manager():
+                sub.pack_forget()
+            block_w = max(title.winfo_reqwidth(), sub.winfo_reqwidth() if show_sub else 0)
+            # 2) buttons beside the title (shortening them first), else under it
+            fits_beside = rows["header"].fit(header_w - block_w - gap)
+            stacked = btns.winfo_manager() and btns.pack_info().get("side") == "top"
+            if fits_beside == bool(stacked):
+                info.pack_forget()
+                btns.pack_forget()
+                if fits_beside:
+                    info.pack(side=tk.LEFT)
+                    btns.pack(side=tk.RIGHT)
+                else:
+                    # both blocks top-down, else the buttons only get the space right of the title
+                    info.pack(side=tk.TOP, anchor="w")
+                    btns.pack(side=tk.TOP, anchor="w", pady=(6, 0))
+            if not fits_beside:
+                rows["header"].fit(header_w)
+
+            rows["view"].fit(self.view_bar.winfo_width())
+            self._place_group_tabs()
+            rows["actions"].fit(self.actions_bar.winfo_width())
+            if self.selection_bar.winfo_manager():
+                rows["selection"].items[2].variants = self._selected_variants()
+                rows["selection"].fit(self.selection_bar.winfo_width())
+
+        view = getattr(self, "overview_view", None)
+        if view is not None:
+            view.layout_key = key
+        status = getattr(self, "layout_status_lbl", None)
+        if status is not None:
+            try:
+                lay, w, h = self.current_layout()
+                status.config(text=t("lbl_layout_current", name=t(responsive.BY_KEY[lay].title_key), w=w, h=h))
+            except tk.TclError:
+                pass
+
     # ── Overview Group Tabs ───────────────────────────────────
     def _rebuild_group_tabs(self):
         """Recreate the single-group tabs from settings; drop the view of a vanished tab."""
@@ -4933,14 +5271,8 @@ class VlessApp(tk.Tk):
                 command=lambda g=gid: self.set_overview_view_mode(proxy_groups.group_view_mode(g)),
                 on_close=lambda g=gid: self.close_group_tab(g),
             )
-            chip.pack(side=tk.LEFT, padx=(0, 6))
             self._group_tab_widgets[gid] = chip
-        # an empty frame keeps its last size in Tk: show the tab strip only when it has tabs
-        add_btn = getattr(self, "add_group_tab_btn", None)
-        if tabs and not frame.winfo_manager():
-            frame.pack(side=tk.LEFT, before=add_btn) if add_btn is not None else frame.pack(side=tk.LEFT)
-        elif not tabs and frame.winfo_manager():
-            frame.pack_forget()
+        self._place_group_tabs()
 
         current_gid = proxy_groups.group_id_of_view(getattr(self, "overview_view_mode", None))
         if current_gid and current_gid not in tabs:
@@ -5033,6 +5365,7 @@ class VlessApp(tk.Tk):
             else:
                 bar.pack_forget()
         self._render_overview()
+        self._relayout()
 
     def _on_card_selected(self, inst: ProxyInstance, selected: bool):
         if selected:
@@ -5071,7 +5404,9 @@ class VlessApp(tk.Tk):
         try:
             if hasattr(self, "selection_count_lbl") and self.selection_count_lbl.winfo_exists():
                 if not getattr(self, "_flash_active", False):
-                    self.selection_count_lbl.config(text=t("lbl_selected", count=len(selected)))
+                    row = (getattr(self, "_rows_cache", None) or {}).get("selection")
+                    level = row.level if row is not None else 0
+                    self.selection_count_lbl.config(text=self._selected_variants()[min(level, 2)])
             if hasattr(self, "bulk_group_btn") and self.bulk_group_btn.winfo_exists():
                 self.bulk_group_btn.config(state=tk.NORMAL if selected else tk.DISABLED)
         except Exception:
@@ -5721,6 +6056,7 @@ class VlessApp(tk.Tk):
         px = 16
 
         opt_canvas = tk.Canvas(self.options_frame, bg=bg, highlightthickness=0)
+        opt_canvas.is_scroll_host = True      # content scrolls vertically (layout audit)
         opt_scrollbar = ttk.Scrollbar(self.options_frame, orient="vertical", command=opt_canvas.yview)
         opt_content = tk.Frame(opt_canvas, bg=bg)
 
@@ -5768,29 +6104,58 @@ class VlessApp(tk.Tk):
             font=("Segoe UI", 10, "bold"), fg=C["text"], bg=C["card"]
         ).pack(side=tk.LEFT, anchor="w")
 
-        btn_box = tk.Frame(launchers_top, bg=C["card"])
-        btn_box.pack(side=tk.RIGHT)
-
         btn_guide = tk.Button(
-            btn_box, text=t("btn_launchers_guide"), font=("Segoe UI", 9, "bold"),
+            launchers_top, text=t("btn_launchers_guide"), font=("Segoe UI", 9, "bold"),
             bg=C["blue"], fg="#1e1e2e", activebackground=C["teal"],
             relief=tk.FLAT, padx=12, pady=4, cursor="hand2",
             command=self.open_launchers_guide_modal,
         )
-        btn_guide.pack(side=tk.LEFT, padx=(0, 6))
-
         btn_quick = tk.Button(
-            btn_box, text=t("btn_quick_generate_launchers"), font=("Segoe UI", 9),
+            launchers_top, text=t("btn_quick_generate_launchers"), font=("Segoe UI", 9),
             bg=C["overlay"], fg=C["text"], activebackground=C["hover"],
             relief=tk.FLAT, padx=10, pady=4, cursor="hand2",
             command=lambda: self.run_quick_launcher_generation(),
         )
-        btn_quick.pack(side=tk.LEFT)
+        # title on the left, buttons on the right; wraps under the title when narrow
+        responsive.Flow(launchers_top, left=[w for w in launchers_top.pack_slaves()], right=[btn_guide, btn_quick])
 
         tk.Label(
             card_launchers, text=t("lbl_launchers_guide_desc"), font=("Segoe UI", 8),
             fg=C["subtext"], bg=C["card"], wraplength=700, justify=tk.LEFT,
         ).pack(anchor="w", padx=36, pady=(0, 10))
+
+        # 0.3. Window layout: five classic proportions, current layout, proportion range
+        card_layout = tk.Frame(opt_content, bg=C["card"], relief=tk.FLAT, borderwidth=1)
+        card_layout.pack(fill=tk.X, pady=6, padx=2)
+        family = ui_font(self).cget("family")
+        tk.Label(card_layout, text=f"  {t('opt_layout_title')}", font=(family, 10, "bold"),
+                 fg=C["text"], bg=C["card"]).pack(anchor="w", padx=12, pady=(10, 2))
+        self.layout_desc_lbl = tk.Label(card_layout, text=t("opt_layout_desc"), font=(family, 8), fg=C["subtext"],
+                                        bg=C["card"], wraplength=700, justify=tk.LEFT)
+        self.layout_desc_lbl.pack(anchor="w", padx=36, pady=(0, 6))
+        self.layout_presets_frame = tk.Frame(card_layout, bg=C["card"])
+        self.layout_presets_frame.pack(fill=tk.X, padx=36, pady=(2, 4))
+        self.layout_preset_buttons = []
+        for n, lay in enumerate(responsive.LAYOUTS, start=1):
+            b = MacButton(self.layout_presets_frame, text=f"{t(lay.title_key)}  ·  {lay.preset[0]}×{lay.preset[1]}",
+                          variant="secondary", command=lambda k=lay.key: self.apply_layout_preset(k),
+                          font=ui_font(self, 9, False))
+            self.layout_preset_buttons.append(b)
+        self.layout_status_lbl = tk.Label(card_layout, text="", font=(family, 9, "bold"), fg=C["blue"], bg=C["card"])
+        self.layout_status_lbl.pack(anchor="w", padx=36, pady=(2, 2))
+        self.aspect_lock_var = tk.BooleanVar(value=bool(settings_manager.get_setting("window_aspect_lock", True)))
+
+        def _on_aspect_toggle():
+            settings_manager.set_setting("window_aspect_lock", bool(self.aspect_lock_var.get()))
+            self._apply_aspect_lock(bool(self.aspect_lock_var.get()))
+
+        tk.Checkbutton(card_layout, text=f"  {t('opt_layout_aspect')}", variable=self.aspect_lock_var,
+                       font=(family, 9), fg=C["text"], bg=C["card"], selectcolor=C["overlay"],
+                       activebackground=C["card"], activeforeground=C["blue"], command=_on_aspect_toggle,
+                       wraplength=640, justify=tk.LEFT).pack(anchor="w", padx=32, pady=(0, 10))
+
+        responsive.Flow(self.layout_presets_frame, left=self.layout_preset_buttons,
+                        gap=int(6 * self._ui_scale()))
 
         # 0.5. Start port for new proxies (manual "Add" and subscriptions)
         card_port = tk.Frame(opt_content, bg=C["card"], relief=tk.FLAT, borderwidth=1)
@@ -6286,7 +6651,10 @@ class VlessApp(tk.Tk):
         b_content = tk.Frame(b_canvas, bg=bg)
 
         b_content.bind("<Configure>", lambda e: b_canvas.configure(scrollregion=b_canvas.bbox("all")))
-        b_canvas.create_window((0, 0), window=b_content, anchor="nw", width=760)
+        _b_canvas_win = b_canvas.create_window((0, 0), window=b_content, anchor="nw")
+        # content follows the window width (a fixed 760 px was a 380 px column at 200% scaling)
+        b_canvas.bind("<Configure>", lambda e, c=b_canvas, w=_b_canvas_win: c.itemconfig(w, width=e.width), add="+")
+        b_canvas.is_scroll_host = True
         b_canvas.configure(yscrollcommand=b_scrollbar.set)
 
         b_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=px, pady=10)
@@ -6628,7 +6996,10 @@ class VlessApp(tk.Tk):
         w_content = tk.Frame(w_canvas, bg=bg)
 
         w_content.bind("<Configure>", lambda e: w_canvas.configure(scrollregion=w_canvas.bbox("all")))
-        w_canvas.create_window((0, 0), window=w_content, anchor="nw", width=760)
+        _w_canvas_win = w_canvas.create_window((0, 0), window=w_content, anchor="nw")
+        # content follows the window width (a fixed 760 px was a 380 px column at 200% scaling)
+        w_canvas.bind("<Configure>", lambda e, c=w_canvas, w=_w_canvas_win: c.itemconfig(w, width=e.width), add="+")
+        w_canvas.is_scroll_host = True
         w_canvas.configure(yscrollcommand=w_scrollbar.set)
 
         w_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=px, pady=10)
@@ -6671,6 +7042,7 @@ class VlessApp(tk.Tk):
             bg=C["overlay"], fg=C["text"], activebackground=C["hover"], relief=tk.FLAT, padx=6, pady=1,
             command=self._wsl_pick_active_port,
         ).pack(side=tk.LEFT)
+        responsive.Flow(r2, left=r2.pack_slaves(), gap=int(8 * self._ui_scale()))
 
         # Row 3: DNS delegation & IP leak status
         r3 = tk.Frame(card, bg=C["card"])
@@ -6715,16 +7087,18 @@ class VlessApp(tk.Tk):
             command=self._wsl_refresh_status,
         )
         self.wsl_btn_refresh.pack(side=tk.LEFT, padx=6)
+        responsive.Flow(btn_bar, left=btn_bar.pack_slaves(), gap=int(6 * self._ui_scale()))
 
         # Audit Log Box
         log_hdr = tk.Frame(w_content, bg=bg)
         log_hdr.pack(fill=tk.X, pady=(8, 2))
-        tk.Label(log_hdr, text="Журнал аудита изоляции и сетевых проверок:", font=("Segoe UI", 9, "bold"), fg=C["text"], bg=bg).pack(side=tk.LEFT)
-        tk.Button(
+        log_title = tk.Label(log_hdr, text="Журнал аудита изоляции и сетевых проверок:", font=("Segoe UI", 9, "bold"), fg=C["text"], bg=bg)
+        log_clear = tk.Button(
             log_hdr, text=t("btn_wsl_clear_log"), font=("Segoe UI", 8),
             bg=C["overlay"], fg=C["subtext"], activebackground=C["hover"], relief=tk.FLAT, padx=6, pady=1,
             command=self._wsl_clear_log,
-        ).pack(side=tk.RIGHT)
+        )
+        responsive.Flow(log_hdr, left=[log_title], right=[log_clear])
 
         self.wsl_log_text = scrolledtext.ScrolledText(
             w_content, height=13, font=("Consolas", 9),
@@ -6943,11 +7317,13 @@ class VlessApp(tk.Tk):
                 continue                      # not built yet: it will be, in the new language
             for widget in frame.winfo_children():
                 widget.destroy()
-            builder()
+            self._run_tab_builder(builder)
 
         self._update_header_stats()
         if hasattr(self, "btn_restart_services") and self.btn_restart_services and self.btn_restart_services.winfo_exists():
             self.btn_restart_services.config(text=f"🔄 {t('btn_restart_services')}")
+        self._rows_cache = None          # labels changed language: rebuild the variants
+        self.after_idle(self._relayout)
         if HAS_TRAY and hasattr(self, "_tray_icon") and self._tray_icon:
             self._tray_icon.menu = self._build_tray_menu()
         self.update_tray_icon()
@@ -7203,6 +7579,14 @@ class VlessApp(tk.Tk):
 
     def _update_header_stats_now(self):
         self._header_stats_pending = False
+        row = getattr(self, "_rows_cache", {}).get("top") if getattr(self, "_rows_cache", None) else None
+        if row is not None:
+            try:
+                row.items[1].variants = self._count_variants()
+                self.count_label.config(text=row.items[1].variant(row.level))
+                return
+            except tk.TclError:
+                pass
         running = sum(1 for inst in self.instances if inst.running)
         total = len(self.instances)
         try:

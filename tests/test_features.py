@@ -92,6 +92,12 @@ def test_backup_restore():
     assert len(fp) == 19, f"Fingerprint unexpected format: {fp}"
     print(f"Password fingerprint: {fp}")
 
+    # Own sample data (the tests package points INSTANCES_FILE at a temp folder; this test
+    # used to export the user's real proxies and restore them over the real file)
+    backup_manager.INSTANCES_FILE.write_text(json.dumps([{
+        "name": "Backup Test", "url": "vless://11111111-1111-1111-1111-111111111111@127.0.0.1:9#t",
+        "listen": "127.0.0.1:39999", "order": 0}]), encoding="utf-8")
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         # Export backup

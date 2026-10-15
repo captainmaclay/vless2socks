@@ -143,6 +143,8 @@ _BORROWED = [
     "_flash_selection_info", "_flush_card_updates",
     "_copy_tg_proxy_link", "_open_card_context_menu", "_report_telegram_health",
     "_rebuild_group_tabs", "open_group_tabs", "close_group_tab", "open_group_tab_picker",
+    "_place_group_tabs", "_relayout", "_ui_scale", "current_layout", "_adaptive_rows", "_fit_notebook_tabs",
+    "_count_variants", "_selected_variants",
 ]
 
 

@@ -94,7 +94,9 @@ class StopAndIndicationTest(unittest.TestCase):
 
     def test_check_geo_now_when_running(self):
         self.inst.running = True
+        # the probe runs on the shared background pool: run it inline, a busy pool made this flaky
         with patch("gui.is_port_alive", return_value=True), \
+             patch("gui.submit_background", side_effect=lambda fn, *a, **k: fn(*a, **k)), \
              patch("geo_ip.fetch_geo_async") as mock_fetch:
             self.inst.check_geo_now()
             mock_fetch.assert_called_once()
