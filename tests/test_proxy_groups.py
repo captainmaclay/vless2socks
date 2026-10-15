@@ -646,7 +646,7 @@ class TestGroupTabsGui(_TempSettingsMixin, unittest.TestCase):
         return inst
 
     def _tab_titles(self):
-        return [self.app._group_tab_widgets[g][1].cget("text") for g in proxy_groups.get_group_tabs()]
+        return [self.app._group_tab_widgets[g].text for g in proxy_groups.get_group_tabs()]
 
     def _shown_names(self):
         names = {"in-alpha", "in-beta", "loose"}
@@ -658,15 +658,15 @@ class TestGroupTabsGui(_TempSettingsMixin, unittest.TestCase):
         self.assertEqual(self.app.overview_view_mode, proxy_groups.group_view_mode(self.b["id"]))
         self.assertEqual(self._shown_names(), ["in-beta"])
 
-        self.app._group_tab_widgets[self.a["id"]][1].invoke()      # click the "Alpha" tab
+        self.app._group_tab_widgets[self.a["id"]].select()         # click the "Alpha" tab
         self.assertEqual(self._shown_names(), ["in-alpha"])
-        self.assertEqual(self.app._group_tab_widgets[self.a["id"]][1].cget("bg"), gui.C["blue"])
-        self.assertEqual(self.app._group_tab_widgets[self.b["id"]][1].cget("bg"), gui.C["overlay"])
+        self.assertTrue(self.app._group_tab_widgets[self.a["id"]].active)
+        self.assertFalse(self.app._group_tab_widgets[self.b["id"]].active)
         self.assertEqual(proxy_groups.get_view_mode(), proxy_groups.group_view_mode(self.a["id"]))
 
     def test_close_active_tab_falls_back_to_groups_view(self):
         self.app.open_group_tabs([self.a["id"], self.b["id"]])
-        self.app._group_tab_widgets[self.b["id"]][2].invoke()      # ✕ on the active "Beta" tab
+        self.app._group_tab_widgets[self.b["id"]].close()          # ✕ on the active "Beta" tab
         self.assertEqual(self._tab_titles(), ["📁 Alpha"])
         self.assertEqual(self.app.overview_view_mode, proxy_groups.VIEW_GROUPS)
         self.assertEqual(sorted(self._shown_names()), ["in-alpha", "in-beta", "loose"])
@@ -674,7 +674,7 @@ class TestGroupTabsGui(_TempSettingsMixin, unittest.TestCase):
 
     def test_close_inactive_tab_keeps_view(self):
         self.app.open_group_tabs([self.a["id"], self.b["id"]])
-        self.app._group_tab_widgets[self.a["id"]][2].invoke()
+        self.app._group_tab_widgets[self.a["id"]].close()
         self.assertEqual(self.app.overview_view_mode, proxy_groups.group_view_mode(self.b["id"]))
         self.assertEqual(self._tab_titles(), ["📁 Beta"])
 
@@ -739,34 +739,78 @@ class TestGroupTabsGui(_TempSettingsMixin, unittest.TestCase):
 
 
 class TestOverviewViewBarOrder(_TempSettingsMixin, unittest.TestCase):
-    """On the real Overview tab: List, [group tabs], By groups, + Group — in that order."""
+    """On the real Overview tab: [List | By groups] | [group tabs] [+ Group]."""
 
-    def test_tabs_sit_left_of_by_groups(self):
+    def _build(self):
+        app = _GroupsTestApp()
+        app.start_all = app.stop_all = app.refresh_all_geo = lambda: None
+        app.open_subscription_dialog = lambda: None
+        app.zapret_watcher = None
+        app.overview_frame = tk.Frame(app, bg=gui.C["bg"])
+        app.overview_frame.pack(fill=tk.BOTH, expand=True)
+        with mock.patch.object(gui, "ZapretRecoveryWidget", lambda parent, watcher=None: tk.Frame(parent)):
+            gui.VlessApp._build_overview_tab(app)
+        app.deiconify()
+        app.geometry("1600x900")
+        app.update()
+        return app
+
+    def _order(self, app):
+        bar = app.view_segmented.master
+        names = {str(app.view_segmented): "SEGMENTED", str(app.view_divider): "DIVIDER",
+                 str(app._group_tabs_frame): "TABS", str(app.add_group_tab_btn): "+GROUP"}
+        return [names.get(str(w), str(w)) for w in bar.pack_slaves()]
+
+    def test_tabs_come_after_a_divider_not_between_view_buttons(self):
         a = proxy_groups.create_group("Alpha")
         proxy_groups.open_group_tabs([a["id"]])
-        app = _GroupsTestApp()
+        app = self._build()
         try:
-            app.start_all = app.stop_all = app.refresh_all_geo = lambda: None
-            app.open_subscription_dialog = lambda: None
-            app.zapret_watcher = None
-            app.overview_frame = tk.Frame(app)
-            with mock.patch.object(gui, "ZapretRecoveryWidget", lambda parent, watcher=None: tk.Frame(parent)):
-                gui.VlessApp._build_overview_tab(app)
-            bar = app._group_tabs_frame.master
-            labels = (gui.t("view_list"), gui.t("view_groups"), gui.t("btn_add_group_tab"))
-            order = []
-            for w in bar.pack_slaves():
-                if w is app._group_tabs_frame:
-                    order.append("TABS")
-                elif isinstance(w, tk.Button) and w.cget("text") in labels:
-                    order.append(w.cget("text"))
-            self.assertEqual(order, [gui.t("view_list"), "TABS", gui.t("view_groups"), gui.t("btn_add_group_tab")])
-            self.assertEqual(app._group_tab_widgets[a["id"]][1].cget("text"), "📁 Alpha")
+            self.assertEqual(self._order(app), ["SEGMENTED", "DIVIDER", "TABS", "+GROUP"])
+            self.assertEqual([k for k, _ in app.view_segmented.segments],
+                             [proxy_groups.VIEW_LIST, proxy_groups.VIEW_GROUPS])   # both views in one control
+            chip = app._group_tab_widgets[a["id"]]
+            self.assertIsInstance(chip, gui.MacTabChip)                              # tabs look like tabs
+            self.assertEqual(chip.text, "📁 Alpha")
         finally:
             app.destroy()
             del app
             gc.collect()
 
+    def test_no_gap_when_no_tab_is_open(self):
+        app = self._build()
+        try:
+            self.assertEqual(self._order(app), ["SEGMENTED", "DIVIDER", "+GROUP"])   # empty strip not packed
+            a = proxy_groups.create_group("Alpha")
+            app.open_group_tabs([a["id"]])
+            app.update()
+            app.close_group_tab(a["id"])
+            app.update()
+            # the bug: an emptied tab frame kept its size and left a hole
+            self.assertEqual(self._order(app), ["SEGMENTED", "DIVIDER", "+GROUP"])
+            gap = app.add_group_tab_btn.winfo_rootx() - (app.view_divider.winfo_rootx() + app.view_divider.winfo_width())
+            self.assertLessEqual(gap, 2)
+        finally:
+            app.destroy()
+            del app
+            gc.collect()
+
+    def test_segmented_reflects_the_view(self):
+        a = proxy_groups.create_group("Alpha")
+        app = self._build()
+        try:
+            app.set_overview_view_mode(proxy_groups.VIEW_GROUPS)
+            self.assertEqual(app.view_segmented.value, proxy_groups.VIEW_GROUPS)
+            app.open_group_tabs([a["id"]])
+            self.assertEqual(app.view_segmented.value, "")          # a tab is the view: no segment lit
+            self.assertTrue(app._group_tab_widgets[a["id"]].active)
+            app.view_segmented.select(proxy_groups.VIEW_LIST, notify=True)
+            self.assertEqual(app.overview_view_mode, proxy_groups.VIEW_LIST)
+            self.assertFalse(app._group_tab_widgets[a["id"]].active)
+        finally:
+            app.destroy()
+            del app
+            gc.collect()
 
 if __name__ == "__main__":
     unittest.main()

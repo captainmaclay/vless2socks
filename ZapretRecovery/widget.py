@@ -13,6 +13,13 @@ from __future__ import annotations
 
 import sys
 import tkinter as tk
+
+try:
+    from macui import MacButton, ui_font
+except ImportError:  # running the module standalone
+    import sys as _sys, pathlib as _pl
+    _sys.path.insert(0, str(_pl.Path(__file__).resolve().parent.parent))
+    from macui import MacButton, ui_font
 from typing import Any, Callable, Dict, Optional
 
 import settings_manager
@@ -179,25 +186,17 @@ class ZapretRecoveryWidget(tk.Frame):
         self.status_box = tk.Frame(left_box, bg=bg)
         self.status_box.pack(side=tk.LEFT)
 
-        self.badge_main = tk.Label(
-            self.status_box,
-            text="Main: ?",
-            font=("Segoe UI", 8, "bold"),
-            bg=THEME["overlay"],
-            fg=THEME["subtext"],
-            padx=6,
-            pady=1,
+        # status pills (macOS style, see macui.MacButton with interactive=False)
+        self.badge_main = MacButton(
+            self.status_box, text="Main: ?", interactive=False, fill=THEME["overlay"], fg=THEME["subtext"],
+            font=ui_font(self, 8, True), padx=8, pady=2,
         )
         self.badge_main.pack(side=tk.LEFT, padx=3)
 
-        self.badge_tg = tk.Label(
-            self.status_box,
-            text="TG Proxy: ?",
-            font=("Segoe UI", 8, "bold"),
-            bg=THEME["overlay"],
-            fg=THEME["subtext"],
-            padx=6,
-            pady=1,
+        self.badge_tg = MacButton(
+            self.status_box, text="TG Proxy: ?", interactive=False, fill=THEME["overlay"], fg=THEME["subtext"],
+            font=ui_font(self, 8, True), padx=8, pady=2,
+            width_labels=("TG Proxy: DOWN", "TG: RELAY ERR", "TG: НЕ ВЫБРАН", "TG: UNDEFINED"),
         )
         self.badge_tg.pack(side=tk.LEFT, padx=3)
 
@@ -215,34 +214,16 @@ class ZapretRecoveryWidget(tk.Frame):
         right_box.pack(side=tk.RIGHT)
 
         # 1. Кнопка-свитчер ON/OFF
-        self.btn_switcher = tk.Button(
-            right_box,
-            text="ON",
-            font=("Segoe UI", 9, "bold"),
-            relief=tk.FLAT,
-            padx=14,
-            pady=3,
-            cursor="hand2",
-            command=self._toggle_switcher,
+        self.btn_switcher = MacButton(
+            right_box, text="ON", command=self._toggle_switcher, padx=14, width_labels=("OFF",),
         )
         self.btn_switcher.pack(side=tk.LEFT)
 
         # 2. Прилегающая кнопка со стрелочкой ▼
-        self.btn_arrow = tk.Button(
-            right_box,
-            text="▼",
-            font=("Segoe UI", 8, "bold"),
-            bg=THEME["arrow_bg"],
-            fg=THEME["text"],
-            activebackground=THEME["arrow_hover"],
-            activeforeground=THEME["blue"],
-            relief=tk.FLAT,
-            padx=7,
-            pady=4,
-            cursor="hand2",
-            command=self.toggle_menu,
+        self.btn_arrow = MacButton(
+            right_box, text="▼", font=ui_font(self, 8, True), padx=8, command=self.toggle_menu,
         )
-        self.btn_arrow.pack(side=tk.LEFT, padx=(1, 0))
+        self.btn_arrow.pack(side=tk.LEFT, padx=(3, 0), fill=tk.Y)
 
     def _toggle_switcher(self):
         """Переключение состояния свитчера ON/OFF."""
@@ -260,22 +241,10 @@ class ZapretRecoveryWidget(tk.Frame):
         is_on = self.enabled_var.get()
         if is_on:
             # Тускло-зеленый фон с надписью ON
-            self.btn_switcher.config(
-                text="ON",
-                bg=THEME["dim_green"],
-                fg=THEME["green_fg"],
-                activebackground=THEME["dim_green_hover"],
-                activeforeground="#ffffff",
-            )
+            self.btn_switcher.config(text="ON", fill=THEME["dim_green"], fg=THEME["green_fg"])
         else:
             # Приглушенный фон с надписью OFF
-            self.btn_switcher.config(
-                text="OFF",
-                bg=THEME["off_bg"],
-                fg=THEME["off_fg"],
-                activebackground=THEME["off_bg_hover"],
-                activeforeground="#ffffff",
-            )
+            self.btn_switcher.config(text="OFF", fill=THEME["off_bg"], fg=THEME["off_fg"])
 
     def _persist_settings(self):
         """Сохранение состояния свитчера и чекбоксов в settings.json (попадает в бэкапы)."""
@@ -310,9 +279,9 @@ class ZapretRecoveryWidget(tk.Frame):
 
         # Бейдж Main
         if main_ok:
-            self.badge_main.config(text="Main: OK", bg="#20402b", fg=THEME["green_fg"])
+            self.badge_main.config(text="Main: OK", fill="#20402b", fg=THEME["green_fg"])
         else:
-            self.badge_main.config(text="Main: DOWN", bg="#4a262a", fg=THEME["red"])
+            self.badge_main.config(text="Main: DOWN", fill="#4a262a", fg=THEME["red"])
 
         # Бейдж TG
         if not has_tg_target:
@@ -323,13 +292,13 @@ class ZapretRecoveryWidget(tk.Frame):
             except Exception:
                 pass
             none_text = "TG: UNDEFINED" if lang.lower().startswith("en") else "TG: НЕ ВЫБРАН"
-            self.badge_tg.config(text=none_text, bg="#36384a", fg="#9399b2")
+            self.badge_tg.config(text=none_text, fill="#36384a", fg="#9399b2")
         elif relay_error:
-            self.badge_tg.config(text="TG: RELAY ERR", bg="#4a3520", fg=THEME["orange"])
+            self.badge_tg.config(text="TG: RELAY ERR", fill="#4a3520", fg=THEME["orange"])
         elif tg_ok:
-            self.badge_tg.config(text="TG Proxy: OK", bg="#20402b", fg=THEME["green_fg"])
+            self.badge_tg.config(text="TG Proxy: OK", fill="#20402b", fg=THEME["green_fg"])
         else:
-            self.badge_tg.config(text="TG Proxy: DOWN", bg="#4a262a", fg=THEME["red"])
+            self.badge_tg.config(text="TG Proxy: DOWN", fill="#4a262a", fg=THEME["red"])
 
         # Текст восстановления
         if recovering:

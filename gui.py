@@ -39,6 +39,7 @@ import proxy_groups
 import settings_manager
 import subscriptions
 from ZapretRecovery import Zapret2Watcher, ZapretRecoveryWidget
+from macui import MAC, MacButton, MacDivider, MacSegmented, MacTabChip, ui_font
 from overview_view import Button as OverviewButton, CardModel, HeaderModel, HintModel, OverviewView
 from i18n import get_current_language, load_language_preference, save_language_preference, t
 from vless2socks.paths import APP_DIR, FROZEN, bundled, unpack_bundled_bin
@@ -771,7 +772,9 @@ def _restart_wsl_unlocked() -> tuple[bool, str]:
 def make_telegram_icon(size: int) -> Optional["Image.Image"]:
     """Telegram logo (white paper plane on a blue circle), drawn at 4x and scaled down
     for smooth edges. None when Pillow is missing."""
-    if not HAS_TRAY:
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
         return None
     big = size * 4
     img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
@@ -4427,64 +4430,56 @@ class VlessApp(tk.Tk):
         self.top_bar = tk.Frame(self, bg=C["surface"], height=46)
         self.top_bar.pack(fill=tk.X)
 
-        title_badge = tk.Label(
-            self.top_bar, text=f" {t('app_badge')} ", font=("Segoe UI", 9, "bold"),
-            bg=C["blue"], fg="#1e1e2e", padx=6, pady=2,
+        title_badge = MacButton(
+            self.top_bar, text=t("app_badge"), variant="primary", interactive=False,
+            font=ui_font(self, 9, True), padx=10, pady=4,
         )
         title_badge.pack(side=tk.LEFT, padx=(10, 8), pady=8)
+        self.title_badge = title_badge
 
         self.count_label = tk.Label(
-            self.top_bar, text="", font=("Segoe UI", 9, "bold"), fg=C["text"], bg=C["surface"],
+            self.top_bar, text="", font=(ui_font(self).cget("family"), 9, "bold"), fg=C["text"], bg=C["surface"],
         )
         self.count_label.pack(side=tk.LEFT, padx=4)
 
         # Quick Add Button in header (far right)
-        add_btn = tk.Button(
-            self.top_bar, text=t("btn_new_tab"), font=("Segoe UI", 9, "bold"),
-            bg=C["green"], fg="#1e1e2e", activebackground=C["teal"],
-            relief=tk.FLAT, padx=12, pady=3, command=self.add_new_instance,
+        self.add_proxy_btn = MacButton(
+            self.top_bar, text=t("btn_new_tab"), variant="success", command=self.add_new_instance,
         )
-        add_btn.pack(side=tk.RIGHT, padx=(4, 10), pady=8)
+        self.add_proxy_btn.pack(side=tk.RIGHT, padx=(4, 10), pady=8)
 
-        # RestartServices Split-Button Container (directly adjacent to Add Button)
+        # RestartServices split button (directly adjacent to Add Button)
         self.restart_container = tk.Frame(self.top_bar, bg=C["surface"])
         self.restart_container.pack(side=tk.RIGHT, padx=(0, 6), pady=8)
 
-        # 1. Main Action Button: [ 🔄 RestartServices ]
-        self.btn_restart_services = tk.Button(
-            self.restart_container,
-            text=f"🔄 {t('btn_restart_services')}",
-            font=("Segoe UI", 9, "bold"),
-            bg=C["blue"], fg="#1e1e2e", activebackground=C["teal"],
-            relief=tk.FLAT, padx=10, pady=3, cursor="hand2",
+        # its width covers every label it shows, so it never shifts its neighbours
+        self.btn_restart_services = MacButton(
+            self.restart_container, text=f"🔄 {t('btn_restart_services')}", variant="primary",
             command=self.execute_restart_services,
+            width_labels=(f"⏳ {t('msg_restart_in_progress')}", f"✅ {t('btn_restart_services')}"),
         )
         self.btn_restart_services.pack(side=tk.LEFT)
 
-        # 2. Adjacent Arrow Button: [ ▼ ] with slide-down menu
-        self.btn_restart_arrow = tk.Button(
-            self.restart_container,
-            text="▼",
-            font=("Segoe UI", 8, "bold"),
-            bg=C["overlay"], fg=C["text"], activebackground=C["hover"], activeforeground=C["blue"],
-            relief=tk.FLAT, padx=6, pady=4, cursor="hand2",
-            command=self.toggle_restart_services_menu,
+        self.btn_restart_arrow = MacButton(
+            self.restart_container, text="▼", variant="secondary", padx=8,
+            font=ui_font(self, 8, True), command=self.toggle_restart_services_menu,
         )
-        self.btn_restart_arrow.pack(side=tk.LEFT, padx=(1, 0))
+        self.btn_restart_arrow.pack(side=tk.LEFT, padx=(3, 0), fill=tk.Y)
 
         # 2. Main Navigation Notebook
         style = ttk.Style()
         style.theme_use("default")
         style.configure("TNotebook", background=C["bg"], borderwidth=0)
+        family = ui_font(self).cget("family")
         style.configure(
             "TNotebook.Tab",
-            background=C["surface"], foreground=C["text"],
-            padding=[14, 7], font=("Segoe UI", 9, "bold"), borderwidth=0,
+            background=C["surface"], foreground=MAC["label_2"],
+            padding=[14, 7], font=(family, 9, "bold"), borderwidth=0, focuscolor=C["surface"],
         )
         style.map(
             "TNotebook.Tab",
-            background=[("selected", C["bg"])],
-            foreground=[("selected", C["blue"])],
+            background=[("selected", C["bg"]), ("active", MAC["control"])],
+            foreground=[("selected", MAC["label"]), ("active", MAC["label"])],
         )
 
         self.nav_notebook = ttk.Notebook(self)
@@ -4601,24 +4596,15 @@ class VlessApp(tk.Tk):
 
         btn_box = tk.Frame(header, bg=bg)
         btn_box.pack(side=tk.RIGHT)
+        self.overview_btn_box = btn_box
 
-        tk.Button(
-            btn_box, text=t("btn_start_all"), font=("Segoe UI", 9, "bold"),
-            bg=C["green"], fg="#1e1e2e", activebackground=C["teal"],
-            relief=tk.FLAT, padx=10, pady=3, command=self.start_all,
-        ).pack(side=tk.LEFT, padx=3)
-
-        tk.Button(
-            btn_box, text=t("btn_stop_all"), font=("Segoe UI", 9, "bold"),
-            bg=C["red"], fg="#1e1e2e", activebackground="#eba0ac",
-            relief=tk.FLAT, padx=10, pady=3, command=self.stop_all,
-        ).pack(side=tk.LEFT, padx=3)
-
-        tk.Button(
-            btn_box, text=t("btn_refresh_all_geo"), font=("Segoe UI", 9),
-            bg=C["overlay"], fg=C["text"], activebackground=C["hover"],
-            relief=tk.FLAT, padx=10, pady=3, command=self.refresh_all_geo,
-        ).pack(side=tk.LEFT, padx=3)
+        self.start_all_btn = MacButton(btn_box, text=t("btn_start_all"), variant="success", command=self.start_all)
+        self.start_all_btn.pack(side=tk.LEFT, padx=3)
+        self.stop_all_btn = MacButton(btn_box, text=t("btn_stop_all"), variant="danger", command=self.stop_all)
+        self.stop_all_btn.pack(side=tk.LEFT, padx=3)
+        self.refresh_geo_btn = MacButton(btn_box, text=t("btn_refresh_all_geo"), variant="secondary",
+                                         command=self.refresh_all_geo)
+        self.refresh_geo_btn.pack(side=tk.LEFT, padx=3)
 
         # Zapret2 Watcher Block (Auto-recovery & Watcher)
         self.zapret_watcher_widget = ZapretRecoveryWidget(self.overview_frame, watcher=self.zapret_watcher)
@@ -4628,86 +4614,62 @@ class VlessApp(tk.Tk):
         view_bar = tk.Frame(self.overview_frame, bg=bg)
         view_bar.pack(fill=tk.X, padx=px, pady=(0, 2))
 
-        tk.Label(view_bar, text=t("lbl_view"), font=("Segoe UI", 9, "bold"), fg=C["subtext"], bg=bg).pack(side=tk.LEFT, padx=(0, 6))
-
+        # [ List | By groups ]  |  [Finland ×] [ALL ×]  [+ Group]
+        # The view switch is one segmented control; open group tabs live after a divider
+        # and look like tabs, not like a third view button.
         self.overview_view_mode = proxy_groups.get_view_mode()
-        self._view_mode_buttons: dict[str, tk.Button] = {}
-        for mode, label_key in ((proxy_groups.VIEW_LIST, "view_list"), (proxy_groups.VIEW_GROUPS, "view_groups")):
-            if mode == proxy_groups.VIEW_GROUPS:
-                # Single-group tabs sit between "List" and "By groups"
-                self._group_tabs_frame = tk.Frame(view_bar, bg=bg)
-                self._group_tabs_frame.pack(side=tk.LEFT)
-            btn = tk.Button(
-                view_bar, text=t(label_key), font=("Segoe UI", 9, "bold"),
-                relief=tk.FLAT, padx=10, pady=2, cursor="hand2",
-                command=lambda m=mode: self.set_overview_view_mode(m),
-            )
-            btn.pack(side=tk.LEFT, padx=(0, 2))
-            self._view_mode_buttons[mode] = btn
-
-        tk.Button(
-            view_bar, text=t("btn_add_group_tab"), font=("Segoe UI", 9, "bold"),
-            bg=C["overlay"], fg=C["green"], activebackground=C["hover"], activeforeground=C["green"],
-            relief=tk.FLAT, padx=8, pady=2, cursor="hand2",
-            command=self.open_group_tab_picker,
-        ).pack(side=tk.LEFT, padx=(2, 0))
+        self.view_segmented = MacSegmented(
+            view_bar, [(proxy_groups.VIEW_LIST, t("view_list")), (proxy_groups.VIEW_GROUPS, t("view_groups"))],
+            value=self.overview_view_mode if self.overview_view_mode in (proxy_groups.VIEW_LIST, proxy_groups.VIEW_GROUPS) else "",
+            command=self.set_overview_view_mode,
+        )
+        self.view_segmented.pack(side=tk.LEFT)
+        self.view_divider = MacDivider(view_bar, height=22)
+        self.view_divider.pack(side=tk.LEFT, fill=tk.Y)
+        self._group_tabs_frame = tk.Frame(view_bar, bg=bg)   # packed only while it has tabs
+        self.add_group_tab_btn = MacButton(
+            view_bar, text=t("btn_add_group_tab"), variant="tinted", command=self.open_group_tab_picker,
+        )
+        self.add_group_tab_btn.pack(side=tk.LEFT)
         self._rebuild_group_tabs()
 
         # Actions get their own row: open group tabs would push them off the view row
         actions_bar = tk.Frame(self.overview_frame, bg=bg)
         actions_bar.pack(fill=tk.X, padx=px, pady=(4, 2))
 
-        tk.Button(
-            actions_bar, text=t("btn_groups"), font=("Segoe UI", 9, "bold"),
-            bg=C["overlay"], fg=C["blue"], activebackground=C["hover"], activeforeground=C["blue"],
-            relief=tk.FLAT, padx=10, pady=2, cursor="hand2",
-            command=self.open_groups_manager,
-        ).pack(side=tk.RIGHT)
+        self.groups_btn = MacButton(actions_bar, text=t("btn_groups"), variant="secondary",
+                                    command=self.open_groups_manager)
+        self.groups_btn.pack(side=tk.RIGHT)
 
         self._selection_mode = False
         self._selected: set[ProxyInstance] = set()
-        self.select_mode_btn = tk.Button(
-            actions_bar, text=t("btn_select_mode"), font=("Segoe UI", 9, "bold"),
-            relief=tk.FLAT, padx=10, pady=2, cursor="hand2",
-            command=self.toggle_selection_mode,
-        )
+        self.select_mode_btn = MacButton(actions_bar, text=t("btn_select_mode"), variant="secondary",
+                                         command=self.toggle_selection_mode)
         self.select_mode_btn.pack(side=tk.RIGHT, padx=(0, 6))
         self._style_select_mode_button()
 
         # One Telegram button: copies the link to the shared Telegram port (dispatcher)
-        size = max(16, int(round(22 * float(self.winfo_fpixels("1i")) / 96.0)))
+        size = max(16, int(round(18 * float(self.winfo_fpixels("1i")) / 96.0)))
         self._tg_icon_main = telegram_photo(self, size)
-        tg_btn = tk.Button(
-            actions_bar, image=self._tg_icon_main, text="" if self._tg_icon_main else "✈",
-            font=("Segoe UI", 10, "bold"), bg=C["overlay"], fg=C["blue"],
-            activebackground=C["hover"], relief=tk.FLAT, padx=10, pady=5, cursor="hand2",
-            command=self._copy_tg_proxy_link,
+        self.tg_link_button = MacButton(
+            actions_bar, text="" if self._tg_icon_main else "✈", image=self._tg_icon_main,
+            variant="secondary", padx=8, command=self._copy_tg_proxy_link,
         )
-        tg_btn.pack(side=tk.RIGHT, padx=(0, 6), fill=tk.Y)
-        self.tg_link_button = tg_btn
+        self.tg_link_button.pack(side=tk.RIGHT, padx=(0, 6))
 
-        tk.Button(
-            actions_bar, text=t("btn_add_subscription"), font=("Segoe UI", 9, "bold"),
-            bg=C["green"], fg="#1e1e2e", activebackground=C["teal"],
-            relief=tk.FLAT, padx=10, pady=2, cursor="hand2",
-            command=self.open_subscription_dialog,
-        ).pack(side=tk.RIGHT, padx=(0, 6))
+        self.add_subscription_btn = MacButton(actions_bar, text=t("btn_add_subscription"), variant="success",
+                                              command=self.open_subscription_dialog)
+        self.add_subscription_btn.pack(side=tk.RIGHT, padx=(0, 6))
 
         # Bulk actions, shown only in selection mode
         self.selection_bar = tk.Frame(self.overview_frame, bg=bg)
         for label_key, command in (("btn_select_all", self.select_all_proxies), ("btn_clear_selection", self.clear_proxy_selection)):
-            tk.Button(
-                self.selection_bar, text=t(label_key), font=("Segoe UI", 9),
-                bg=C["overlay"], fg=C["text"], activebackground=C["hover"],
-                relief=tk.FLAT, padx=10, pady=2, cursor="hand2", command=command,
-            ).pack(side=tk.LEFT, padx=(0, 4))
-        self.selection_count_lbl = tk.Label(self.selection_bar, text="", font=("Segoe UI", 9, "bold"), fg=C["subtext"], bg=bg)
+            MacButton(self.selection_bar, text=t(label_key), variant="secondary", command=command).pack(
+                side=tk.LEFT, padx=(0, 6))
+        self.selection_count_lbl = tk.Label(self.selection_bar, text="", font=(ui_font(self).cget("family"), 9, "bold"),
+                                            fg=C["subtext"], bg=bg)
         self.selection_count_lbl.pack(side=tk.LEFT, padx=(8, 0))
-        self.bulk_group_btn = tk.Button(
-            self.selection_bar, text=t("btn_move_to_group"), font=("Segoe UI", 9, "bold"),
-            bg=C["blue"], fg="#1e1e2e", activebackground=C["teal"], disabledforeground=C["muted"],
-            relief=tk.FLAT, padx=10, pady=2, cursor="hand2",
-        )
+        self.bulk_group_btn = MacButton(self.selection_bar, text=t("btn_move_to_group"), variant="primary")
         self.bulk_group_btn.config(command=lambda: self._open_bulk_group_menu(self.bulk_group_btn))
         self.bulk_group_btn.pack(side=tk.RIGHT)
 
@@ -4892,13 +4854,13 @@ class VlessApp(tk.Tk):
         # fixed width over all its labels: a status change then never moves other buttons
         widths = (t("btn_on"), t("btn_off"), "⏳ ...")
         if inst.is_transitioning:
-            toggle = OverviewButton("⏳ ...", None, bg=C["yellow"], fg="#1e1e2e", enabled=False, bold=True,
+            toggle = OverviewButton("⏳ ...", None, bg=MAC["orange"], fg="#1d1d1f", enabled=False, bold=True,
                                     name="toggle", width_labels=widths)
         elif inst.running:
-            toggle = OverviewButton(t("btn_off"), inst.toggle_async, bg=C["red"], fg="#1e1e2e", bold=True,
+            toggle = OverviewButton(t("btn_off"), inst.toggle_async, bg=MAC["red"], fg="#ffffff", bold=True,
                                     name="toggle", width_labels=widths)
         else:
-            toggle = OverviewButton(t("btn_on"), inst.toggle_async, bg=C["green"], fg="#1e1e2e", bold=True,
+            toggle = OverviewButton(t("btn_on"), inst.toggle_async, bg=MAC["green"], fg="#ffffff", bold=True,
                                     name="toggle", width_labels=widths)
         buttons = [toggle]
         buttons += [
@@ -4908,9 +4870,9 @@ class VlessApp(tk.Tk):
         ]
         for b in buttons:
             if b.bg == "#313244":
-                b.bg = C["overlay"]
+                b.bg = MAC["control"]
             if b.fg == "#cdd6f4":
-                b.fg = C["text"]
+                b.fg = MAC["label"]
 
         selecting = getattr(self, "_selection_mode", False)
         return CardModel(
@@ -4931,25 +4893,19 @@ class VlessApp(tk.Tk):
 
     # ── Proxy Groups ──────────────────────────────────────────
     def _style_view_mode_buttons(self):
-        for mode, btn in getattr(self, "_view_mode_buttons", {}).items():
-            active = mode == self.overview_view_mode
-            btn.config(
-                bg=C["blue"] if active else C["overlay"],
-                fg="#1e1e2e" if active else C["text"],
-                activebackground=C["teal"] if active else C["hover"],
-            )
-        for gid, (tab, name_btn, close_btn) in getattr(self, "_group_tab_widgets", {}).items():
-            active = self.overview_view_mode == proxy_groups.group_view_mode(gid)
-            colors = dict(
-                bg=C["blue"] if active else C["overlay"],
-                fg="#1e1e2e" if active else C["text"],
-                activebackground=C["teal"] if active else C["hover"],
-            )
+        """Reflect the current view: the segmented control shows List / By groups, or
+        nothing when a group tab is the view; the active tab chip is highlighted."""
+        seg = getattr(self, "view_segmented", None)
+        if seg is not None:
             try:
-                tab.config(bg=colors["bg"])
-                name_btn.config(**colors)
-                close_btn.config(**colors)
-            except Exception:
+                in_tab = proxy_groups.group_id_of_view(self.overview_view_mode) is not None
+                seg.set_value("" if in_tab else self.overview_view_mode)
+            except tk.TclError:
+                pass
+        for gid, chip in getattr(self, "_group_tab_widgets", {}).items():
+            try:
+                chip.set_active(self.overview_view_mode == proxy_groups.group_view_mode(gid))
+            except tk.TclError:
                 pass
 
     def set_overview_view_mode(self, mode: str):
@@ -4968,25 +4924,23 @@ class VlessApp(tk.Tk):
             return
         for w in frame.winfo_children():
             w.destroy()
-        self._group_tab_widgets: dict[str, tuple] = {}
+        self._group_tab_widgets: dict[str, MacTabChip] = {}
         names = {g["id"]: g["name"] for g in proxy_groups.load_groups()}
         tabs = proxy_groups.get_group_tabs()
         for gid in tabs:
-            tab = tk.Frame(frame, bg=C["overlay"])
-            tab.pack(side=tk.LEFT, padx=(0, 2))
-            name_btn = tk.Button(
-                tab, text=f"📁 {names[gid]}", font=("Segoe UI", 9, "bold"),
-                relief=tk.FLAT, bd=0, padx=8, pady=2, cursor="hand2",
+            chip = MacTabChip(
+                frame, text=f"📁 {names[gid]}",
                 command=lambda g=gid: self.set_overview_view_mode(proxy_groups.group_view_mode(g)),
+                on_close=lambda g=gid: self.close_group_tab(g),
             )
-            name_btn.pack(side=tk.LEFT)
-            close_btn = tk.Button(
-                tab, text="✕", font=("Segoe UI", 8, "bold"),
-                relief=tk.FLAT, bd=0, padx=6, pady=2, cursor="hand2",
-                command=lambda g=gid: self.close_group_tab(g),
-            )
-            close_btn.pack(side=tk.LEFT)
-            self._group_tab_widgets[gid] = (tab, name_btn, close_btn)
+            chip.pack(side=tk.LEFT, padx=(0, 6))
+            self._group_tab_widgets[gid] = chip
+        # an empty frame keeps its last size in Tk: show the tab strip only when it has tabs
+        add_btn = getattr(self, "add_group_tab_btn", None)
+        if tabs and not frame.winfo_manager():
+            frame.pack(side=tk.LEFT, before=add_btn) if add_btn is not None else frame.pack(side=tk.LEFT)
+        elif not tabs and frame.winfo_manager():
+            frame.pack_forget()
 
         current_gid = proxy_groups.group_id_of_view(getattr(self, "overview_view_mode", None))
         if current_gid and current_gid not in tabs:
@@ -5029,7 +4983,7 @@ class VlessApp(tk.Tk):
             select_button = OverviewButton(
                 t("btn_unselect_group") if all_in else t("btn_select_group"),
                 lambda m=list(members): self.toggle_group_selection(m),
-                bg=C["overlay"], fg=C["blue"], bold=True, name="select_group",
+                bg=MAC["control"], fg="#64a8ff", bold=True, name="select_group",
             )
         on_rename = None
         if group is not None:
@@ -5065,12 +5019,7 @@ class VlessApp(tk.Tk):
         btn = getattr(self, "select_mode_btn", None)
         if btn is None:
             return
-        active = getattr(self, "_selection_mode", False)
-        btn.config(
-            bg=C["blue"] if active else C["overlay"],
-            fg="#1e1e2e" if active else C["text"],
-            activebackground=C["teal"] if active else C["hover"],
-        )
+        btn.config(selected=bool(getattr(self, "_selection_mode", False)))
 
     def toggle_selection_mode(self):
         """Show/hide checkboxes on proxy cards together with the bulk actions bar."""
@@ -7668,29 +7617,18 @@ class VlessApp(tk.Tk):
             return
         if busy:
             self.btn_restart_services.config(
-                text=f"⏳ {t('msg_restart_in_progress')}",
-                state=tk.DISABLED,
-                bg=C["overlay"],
-                fg=C["text"],
+                text=f"⏳ {t('msg_restart_in_progress')}", state=tk.DISABLED, variant="secondary",
             )
         else:
             self.btn_restart_services.config(
-                text=f"🔄 {t('btn_restart_services')}",
-                state=tk.NORMAL,
-                bg=C["blue"],
-                fg="#1e1e2e",
+                text=f"🔄 {t('btn_restart_services')}", state=tk.NORMAL, variant="primary",
             )
 
     def _set_restart_button_success(self, text: str):
         """Briefly show success badge on button before reverting to normal."""
         if not hasattr(self, "btn_restart_services") or not self.btn_restart_services or not self.btn_restart_services.winfo_exists():
             return
-        self.btn_restart_services.config(
-            text=f"✅ {text}",
-            state=tk.NORMAL,
-            bg=C["green"],
-            fg="#1e1e2e",
-        )
+        self.btn_restart_services.config(text=f"✅ {text}", state=tk.NORMAL, variant="success")
         self.after(2500, lambda: self._set_restart_button_busy(False))
 
     # ── System Tray ───────────────────────────────────────────

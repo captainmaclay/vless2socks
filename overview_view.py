@@ -15,9 +15,11 @@ import tkinter.font as tkfont
 from dataclasses import dataclass, field
 from typing import Any, Callable, Hashable, Optional
 
+from macui import MAC, draw_rounded, lighten, set_rounded_fill
+
 
 #: Selection checkboxes: a saturated blue (the palette's blue is a pale pastel)
-CHECK_BLUE = "#1e66f5"
+CHECK_BLUE = MAC["accent"]
 CHECKED_TAG = "chk_on"
 
 
@@ -73,6 +75,8 @@ class HintModel:
 
 
 class OverviewView:
+    RADIUS = 7          # corner radius of drawn buttons, design px (as macui)
+
     # Sizes depend on the fonts and the screen scaling (125-200% on most laptops),
     # so they are computed in __init__ (see _layout_metrics), never fixed pixels.
 
@@ -103,6 +107,7 @@ class OverviewView:
 
         self._layout_metrics()
         self._button_bg: dict[str, str] = {}      # button tag -> normal fill
+        self._button_shape: dict[str, tuple[int, int, int]] = {}   # button tag -> (shape item, w, h)
         self._owner_buttons: dict[str, list[str]] = {}   # card/header tag -> its button tags
         self._slot_live: dict[str, dict[str, Any]] = {}
         self._card_owner: dict[str, Hashable] = {}             # card tag -> its key   # card tag -> model + item ids for in-place status
@@ -136,6 +141,7 @@ class OverviewView:
         self._commands.clear()
         self._button_index.clear()
         self._button_bg.clear()
+        self._button_shape.clear()
         self._owner_buttons.clear()
         self._slot_live.clear()
         self._card_owner.clear()
@@ -209,7 +215,8 @@ class OverviewView:
         btn = m.buttons[0]
         btn_tag, rect, text = live["button"]
         cv.itemconfig(live["dot"], fill=m.dot)
-        cv.itemconfig(rect, fill=btn.bg)
+        self._button_shape.setdefault(btn_tag, (rect, *self._button_shape.get(btn_tag, (rect, 0, 0))[1:]))
+        self._paint_button(btn_tag, btn.bg)
         cv.itemconfig(text, text=btn.label, fill=btn.fg if btn.enabled else self.C["muted"])
         # the click target follows the new state (e.g. Start -> disabled -> Stop)
         self._commands.pop(btn_tag, None)
@@ -277,6 +284,9 @@ class OverviewView:
         return ""
 
     def button_fill(self, tag: str) -> str:
+        """Normal fill of a drawn button (its color without hover)."""
+        if tag in self._button_bg:
+            return self._button_bg[tag]
         for item in self.canvas.find_withtag(tag):
             if self.canvas.type(item) == "rectangle":
                 return self.canvas.itemcget(item, "fill")
@@ -368,6 +378,7 @@ class OverviewView:
             self._commands.pop(tg, None)
             self._button_index.pop(tg, None)
             self._button_bg.pop(tg, None)
+            self._button_shape.pop(tg, None)
             if self._hovered == tg:
                 self._hovered = None
         self._slot_live.pop(owner_tag, None)
@@ -381,10 +392,12 @@ class OverviewView:
         tag = self._new_tag("btn")
         bg = btn.bg
         cv = self.canvas
-        rect = cv.create_rectangle(x0, y, x_right, y + h, fill=bg, outline="", tags=(owner_tag, tag))
+        # rounded, anti-aliased, with the faint macOS gloss (see macui.draw_rounded)
+        rect = draw_rounded(cv, x0, y, x_right, y + h, self.px(self.RADIUS), bg, tags=(owner_tag, tag))
         text = cv.create_text(x0 + w / 2, y + h / 2, text=btn.label, font=font,
                               fill=btn.fg if btn.enabled else self.C["muted"], tags=(owner_tag, tag))
         self._register(tag, btn, owner_key, bg, owner_tag)
+        self._button_shape[tag] = (rect, int(round(w)), int(round(h)))
         self._last_button = (tag, rect, text)
         return x0
 
@@ -427,24 +440,28 @@ class OverviewView:
     def _on_motion(self, event) -> None:
         self._set_hover(self._button_tag_at(event))
 
+    def _paint_button(self, tag: str, fill: str) -> None:
+        shape = self._button_shape.get(tag)
+        if shape is None:
+            return
+        item, w, h = shape
+        try:
+            set_rounded_fill(self.canvas, item, w, h, self.px(self.RADIUS), fill)
+        except tk.TclError:
+            pass
+
     def _set_hover(self, tag: Optional[str]) -> None:
         if tag == self._hovered:
             return
         cv = self.canvas
-        for old in ([self._hovered] if self._hovered else []):
-            for item in cv.find_withtag(old):
-                if cv.type(item) == "rectangle":
-                    cv.itemconfig(item, fill=self._button_bg.get(old, ""))
+        if self._hovered:
+            self._paint_button(self._hovered, self._button_bg.get(self._hovered, ""))
         self._hovered = tag
         cv.config(cursor="hand2" if tag else "")
-        if tag:
+        if tag and self._button_index.get(tag, ("", None))[0] != "check":   # checkboxes keep their color
             bg = self._button_bg.get(tag, "")
-            plain = (self.C.get("overlay"), self.C.get("card"), self.C.get("bg"), self.C.get("surface"))
-            is_checkbox = self._button_index.get(tag, ("", None))[0] == "check"
-            if bg in plain and not is_checkbox:          # checkboxes keep their color under the mouse
-                for item in cv.find_withtag(tag):
-                    if cv.type(item) == "rectangle":
-                        cv.itemconfig(item, fill=self.C.get("hover", bg))
+            if bg:
+                self._paint_button(tag, lighten(bg, 0.10))
 
     def _text_button(self, x: int, y: int, text: str, font: tkfont.Font, fill: str, command, owner_tag: str,
                      owner_key: Hashable, name: str, anchor: str = "w") -> int:
@@ -507,7 +524,7 @@ class OverviewView:
             w = self._w(self.f_badge, text) + px(10)
             if bx + w > limit:
                 break
-            cv.create_rectangle(bx, ty - bh, bx + w, ty + bh, fill=C["hover"], outline="", tags=(tag,))
+            draw_rounded(cv, bx, ty - bh, bx + w, ty + bh, int(bh), C["hover"], gloss=False, tags=(tag,))
             cv.create_text(bx + w / 2, ty, text=text, font=self.f_badge, fill=color, tags=(tag,))
             bx += w + px(6)
 

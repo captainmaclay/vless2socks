@@ -73,19 +73,19 @@ class TestZapretRecovery(unittest.TestCase):
         try:
             widget = ZapretRecoveryWidget(root)
             self.assertEqual(widget.btn_switcher.cget("text"), "ON")
-            self.assertEqual(widget.btn_switcher.cget("bg"), THEME["dim_green"])
+            self.assertEqual(widget.btn_switcher.cget("fill"), THEME["dim_green"])
 
             # Переключение в OFF
             widget._toggle_switcher()
             self.assertFalse(widget.enabled_var.get())
             self.assertEqual(widget.btn_switcher.cget("text"), "OFF")
-            self.assertEqual(widget.btn_switcher.cget("bg"), THEME["off_bg"])
+            self.assertEqual(widget.btn_switcher.cget("fill"), THEME["off_bg"])
 
             # Переключение обратно в ON
             widget._toggle_switcher()
             self.assertTrue(widget.enabled_var.get())
             self.assertEqual(widget.btn_switcher.cget("text"), "ON")
-            self.assertEqual(widget.btn_switcher.cget("bg"), THEME["dim_green"])
+            self.assertEqual(widget.btn_switcher.cget("fill"), THEME["dim_green"])
 
             # Тест OrangeCheckbox
             bool_var = tk.BooleanVar(value=True)
