@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for vless2socks standalone single-file GUI with embedded bin."""
+"""PyInstaller spec for vless2socks standalone single-file GUI; xray goes in bin/ next to the exe."""
 
 import os
 import sys
@@ -39,7 +39,6 @@ a = Analysis(
         (os.path.join(root, 'instances.example.json'), '.'),
         (os.path.join(root, 'settings.example.json'), '.'),
         (os.path.join(root, 'app_icon.ico'), '.'),
-        (os.path.join(root, 'bin'), 'bin'),
     ],
     hiddenimports=[
         'backup_manager',
