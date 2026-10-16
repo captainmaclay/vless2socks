@@ -53,9 +53,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "wsl_watchdog_enabled": True,
     "wsl_watchdog_auto_recover": True,
     "wsl_watchdog_recover_gui": False,
-    "zapret2_watcher_enabled": True,
-    "zapret2_watch_main": True,
-    "zapret2_watch_tg": True,
     "proxy_start_port": 1080,
 }
 
@@ -222,21 +219,4 @@ def set_telegram_proxy_port(port: int) -> None:
     p = int(port)
     set_setting("telegram_proxy_port", p)
 
-
-def get_zapret2_settings() -> dict[str, bool]:
-    """Get active preferences for Zapret2 Watcher."""
-    return {
-        "enabled": bool(get_setting("zapret2_watcher_enabled", True)),
-        "watch_main": bool(get_setting("zapret2_watch_main", True)),
-        "watch_tg": bool(get_setting("zapret2_watch_tg", True)),
-    }
-
-
-def set_zapret2_settings(enabled: bool, watch_main: bool, watch_tg: bool) -> None:
-    """Persist user choices for Zapret2 Watcher."""
-    cfg = load_settings()
-    cfg["zapret2_watcher_enabled"] = bool(enabled)
-    cfg["zapret2_watch_main"] = bool(watch_main)
-    cfg["zapret2_watch_tg"] = bool(watch_tg)
-    save_settings(cfg)
 

@@ -154,13 +154,16 @@ class TelegramProxyDispatcher:
                     self._health[(h, int(p))] = healthy if item.running else False
             elif isinstance(item, dict):
                 cfg = item
-                listen = cfg.get("listen", "127.0.0.1:1081")
-                h, _, p_str = listen.rpartition(":")
+                # "listen" (instance config) or "host"/"port" (pool entry); without a valid
+                # port the entry is skipped (it used to become a made-up 127.0.0.1:1081)
+                if cfg.get("listen"):
+                    h, _, p_str = str(cfg["listen"]).rpartition(":")
+                else:
+                    h, p_str = str(cfg.get("host") or ""), str(cfg.get("port") or "")
                 h = h or "127.0.0.1"
-                try:
-                    p = int(p_str or "1081")
-                except ValueError:
-                    p = 1081
+                if not p_str.isdigit():
+                    continue
+                p = int(p_str)
                 name = cfg.get("name", f"Proxy-{p}")
                 is_tp = bool(cfg.get("telegram_proxy", cfg.get("TelegramProxy", False)))
             else:
@@ -184,6 +187,13 @@ class TelegramProxyDispatcher:
     def get_pool(self) -> List[Dict[str, Any]]:
         with self._lock:
             return list(self._pool)
+
+    def peek_active(self) -> Optional[Dict[str, Any]]:
+        """The upstream Telegram goes through now - no network probe, no rotation (for UI labels)."""
+        with self._lock:
+            if not self._pool:
+                return None
+            return dict(self._pool[min(self._current_index, len(self._pool) - 1)])
 
     @staticmethod
     def _key(proxy: Dict[str, Any]) -> Tuple[str, int]:

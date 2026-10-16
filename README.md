@@ -31,7 +31,7 @@
 |---------|-------------|
 | **Multi-Proxy Management** | Unlimited SOCKS5 proxy instances with 10-per-page pagination |
 | **TelegramProxy Virtual Socket** | Dedicated virtual hub on `127.0.0.1:1373` (customizable) with master key, seamless failover & auto-rotation across flagged proxies |
-| **Zapret2 Watcher Service** | Background self-healing watchdog for `winws2.exe` & TelegramProxy with slide-down menu & backoff retry |
+| **Watcher** | One service that starts the chosen proxies with the program and brings them back up when they fail: All, TelegramProxy / SystemProxy flags or groups, with status pills |
 | **Dual Backend Engine** | Pure Python SOCKS5 server or Xray-core (auto-detected) |
 | **Geo-IP Detection** | Country detection from URL fragments + live exit IP lookup via SOCKS5 |
 | **Hidden VLESS URLs** | Eye toggle (👁️ / 🙈) to show/hide sensitive VLESS links |
@@ -249,7 +249,7 @@ vless2socks/
 │       ├── config_builder.py # Xray JSON config generator
 │       └── runner.py       # Xray process manager
 │
-├── ZapretRecovery/         # Background self-healing watcher for zapret2 & TelegramProxy
+├── proxy_watcher.py       # Watcher: which proxies start with the program and are kept up
 │   ├── __init__.py
 │   ├── core.py             # Watcher core, state machine & backoff scheduler
 │   ├── watcher.py          # Background monitor thread & process checker
@@ -330,16 +330,14 @@ vless2socks features a resilient virtual socket dispatcher dedicated to Telegram
 
 ---
 
-## 🛡️ Zapret2 Watcher (ZapretRecovery)
+## 👁 Watcher
 
-vless2socks embeds a dedicated autonomous watchdog (`ZapretRecovery`) designed to maintain continuous availability of DPI bypass services (`winws2.exe`, `zapret-discord-youtube`) alongside proxy tunnels:
+One service decides which proxies are kept up (it replaces the former Zapret2 Watcher and the separate auto-start / auto-reconnect switches):
 
-- **Self-Healing Watchdog:** Continuously monitors the health of DPI circumvention processes in the background. If a crash or port conflict occurs, it restarts the service with an exponential backoff schedule:
-  ```
-  1s → 2s → 4s → 8s → 16s → 30s → 60s
-  ```
-- **Windows Minimization Fix:** Includes a native window watchdog preventing UI freezes or zombie background instances when the main application window is minimized to the taskbar or system tray.
-- **Unified Service Management:** Accessible via the `RestartServices` toolbar button to quickly restart Zapret2, reload filter drivers, or reboot the TelegramProxy dispatcher in one click.
+- **Watcher button** on the Overview: green when on, gray when off. The attached ▾ arrow opens a menu where you tick what to watch: **All proxies**, the flags **TelegramProxy** and **SystemProxy**, and your **groups**. Ticking a flag or a group unticks All; ticking All clears the rest.
+- **Program start:** only the watched proxies are started (nothing when the Watcher is off).
+- **Keeping them up:** a watched proxy that goes down (and was not stopped by you) is brought back with growing pauses (Options → Watcher pauses, default `10 → 15 → 30 → 60 → 120 → 180 → 30` s). When TelegramProxy is watched, its dispatcher is kept running too.
+- **Status pills** right of the button: TelegramProxy, SystemProxy and every selected group as running/total.
 
 ---
 
@@ -418,7 +416,7 @@ MIT License. See [LICENSE](LICENSE) for details.
 |-------------|----------|
 | **Мультипрокси** | Неограниченное количество SOCKS5-прокси с пагинацией по 10 на страницу |
 | **TelegramProxy Виртуальный сокет** | Выделенный отказоустойчивый хаб на `127.0.0.1:1373` (настраиваемый) с мастер-ключом и бесшовной ротацией |
-| **Служба Zapret2 Watcher** | Фоновый watchdog самовосстановления для `winws2.exe` и TelegramProxy с выпадающим меню и экспоненциальным backoff |
+| **Watcher** | Единая служба: запускает выбранные прокси при старте программы и поднимает их после падения — «Все», флаги TelegramProxy / SystemProxy или группы, с индикаторами состояния |
 | **Двойной движок** | Встроенный Python SOCKS5-сервер или Xray-core (автовыбор) |
 | **Geo-IP** | Определение страны из URL-фрагмента + живой запрос внешнего IP через SOCKS5 |
 | **Скрытие VLESS-ссылок** | Кнопка-глаз (👁️ / 🙈) для показа/скрытия конфиденциальных ссылок |
@@ -624,16 +622,14 @@ dist/
 
 ---
 
-## 🛡️ Сторожевой сервис Zapret2 (ZapretRecovery)
+## 👁 Watcher
 
-В состав приложения включен автономный сторожевой модуль (`ZapretRecovery`), обеспечивающий непрерывную работоспособность средств обхода DPI (`winws2.exe`, `zapret-discord-youtube`):
+Одна служба решает, какие прокси поддерживать поднятыми (заменяет прежний Zapret2 Watcher и отдельные переключатели автозапуска и автопереподключения):
 
-- **Фоновый самовосстанавливающийся Watchdog:** Следит за процессами обхода DPI. При падении или конфликте портов автоматически перезапускает службу с нарастающим интервалом (экспоненциальный backoff):
-  ```
-  1с → 2с → 4с → 8с → 16с → 30с → 60с
-  ```
-- **Защита от зависаний при сворачивании окон:** Нативный вотчдог следит за минимизацией и восстановлением главного окна Windows, исключая образование зомби-процессов и зависание интерфейса.
-- **Единое меню перезапуска:** Кнопка `RestartServices` в шапке окна позволяет выборочно или полностью перезапустить Zapret2, сетевые драйверы и диспетчер TelegramProxy.
+- **Кнопка Watcher** на Обзоре: зелёная — включён, серая — выключен. Слитная стрелка ▾ открывает меню, где галочками выбирается, за чем следить: **Все прокси**, флаги **TelegramProxy** и **SystemProxy**, ваши **группы**. Выбор флага или группы снимает «Все»; выбор «Все» снимает остальное.
+- **Старт программы:** запускаются только выбранные прокси (при выключенном Watcher — никакие).
+- **Подъём после падения:** упавший выбранный прокси (если его не остановили вы) поднимается с нарастающими паузами (Опции → паузы Watcher, по умолчанию `10 → 15 → 30 → 60 → 120 → 180 → 30` с). Если выбран TelegramProxy, Watcher держит запущенным и его диспетчер.
+- **Индикаторы** справа от кнопки: TelegramProxy, SystemProxy и каждая выбранная группа — сколько из скольких работает.
 
 ---
 

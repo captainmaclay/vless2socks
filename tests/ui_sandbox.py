@@ -8,6 +8,8 @@ The sandbox must never touch the user's real proxies: the app has a built-in Sys
 Proxy on 1015, and a real vless2socks is usually running on this machine. Port probes
 and process lookups report nothing, and every kill path is replaced by a recorder
 (`kill_attempts`), so a sandboxed app can neither adopt nor stop a real process.
+Starting a proxy is recorded too (`start_attempts`): a health check or a reconnect in a
+test must never launch xray.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import json
 import shutil
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -63,7 +66,7 @@ class Sandbox:
         (self.tmp / "runtime").mkdir()
         cfg = {
             "language": language, "autostart_proxies": False, "start_minimized_tray": False,
-            "force_port_takeover": False, "wsl_watchdog_enabled": False, "zapret2_watcher_enabled": False,
+            "force_port_takeover": False, "wsl_watchdog_enabled": False, "watcher_enabled": False,
             "auto_backup_enabled": False, "telegram_proxy_port_migrated": True,
             "proxy_groups": [{"id": "g_all", "name": "ALL"}, {"id": "g_fin", "name": "Finland"},
                              {"id": "g_world", "name": "World_vless"}],
@@ -88,6 +91,27 @@ class Sandbox:
             setattr(gui, name, self._recorder(name))
         gui.is_port_alive = lambda *a, **k: False          # never adopt a real proxy on the same port
         gui.listening_pids_by_port = lambda ports: {}
+        self.start_attempts: list[tuple] = []
+        self._saved_inst = {n: getattr(gui.ProxyInstance, n) for n in ("start", "start_async", "restart_async")}
+        attempts = self.start_attempts
+
+        def _start(inst, *a, **k):
+            attempts.append(("start", inst.get_listen()[1]))
+            return False
+
+        def _start_async(inst, callback=None, *a, **k):
+            attempts.append(("start_async", inst.get_listen()[1]))
+            if callback:
+                callback(False)
+
+        def _restart_async(inst, callback=None, *a, **k):
+            attempts.append(("restart_async", inst.get_listen()[1]))
+            if callback:
+                callback(True)
+
+        gui.ProxyInstance.start = _start
+        gui.ProxyInstance.start_async = _start_async
+        gui.ProxyInstance.restart_async = _restart_async
         gui.ROOT_DIR = self.tmp
         gui.INSTANCES_FILE = self.tmp / "instances.json"
         gui.CONFIG_FILE = self.tmp / "config.json"
@@ -123,20 +147,30 @@ class Sandbox:
         try:
             # pending timers of a destroyed app fire in the next test's event loop
             # ("invalid command name ...") and can crash Tcl: cancel them first
+            # Tcl-level cancel: after_cancel() would also delete the callback's Tcl command,
+            # which belongs to whichever widget scheduled it - that widget's destroy() then
+            # fails ("can't delete Tcl command") and the whole app stays alive
             for job in self.app.tk.splitlist(self.app.tk.call("after", "info")):
                 try:
-                    self.app.after_cancel(job)
+                    self.app.tk.call("after", "cancel", job)
                 except Exception:
                     pass
             self.app.update_idletasks()
+        except Exception:
+            traceback.print_exc()
+        try:
+            # the app must really go away: a live one stays tkinter's default root, and the
+            # next test's variables / menus without a master would bind to it
             self.app.destroy()
         except Exception:
-            pass
+            traceback.print_exc()
         self.app = None
         import gc
         gc.collect()
         for n, v in self._saved.items():
             setattr(self.gui, n, v)
+        for n, v in self._saved_inst.items():
+            setattr(self.gui.ProxyInstance, n, v)
         settings_manager.SETTINGS_FILE = self._saved_settings
         i18n._CURRENT_LANGUAGE = self._lang
         shutil.rmtree(self.tmp, ignore_errors=True)

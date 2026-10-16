@@ -747,11 +747,14 @@ class TestOverviewViewBarOrder(_TempSettingsMixin, unittest.TestCase):
         app = _GroupsTestApp()
         app.start_all = app.stop_all = app.refresh_all_geo = lambda: None
         app.open_subscription_dialog = lambda: None
-        app.zapret_watcher = None
+        app.watcher_bar = None
         app.overview_frame = tk.Frame(app, bg=gui.C["bg"])
         app.overview_frame.pack(fill=tk.BOTH, expand=True)
-        with mock.patch.object(gui, "ZapretRecoveryWidget", lambda parent, watcher=None: tk.Frame(parent)):
-            gui.VlessApp._build_overview_tab(app)
+
+        def _bar(parent):                    # the Watcher bar is covered by test_watcher_gui
+            app.watcher_bar = tk.Frame(parent)
+        app._build_watcher_bar = _bar
+        gui.VlessApp._build_overview_tab(app)
         app.deiconify()
         app.geometry("1600x900")
         app.update()

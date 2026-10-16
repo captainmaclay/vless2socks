@@ -568,3 +568,66 @@ class MacDivider(tk.Frame):
         s = scale_of(self)
         tk.Frame(self, bg=MAC["separator"], width=max(1, int(round(s))), height=int(round(height * s))).pack(
             padx=int(round(8 * s)))
+
+
+class MacCheckRow(tk.Frame):
+    """A menu row: saturated blue checkbox (white tick when checked) and a label; the
+    whole row is clickable and highlights on hover."""
+
+    def __init__(self, master: tk.Misc, text: str, checked: bool = False,
+                 command: Optional[Callable[[], Any]] = None, fg: str = "", hint: str = "", **kw):
+        self._bg = kw.pop("bg", _parent_bg(master))
+        super().__init__(master, bg=self._bg, cursor="hand2", **kw)
+        s = scale_of(self)
+        self._s = s
+        self.command = command
+        self.checked = bool(checked)
+        side = int(round(16 * s))
+        self.box = tk.Canvas(self, width=side, height=side, bg=self._bg, highlightthickness=0, bd=0, cursor="hand2")
+        self.box.pack(side=tk.LEFT, padx=(int(8 * s), int(8 * s)), pady=int(5 * s))
+        self.label = tk.Label(self, text=text, bg=self._bg, fg=fg or MAC["label"], font=ui_font(self, 9, True),
+                              cursor="hand2", anchor="w")
+        self.label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, int(10 * s)))
+        self.hint = None
+        if hint:
+            self.hint = tk.Label(self, text=hint, bg=self._bg, fg=MAC["label_3"], font=ui_font(self, 8, False),
+                                 cursor="hand2")
+            self.hint.pack(side=tk.RIGHT, padx=(0, int(10 * s)))
+        self._draw()
+        for w in self._parts():
+            w.bind("<Button-1>", self._click)
+            w.bind("<Enter>", lambda e: self._hover(True))
+            w.bind("<Leave>", lambda e: self._hover(False))
+
+    def _parts(self):
+        return [w for w in (self, self.box, self.label, self.hint) if w is not None]
+
+    def _draw(self) -> None:
+        c, s = self.box, self._s
+        c.delete("all")
+        side = int(c.cget("width"))
+        pad = max(1, int(round(s)))
+        r = int(round(4 * s))
+        if self.checked:
+            draw_rounded(c, pad, pad, side - pad, side - pad, r, MAC["accent"], gloss=False)
+            pts = [(0.25, 0.52), (0.43, 0.70), (0.76, 0.32)]
+            c.create_line(*[v * side for p in pts for v in p], fill="#ffffff", width=max(2, int(round(2 * s))),
+                          capstyle=tk.ROUND, joinstyle=tk.ROUND)
+        else:
+            draw_rounded(c, pad, pad, side - pad, side - pad, r, MAC["track"], border=MAC["accent"], gloss=False)
+
+    def _hover(self, on: bool) -> None:
+        bg = lighten(self._bg, 0.06) if on else self._bg
+        for w in self._parts():
+            w.configure(bg=bg)
+
+    def _click(self, _event=None):
+        self.set_checked(not self.checked)
+        if self.command:
+            self.command()
+        return "break"
+
+    def set_checked(self, value: bool) -> None:
+        if bool(value) != self.checked:
+            self.checked = bool(value)
+            self._draw()

@@ -276,59 +276,7 @@ class TestTelegramProxyUIIntegration(unittest.TestCase):
         finally:
             root.destroy()
 
-    def test_restart_services_context_menu_has_telegram_proxy_socket(self):
-        """Проверка пункта TelegramProxy в контекстном меню RestartServices."""
-        # Tk roots destroyed by earlier tests must be finalized here, on the main thread: VlessApp starts
-        # background threads, and a GC pass in one of them would tear down a Tcl interpreter from the wrong thread.
-        import gc
-        gc.collect()
-        # Never a bare VlessApp(): it loaded the user's real settings / instances, adopted the running
-        # proxies on their ports and killed them on exit. The sandbox has temp files and no kill paths.
-        from tests.ui_sandbox import Sandbox
-        sb = Sandbox(language="ru")
-        app = sb.app
-        app.deiconify()
-        app.update()
-        try:
-            # 1. Когда нет активного TelegramProxy
-            with patch.object(app, "_get_active_telegram_proxy_socket", return_value="не выбрано"):
-                app.open_restart_services_menu()
-                app.update()
-                self.assertTrue(app._restart_menu_open)
-                self.assertIsNotNone(app.restart_menu_win)
-
-                found_tg = None
-                for child in app.restart_menu_win.winfo_children():
-                    for sub in child.winfo_children():
-                        for row in sub.winfo_children():
-                            if isinstance(row, tk.Frame):
-                                for lbl in row.winfo_children():
-                                    if isinstance(lbl, tk.Label) and "TelegramProxy" in lbl.cget("text"):
-                                        found_tg = lbl.cget("text")
-                self.assertIsNotNone(found_tg)
-                self.assertIn("TelegramProxy (не выбрано)", found_tg)
-                app.close_restart_services_menu()
-
-            # 2. Когда активен прокси 127.0.0.1:1085
-            with patch.object(app, "_get_active_telegram_proxy_socket", return_value="127.0.0.1:1085"):
-                app.open_restart_services_menu()
-                app.update()
-                self.assertTrue(app._restart_menu_open)
-                found_tg_active = None
-                for child in app.restart_menu_win.winfo_children():
-                    for sub in child.winfo_children():
-                        for row in sub.winfo_children():
-                            if isinstance(row, tk.Frame):
-                                for lbl in row.winfo_children():
-                                    if isinstance(lbl, tk.Label) and "TelegramProxy" in lbl.cget("text"):
-                                        found_tg_active = lbl.cget("text")
-                self.assertIsNotNone(found_tg_active)
-                self.assertIn("TelegramProxy (127.0.0.1:1085)", found_tg_active)
-                app.close_restart_services_menu()
-            self.assertEqual(sb.kill_attempts, [])
-        finally:
-            sb.close()
-
+    # The RestartServices menu row is covered by tests/test_restart_telegram.py
 
     def test_copy_tg_proxy_link_copies_socks_format(self):
         """Проверка, что кнопка Copy TG_socks копирует именно tg://socks?server=...&port=..."""
