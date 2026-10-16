@@ -17,7 +17,8 @@ import os
 import sys
 
 _APP_DIR = os.path.normcase(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_PROTECTED_NAMES = {"settings.json", "instances.json", "config.json", ".env", ".vless2socks.lock"}
+_PROTECTED_NAMES = {"settings.json", "instances.json", "config.json", ".env", ".vless2socks.lock",
+                    "claude_accounts.json"}
 _PROTECTED_DIRS = [os.path.normcase(p) for p in (
     r"C:\MyFiles\Proxy", os.path.join(os.path.expanduser("~"), "Documents", "VlessBackups"))]
 _WRITE_EVENTS = {"os.remove", "os.rename", "os.replace", "os.rmdir", "shutil.rmtree", "os.truncate",
@@ -94,6 +95,12 @@ def _isolate_data_files() -> None:
     gui.SETTINGS_FILE = tmp / "settings.json"
     gui.INSTANCES_FILE = tmp / "instances.json"
     gui.CONFIG_FILE = tmp / "config.json"
+    try:                                  # its own hard-coded paths next to gui.py
+        import claude_accounts
+        claude_accounts.STATE_FILE = str(tmp / "claude_accounts.json")
+        claude_accounts.INSTANCES_FILE = str(tmp / "instances.json")
+    except ImportError:
+        pass
 
 
 if not getattr(sys, "_vless2socks_test_isolated", False):

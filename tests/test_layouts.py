@@ -6,6 +6,7 @@ at the edges of every width range, in every Overview state and on the Options ta
 
 import ctypes
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -171,11 +172,17 @@ class TestLayouts(unittest.TestCase):
         for lay in responsive.LAYOUTS:
             with self.subTest(layout=lay.key):
                 self.app.apply_layout_preset(lay.key)
-                self.sb.settle(25)
-                key, w, h = self.app.current_layout()
                 sw = round(self.app.winfo_screenwidth() / self.scale)
                 sh = round(self.app.winfo_screenheight() / self.scale)
                 ew, eh = responsive.fit_preset(lay.key, sw, sh)
+                # the window manager applies a new size with a delay that varies on a busy
+                # desktop: wait for it (up to 3 s) instead of a fixed number of rounds
+                deadline = time.monotonic() + 3
+                while True:
+                    self.sb.settle(5)
+                    key, w, h = self.app.current_layout()
+                    if (abs(w - ew) <= 2 and abs(h - eh) <= 2) or time.monotonic() > deadline:
+                        break
                 self.assertLessEqual(abs(w - ew), 2)
                 self.assertLessEqual(abs(h - eh), 2)
                 if (ew, eh) == lay.preset:
