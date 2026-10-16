@@ -287,7 +287,7 @@ class TestTelegramUi(unittest.TestCase):
     def test_context_menu_toggles_killswitch_and_telegram(self):
         menu, labels = self._menu_for(self.plain)
         ks = next(i for label, i in labels.items() if self.gui.t("ctx_killswitch") in label)
-        tg = next(i for label, i in labels.items() if self.gui.t("ctx_telegram_proxy") in label)
+        tg = next(i for label, i in labels.items() if "TelegramProxy" in label)   # system category switch
         menu.invoke(ks)
         self.assertTrue(self.plain.cfg["killswitch"])
         menu.invoke(tg)

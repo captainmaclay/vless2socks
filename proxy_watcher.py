@@ -5,6 +5,9 @@ It replaces the separate Zapret2 Watcher and the per-proxy "auto reconnect" swit
 * What is watched is a selection of targets: ``all``, the flags TelegramProxy and
   SystemProxy, and proxy groups. Picking a flag or a group drops ``all``; picking
   ``all`` drops the rest; an empty selection falls back to ``all``.
+* SystemProxy and WorkProxy proxies are always watched, whatever the selection: they
+  carry the system-wide and the work traffic, so a selection of a few groups must not
+  leave them down after a restart.
 * At program start only watched proxies are started (when the Watcher is on).
 * While the Watcher is on, a watched proxy that is down (and was not stopped by the
   user) is brought back up, with pauses between attempts from the reconnect intervals.
@@ -25,7 +28,8 @@ import settings_manager
 ALL = "all"
 FLAG_TELEGRAM = "flag:telegram"
 FLAG_SYSTEM = "flag:system"
-FLAGS = (FLAG_TELEGRAM, FLAG_SYSTEM)
+FLAG_WORK = "flag:work"
+FLAGS = (FLAG_TELEGRAM, FLAG_SYSTEM, FLAG_WORK)
 GROUP_PREFIX = "group:"
 
 ENABLED_KEY = "watcher_enabled"
@@ -99,12 +103,20 @@ def has_url(cfg: dict[str, Any]) -> bool:
     return str(cfg.get("url", "")).strip().startswith(PROXY_SCHEMES)
 
 
+def _is_work(inst: Any) -> bool:
+    check = getattr(inst, "is_work_proxy", None)
+    return bool(check()) if callable(check) else False
+
+
+def always_watched(inst: Any) -> bool:
+    """SystemProxy and WorkProxy are kept up whatever the selection."""
+    return bool(inst.is_system_proxy()) or _is_work(inst)
+
+
 def is_watched(inst: Any, targets: Sequence[str]) -> bool:
-    if ALL in targets:
+    if ALL in targets or always_watched(inst):
         return True
     if FLAG_TELEGRAM in targets and inst.is_telegram_proxy():
-        return True
-    if FLAG_SYSTEM in targets and inst.is_system_proxy():
         return True
     groups = {group_key(g) for g in proxy_groups.group_ids_of(inst.cfg)}
     return any(k in groups for k in targets)
@@ -142,9 +154,10 @@ def _count(instances: Sequence[Any], belongs) -> tuple[int, int]:
 
 
 def pills(instances: Sequence[Any], targets: Sequence[str], groups: Sequence[dict]) -> list[Pill]:
-    """TelegramProxy and SystemProxy always; then ``All`` or every selected group."""
+    """TelegramProxy, SystemProxy and WorkProxy always; then ``All`` or every selected group."""
     out = [Pill(FLAG_TELEGRAM, "TelegramProxy", *_count(instances, lambda i: i.is_telegram_proxy())),
-           Pill(FLAG_SYSTEM, "SystemProxy", *_count(instances, lambda i: i.is_system_proxy()))]
+           Pill(FLAG_SYSTEM, "SystemProxy", *_count(instances, lambda i: i.is_system_proxy())),
+           Pill(FLAG_WORK, "WorkProxy", *_count(instances, _is_work))]
     if ALL in targets:
         out.append(Pill(ALL, "All", *_count(instances, lambda i: True)))
         return out

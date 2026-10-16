@@ -82,7 +82,8 @@ class WatcherGuiTest(unittest.TestCase):
 
     def test_menu_lists_all_flags_and_groups(self):
         rows = self.open_menu()
-        self.assertEqual(list(rows)[:3], [ALL, FLAG_TELEGRAM, FLAG_SYSTEM])
+        self.assertEqual(list(rows)[:2], [ALL, FLAG_TELEGRAM])
+        self.assertNotIn(FLAG_SYSTEM, rows)             # SystemProxy / WorkProxy are always watched
         for g in ("g_all", "g_fin", "g_world"):
             self.assertIn(group_key(g), rows)
         self.assertTrue(rows[ALL].checked)
@@ -124,14 +125,15 @@ class WatcherGuiTest(unittest.TestCase):
         texts = self.pill_texts()
         self.assertTrue(texts[0].startswith("✈ TelegramProxy"))
         self.assertTrue(texts[1].startswith("⚙ SystemProxy"))
-        self.assertTrue(texts[2].startswith("◉ All"))
+        self.assertTrue(texts[2].startswith("💼 WorkProxy"))
+        self.assertTrue(texts[3].startswith("◉ All"))
         self.open_menu()
         self.click_row(group_key("g_fin"))
         self.click_row(group_key("g_world"))
         texts = self.pill_texts()
-        self.assertEqual(len(texts), 4)
-        self.assertTrue(texts[2].startswith("📁 Finland"))
-        self.assertTrue(texts[3].startswith("📁 World_vless"))
+        self.assertEqual(len(texts), 5)
+        self.assertTrue(texts[3].startswith("📁 Finland"))
+        self.assertTrue(texts[4].startswith("📁 World_vless"))
 
     def test_pills_stay_on_the_button_row_after_the_selection_changes(self):
         self.app.watcher_targets = pw.set_targets([FLAG_TELEGRAM, group_key("g_fin")])
@@ -159,7 +161,9 @@ class WatcherGuiTest(unittest.TestCase):
         self.app.watcher_enabled = True
         self.app.watcher_initial_start()
         self.sb.settle(30)
-        fin = sorted(i.get_listen()[1] for i in self.app.instances if "g_fin" in i.cfg.get("groups", []))
+        # the selected group plus SystemProxy and WorkProxy, which are always watched
+        fin = sorted(i.get_listen()[1] for i in self.app.instances
+                     if pw.has_url(i.cfg) and ("g_fin" in i.cfg.get("groups", []) or pw.always_watched(i)))
         started = sorted(p for kind, p in self.sb.start_attempts if kind == "start_async")
         self.assertEqual(started, fin)
 
@@ -167,7 +171,8 @@ class WatcherGuiTest(unittest.TestCase):
         self.app.watcher_targets = pw.set_targets([FLAG_TELEGRAM])
         self.app.watcher_enabled = True
         tg = next(i for i in self.app.instances if i.is_telegram_proxy())
-        other = next(i for i in self.app.instances if not i.is_telegram_proxy() and pw.has_url(i.cfg))
+        other = next(i for i in self.app.instances
+                     if not i.is_telegram_proxy() and not pw.always_watched(i) and pw.has_url(i.cfg))
         self.assertTrue(self.app.watcher_allows(tg))
         self.assertFalse(self.app.watcher_allows(other))
         for inst, expect in ((tg, True), (other, False)):
@@ -191,7 +196,8 @@ class WatcherGuiTest(unittest.TestCase):
         now[0] += 10
         self.app._watcher_tick()
         self.sb.settle(30)
-        fin = sorted(i.get_listen()[1] for i in self.app.instances if "g_fin" in i.cfg.get("groups", []))
+        fin = sorted(i.get_listen()[1] for i in self.app.instances
+                     if pw.has_url(i.cfg) and ("g_fin" in i.cfg.get("groups", []) or pw.always_watched(i)))
         self.assertEqual(sorted(p for _k, p in self.sb.start_attempts), fin)
 
     def test_deleted_group_leaves_the_selection(self):

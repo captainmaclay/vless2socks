@@ -11,14 +11,14 @@ if str(ROOT) not in sys.path:
 import tests  # noqa: F401  (isolated settings)
 import proxy_watcher as pw
 import settings_manager
-from proxy_watcher import ALL, FLAG_SYSTEM, FLAG_TELEGRAM, group_key
+from proxy_watcher import ALL, FLAG_SYSTEM, FLAG_TELEGRAM, FLAG_WORK, group_key
 
 
 class FakeInst:
-    def __init__(self, port, groups=(), tg=False, sysp=False, url=True, running=False):
+    def __init__(self, port, groups=(), tg=False, sysp=False, url=True, running=False, work=False):
         self.cfg = {"listen": f"127.0.0.1:{port}", "groups": list(groups),
                     "url": "vless://x@h:1#n" if url else ""}
-        self.tg, self.sysp = tg, sysp
+        self.tg, self.sysp, self.work = tg, sysp, work
         self.running = running
         self.is_transitioning = False
         self._manual_stop = False
@@ -28,6 +28,9 @@ class FakeInst:
 
     def is_system_proxy(self):
         return self.sysp
+
+    def is_work_proxy(self):
+        return self.work
 
 
 class TestSelection(unittest.TestCase):
@@ -72,12 +75,13 @@ class TestMembership(unittest.TestCase):
 
     def test_watched(self):
         self.assertEqual(pw.watched(self.all, [ALL]), self.all)
-        self.assertEqual(pw.watched(self.all, [group_key("g1")]), [self.a, self.d])
-        self.assertEqual(pw.watched(self.all, [FLAG_TELEGRAM]), [self.b])
+        # c is a SystemProxy: watched whatever the selection
+        self.assertEqual(pw.watched(self.all, [group_key("g1")]), [self.a, self.c, self.d])
+        self.assertEqual(pw.watched(self.all, [FLAG_TELEGRAM]), [self.b, self.c])
         self.assertEqual(pw.watched(self.all, [FLAG_SYSTEM, group_key("g2")]), [self.b, self.c])
 
     def test_startup_starts_only_watched_with_a_url(self):
-        self.assertEqual(pw.startup_set(self.all, [group_key("g1")]), [self.a])
+        self.assertEqual(pw.startup_set(self.all, [group_key("g1")]), [self.a, self.c])
         self.b.running = True
         self.assertEqual(pw.startup_set(self.all, [ALL]), [self.a, self.c])
 
@@ -86,9 +90,40 @@ class TestMembership(unittest.TestCase):
         groups = [{"id": "g1", "name": "Finland"}, {"id": "g2", "name": "World"}]
         p = pw.pills(self.all, [group_key("g1"), FLAG_TELEGRAM], groups)
         self.assertEqual([(x.label, x.up, x.total, x.state) for x in p],
-                         [("TelegramProxy", 1, 1, "ok"), ("SystemProxy", 0, 1, "down"), ("Finland", 0, 1, "down")])
+                         [("TelegramProxy", 1, 1, "ok"), ("SystemProxy", 0, 1, "down"),
+                          ("WorkProxy", 0, 0, "none"), ("Finland", 0, 1, "down")])
         p = pw.pills(self.all, [ALL], groups)
         self.assertEqual((p[-1].label, p[-1].up, p[-1].total, p[-1].state), ("All", 1, 3, "partial"))
+
+
+class TestSystemCategoriesAlwaysWatched(unittest.TestCase):
+    """Watcher limited to a couple of groups: SystemProxy and WorkProxy must still start
+    with the program and come back up (they were left down after a restart)."""
+
+    def setUp(self):
+        self.sys1 = FakeInst(1015, sysp=True)
+        self.sys2 = FakeInst(1016, sysp=True)
+        self.work = FakeInst(1030, work=True)
+        self.grouped = FakeInst(1132, groups=["g1"])
+        self.loose = FakeInst(1020)                 # no group, no flag
+        self.all = [self.sys1, self.sys2, self.work, self.grouped, self.loose]
+
+    def test_startup_with_only_groups_selected(self):
+        self.assertEqual(pw.startup_set(self.all, [group_key("g1"), group_key("g2")]),
+                         [self.sys1, self.sys2, self.work, self.grouped])
+
+    def test_revived_but_manual_stop_respected(self):
+        now = [0.0]
+        r = pw.Reviver(clock=lambda: now[0])
+        settings_manager.set_setting("reconnect_intervals", "10")
+        targets = [group_key("g1")]
+        self.work._manual_stop = True
+        r.due(self.all, targets, True)
+        now[0] += 10
+        self.assertEqual(r.due(self.all, targets, True), [self.sys1, self.sys2, self.grouped])
+
+    def test_work_flag_is_a_known_target(self):
+        self.assertEqual(pw.normalize([FLAG_WORK]), [FLAG_WORK])
 
 
 class TestReviver(unittest.TestCase):

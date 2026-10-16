@@ -27,6 +27,32 @@ MAX_NAME_LEN = 40
 
 T = TypeVar("T")
 
+# System categories: built-in "groups" made of the proxy flags. They are not stored with
+# the user's groups, cannot be renamed or deleted, and always exist, so they can be
+# opened as Overview tabs even before the user creates a group of their own.
+SYSTEM_PREFIX = "sys:"
+SYSTEM_CATEGORIES: tuple[dict[str, str], ...] = (
+    {"id": "sys:system", "name": "SystemProxy", "icon": "⚙", "check": "is_system_proxy"},
+    {"id": "sys:telegram", "name": "TelegramProxy", "icon": "✈", "check": "is_telegram_proxy"},
+    {"id": "sys:work", "name": "WorkProxy", "icon": "💼", "check": "is_work_proxy"},
+)
+SYSTEM_IDS = tuple(c["id"] for c in SYSTEM_CATEGORIES)
+
+
+def is_system_category(group_id: Optional[str]) -> bool:
+    return group_id in SYSTEM_IDS
+
+
+def system_category(group_id: Optional[str]) -> Optional[dict[str, str]]:
+    return next((c for c in SYSTEM_CATEGORIES if c["id"] == group_id), None)
+
+
+def in_system_category(group_id: str, inst: Any) -> bool:
+    """Does the proxy carry the flag of this system category?"""
+    cat = system_category(group_id)
+    check = getattr(inst, cat["check"], None) if cat else None
+    return bool(check()) if callable(check) else False
+
 
 class GroupNameError(ValueError):
     """Invalid group name; `code` is "empty" or "taken"."""
@@ -233,9 +259,10 @@ def set_view_mode(mode: str) -> None:
 
 
 def get_group_tabs() -> list[str]:
-    """Ids of groups open as Overview tabs, in tab order; deleted groups are dropped."""
+    """Ids of groups open as Overview tabs, in tab order; deleted groups are dropped.
+    System categories are always known."""
     raw = settings_manager.get_setting(TABS_KEY, [])
-    known = {g["id"] for g in load_groups()}
+    known = {g["id"] for g in load_groups()} | set(SYSTEM_IDS)
     tabs: list[str] = []
     for gid in raw if isinstance(raw, list) else []:
         gid = str(gid)
@@ -245,7 +272,7 @@ def get_group_tabs() -> list[str]:
 
 
 def set_group_tabs(group_ids: Iterable[str]) -> list[str]:
-    known = {g["id"] for g in load_groups()}
+    known = {g["id"] for g in load_groups()} | set(SYSTEM_IDS)
     tabs: list[str] = []
     for gid in group_ids:
         if gid in known and gid not in tabs:

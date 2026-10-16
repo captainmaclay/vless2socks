@@ -703,8 +703,39 @@ class TestGroupTabsGui(_TempSettingsMixin, unittest.TestCase):
         self.app.update()
         return self.app._group_tab_picker
 
-    def _boxes(self, dlg):
+    def _all_boxes(self, dlg):
         return [w for w in _walk(dlg.rows_frame) if isinstance(w, tk.Checkbutton)]
+
+    def _boxes(self, dlg):
+        """The user's groups: after the three system categories."""
+        return self._all_boxes(dlg)[len(proxy_groups.SYSTEM_CATEGORIES):]
+
+    def test_picker_lists_system_categories_first_even_without_groups(self):
+        for g in proxy_groups.load_groups():
+            proxy_groups.delete_group(g["id"])
+        dlg = self._picker()
+        labels = [str(b.cget("text")).strip() for b in self._all_boxes(dlg)]
+        self.assertEqual(labels, ["⚙ SystemProxy", "✈ TelegramProxy", "💼 WorkProxy"])
+        # a 1-px line sets them apart from the (empty) user groups below
+        lines = [w for w in dlg.rows_frame.winfo_children()
+                 if isinstance(w, tk.Frame) and int(w.cget("height")) == 1]
+        self.assertEqual(len(lines), 1)
+
+    def test_system_category_tab_shows_flagged_proxies(self):
+        self.pb.set_work_proxy(True)
+        self.app.open_group_tabs(["sys:work"])
+        self.assertEqual(self._tab_titles(), ["💼 WorkProxy"])
+        self.assertEqual(self._shown_names(), ["in-beta"])
+        self.assertEqual(proxy_groups.get_group_tabs(), ["sys:work"])   # kept although not a stored group
+
+    def test_card_context_menu_has_system_categories_then_groups(self):
+        with mock.patch.object(tk.Menu, "tk_popup", lambda *a, **k: None):
+            self.app._open_card_context_menu(self.pa, 0, 0)
+        menu = self.app._card_context_menu
+        labels = [menu.entrycget(i, "label") for i in range(menu.index("end") + 1)
+                  if menu.type(i) != "separator"]
+        self.assertEqual(labels[2:6], [gui.t("pick_system_categories"), "⚙ SystemProxy", "✈ TelegramProxy", "💼 WorkProxy"])
+        self.assertEqual(labels[6:9], [gui.t("pick_user_groups"), "📁 Alpha", "📁 Beta"])
 
     def test_picker_opens_checked_groups(self):
         self.app.open_group_tabs([self.a["id"]])

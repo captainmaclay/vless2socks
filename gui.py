@@ -3700,6 +3700,21 @@ class GroupTabPickerDialog(tk.Toplevel):
         open_tabs = set(proxy_groups.get_group_tabs())
         counts = proxy_groups.member_counts(inst.cfg for inst in self.app.instances)
 
+        # System categories first, always there (even with no groups yet), set apart from
+        # the user's groups by a line and some space
+        tk.Label(
+            self.rows_frame, text=t("pick_system_categories").upper(), font=("Segoe UI", 7, "bold"),
+            fg=C["subtext"], bg=bg,
+        ).pack(anchor="w", pady=(0, 2))
+        for cat in proxy_groups.SYSTEM_CATEGORIES:
+            count = sum(1 for inst in self.app.instances if proxy_groups.in_system_category(cat["id"], inst))
+            self._add_row(cat["id"], f"{cat['icon']} {cat['name']}", count, cat["id"] in open_tabs)
+        tk.Frame(self.rows_frame, bg=C["overlay"], height=1).pack(fill=tk.X, pady=(10, 8))
+        tk.Label(
+            self.rows_frame, text=t("pick_user_groups").upper(), font=("Segoe UI", 7, "bold"),
+            fg=C["subtext"], bg=bg,
+        ).pack(anchor="w", pady=(0, 2))
+
         rows, self.page = proxy_groups.page_slice(groups, self.page)
         if not groups:
             tk.Label(
@@ -3708,24 +3723,7 @@ class GroupTabPickerDialog(tk.Toplevel):
             ).pack(anchor="w")
 
         for g in rows:
-            is_open = g["id"] in open_tabs
-            var = self._vars.setdefault(g["id"], tk.BooleanVar(value=False))
-            if is_open:
-                var.set(True)
-            row = tk.Frame(self.rows_frame, bg=C["card"])
-            row.pack(fill=tk.X, pady=2)
-            label = f"📁 {g['name']}" + (f"   {t('group_tab_already_open')}" if is_open else "")
-            tk.Checkbutton(
-                row, text=f" {label}", variable=var, font=("Segoe UI", 10, "bold"),
-                fg=C["muted"] if is_open else C["text"], bg=C["card"], selectcolor=C["surface"],
-                activebackground=C["card"], activeforeground=C["blue"], disabledforeground=C["muted"],
-                anchor="w", width=30, state=tk.DISABLED if is_open else tk.NORMAL,
-                command=lambda gid=g["id"]: self._toggle(gid),
-            ).pack(side=tk.LEFT, padx=(8, 6), pady=4)
-            tk.Label(
-                row, text=t("group_proxy_count", count=counts.get(g["id"], 0)), font=("Segoe UI", 9),
-                fg=C["subtext"], bg=C["card"], width=11, anchor="w",
-            ).pack(side=tk.LEFT, padx=(0, 10))
+            self._add_row(g["id"], f"📁 {g['name']}", counts.get(g["id"], 0), g["id"] in open_tabs)
 
         pages = proxy_groups.page_count(len(groups))
         if pages >= 2:
@@ -3738,6 +3736,26 @@ class GroupTabPickerDialog(tk.Toplevel):
             self.pager.pack_forget()
         self._sync_open_btn()
         self.geometry("")
+
+    def _add_row(self, gid: str, title: str, count: int, is_open: bool):
+        """One checkbox row; a group (or category) that already has a tab is checked and disabled."""
+        var = self._vars.setdefault(gid, tk.BooleanVar(value=False))
+        if is_open:
+            var.set(True)
+        row = tk.Frame(self.rows_frame, bg=C["card"])
+        row.pack(fill=tk.X, pady=2)
+        label = title + (f"   {t('group_tab_already_open')}" if is_open else "")
+        tk.Checkbutton(
+            row, text=f" {label}", variable=var, font=("Segoe UI", 10, "bold"),
+            fg=C["muted"] if is_open else C["text"], bg=C["card"], selectcolor=C["surface"],
+            activebackground=C["card"], activeforeground=C["blue"], disabledforeground=C["muted"],
+            anchor="w", width=30, state=tk.DISABLED if is_open else tk.NORMAL,
+            command=lambda g=gid: self._toggle(g),
+        ).pack(side=tk.LEFT, padx=(8, 6), pady=4)
+        tk.Label(
+            row, text=t("group_proxy_count", count=count), font=("Segoe UI", 9),
+            fg=C["subtext"], bg=C["card"], width=11, anchor="w",
+        ).pack(side=tk.LEFT, padx=(0, 10))
 
     def _toggle(self, gid: str):
         if self._vars[gid].get():
@@ -4831,12 +4849,19 @@ class VlessApp(tk.Tk):
 
         tab_gid = proxy_groups.group_id_of_view(self.overview_view_mode)
         tab_group = next((g for g in groups if g["id"] == tab_gid), None)
-        if tab_gid and tab_group is None:
+        system_tab = proxy_groups.system_category(tab_gid)
+        if tab_gid and tab_group is None and system_tab is None:
             # The tab's group vanished between refreshes: show all groups instead
             self.overview_view_mode = proxy_groups.VIEW_GROUPS
 
         rows: list = []
-        if tab_group is not None:
+        if system_tab is not None:
+            members = [inst for inst in self.instances if proxy_groups.in_system_category(tab_gid, inst)]
+            rows.append(self._header_model(system_tab, members, first=True, system=True))
+            if not members:
+                rows.append(HintModel(t("system_category_empty_hint")))
+            rows.extend(self._card_model(inst, index[inst], None) for inst in members)
+        elif tab_group is not None:
             members = [inst for inst in self.instances if tab_group["id"] in member_ids[inst]]
             rows.append(self._header_model(tab_group, members, first=True))
             if not members:
@@ -5049,7 +5074,8 @@ class VlessApp(tk.Tk):
     PILL_COLORS = {"ok": ("#20402b", "#a6e3a1"), "partial": ("#4a3520", "#fab387"),
                    "down": ("#4a262a", "#f38ba8"), "none": ("#2f2f38", "#9399b2")}
     # no U+FE0F (emoji presentation): Tk draws it as a wide blank after the icon
-    PILL_ICONS = {proxy_watcher.FLAG_TELEGRAM: "✈", proxy_watcher.FLAG_SYSTEM: "⚙", proxy_watcher.ALL: "◉"}
+    PILL_ICONS = {proxy_watcher.FLAG_TELEGRAM: "✈", proxy_watcher.FLAG_SYSTEM: "⚙",
+                  proxy_watcher.FLAG_WORK: "💼", proxy_watcher.ALL: "◉"}
 
     def watcher_refresh(self):
         """Re-read the status pills: TelegramProxy, SystemProxy, then All or each selected group."""
@@ -5125,8 +5151,8 @@ class VlessApp(tk.Tk):
         section(t("watcher_flags"))
         add(proxy_watcher.FLAG_TELEGRAM, "✈  TelegramProxy",
             str(sum(1 for i in self.instances if i.is_telegram_proxy())))
-        add(proxy_watcher.FLAG_SYSTEM, "⚙  SystemProxy",
-            str(sum(1 for i in self.instances if i.is_system_proxy())))
+        tk.Label(inner, text=t("watcher_always"), font=ui_font(self, 8, False), fg=MAC["label_2"],
+                 bg=MAC["control"], justify=tk.LEFT).pack(anchor="w", padx=int(32 * s), pady=(int(2 * s), int(2 * s)))
         section(t("watcher_groups"))
         groups = proxy_groups.load_groups()
         counts = proxy_groups.member_counts(i.cfg for i in self.instances)
@@ -5510,11 +5536,12 @@ class VlessApp(tk.Tk):
         for w in frame.winfo_children():
             w.destroy()
         self._group_tab_widgets: dict[str, MacTabChip] = {}
-        names = {g["id"]: g["name"] for g in proxy_groups.load_groups()}
+        names = {g["id"]: f"📁 {g['name']}" for g in proxy_groups.load_groups()}
+        names.update({c["id"]: f"{c['icon']} {c['name']}" for c in proxy_groups.SYSTEM_CATEGORIES})
         tabs = proxy_groups.get_group_tabs()
         for gid in tabs:
             chip = MacTabChip(
-                frame, text=f"📁 {names[gid]}",
+                frame, text=names[gid],
                 command=lambda g=gid: self.set_overview_view_mode(proxy_groups.group_view_mode(g)),
                 on_close=lambda g=gid: self.close_group_tab(g),
             )
@@ -5553,9 +5580,10 @@ class VlessApp(tk.Tk):
             return
         self._group_tab_picker = GroupTabPickerDialog(self)
 
-    def _header_model(self, group: Optional[dict], members: list, first: bool) -> HeaderModel:
-        """Section header: a real group gets inline rename; in selection mode a non-empty
-        section gets a select/unselect button."""
+    def _header_model(self, group: Optional[dict], members: list, first: bool,
+                      system: bool = False) -> HeaderModel:
+        """Section header: a real group gets inline rename (a system category does not);
+        in selection mode a non-empty section gets a select/unselect button."""
         select_button = None
         if getattr(self, "_selection_mode", False) and members:
             all_in = all(inst in self._selected for inst in members)
@@ -5565,7 +5593,7 @@ class VlessApp(tk.Tk):
                 bg=MAC["control"], fg="#64a8ff", bold=True, name="select_group",
             )
         on_rename = None
-        if group is not None:
+        if group is not None and not system:
             gid, old_name = group["id"], group["name"]
 
             def on_rename(text: str, from_blur: bool, gid=gid, old_name=old_name) -> bool:
@@ -5585,7 +5613,7 @@ class VlessApp(tk.Tk):
 
         return HeaderModel(
             key=group["id"] if group is not None else None,
-            icon="📁" if group is not None else "📂",
+            icon=group.get("icon", "📁") if group is not None else "📂",
             name=group["name"] if group is not None else t("group_unsorted"),
             count_text=f"({len(members)})",
             first=first,
@@ -5738,7 +5766,8 @@ class VlessApp(tk.Tk):
         return group
 
     def _open_card_context_menu(self, inst: ProxyInstance, x_root: int, y_root: int):
-        """Right click on a proxy card: per-proxy switches."""
+        """Right click on a proxy card: Killswitch, the system categories (the proxy's flags),
+        then — below a line — the user's groups, like the "+ Group" picker."""
         if inst not in self.instances:
             return
         menu = tk.Menu(
@@ -5747,14 +5776,51 @@ class VlessApp(tk.Tk):
             selectcolor=C["blue"],
         )
         ks_var = tk.BooleanVar(value=bool(inst.cfg.get("killswitch", False)))
-        tg_var = tk.BooleanVar(value=inst.is_telegram_proxy())
-        menu._vars = (ks_var, tg_var)  # keep them alive while the menu is open
+        menu._vars = [ks_var]  # keep them alive while the menu is open
         menu.add_command(label=inst.get_display_name(), state=tk.DISABLED)
         menu.add_separator()
         menu.add_checkbutton(label=f"🛡️ {t('ctx_killswitch')}", variable=ks_var,
                              command=lambda: inst.set_killswitch(bool(ks_var.get())))
-        menu.add_checkbutton(label=f"✈️ {t('ctx_telegram_proxy')}", variable=tg_var,
-                             command=lambda: inst.set_telegram_proxy(bool(tg_var.get())))
+
+        def after_flag_change():
+            # members of the system tabs, the Watcher pills and what it keeps up changed
+            if hasattr(self, "watcher_refresh"):
+                self.watcher_refresh()
+            self.refresh_overview()
+            if getattr(self, "watcher_enabled", False) and hasattr(self, "_watcher_tick"):
+                self.after(0, self._watcher_tick)
+
+        setters = {"sys:system": inst.set_system_proxy, "sys:telegram": inst.set_telegram_proxy,
+                   "sys:work": inst.set_work_proxy}
+        menu.add_separator()
+        menu.add_command(label=t("pick_system_categories"), state=tk.DISABLED)
+        for cat in proxy_groups.SYSTEM_CATEGORIES:
+            var = tk.BooleanVar(value=proxy_groups.in_system_category(cat["id"], inst))
+            menu._vars.append(var)
+            menu.add_checkbutton(
+                label=f"{cat['icon']} {cat['name']}", variable=var,
+                command=lambda s=setters[cat["id"]], v=var: (s(bool(v.get())), after_flag_change()),
+            )
+
+        groups = proxy_groups.load_groups()
+        member_of = set(inst.get_group_ids({g["id"] for g in groups}))
+        menu.add_separator()
+        menu.add_command(label=t("pick_user_groups"), state=tk.DISABLED)
+        for g in groups:
+            var = tk.BooleanVar(value=g["id"] in member_of)
+            menu._vars.append(var)
+            menu.add_checkbutton(
+                label=f"📁 {g['name']}", variable=var,
+                command=lambda gid=g["id"], v=var: inst.set_group_membership(gid, bool(v.get())),
+            )
+
+        def create_and_add():
+            group = self.prompt_new_group(self, suggested=self.suggest_group_name())
+            if group is not None:
+                self.on_groups_changed()
+                inst.set_group_membership(group["id"], True)
+
+        menu.add_command(label=t("group_menu_new"), command=create_and_add)
         self._card_context_menu = menu
         try:
             menu.tk_popup(x_root, y_root)
