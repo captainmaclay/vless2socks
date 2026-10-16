@@ -50,8 +50,24 @@ from vless2socks.power_watcher import PowerBroadcastWatcher
 from vless2socks.wsl_watchdog import WSL_OPERATION_LOCK, WslWatchdog
 from vless2socks.ipc_server import SingleInstanceIpcServer, request_show_running_instance
 from vless2socks.tunnel_probe import probe_socks5_tunnel
+try:
+    from vendor_c_accounts import get_vendor_c_account_for_port, get_default_account_num
+except ImportError:
+    try:
+        from claude_accounts import get_vendor_c_account_for_port, get_default_account_num
+    except ImportError:
+        def get_vendor_c_account_for_port(port, cfg=None):
+            return {
+                "port": port,
+                "account_num": 1,
+                "email": "",
+                "name": "",
+                "org_type": "",
+                "logged_in": False,
+            }
 
-# ── Tray dependencies ──────────────────────────────────────────
+        def get_default_account_num(port, cfg=None):
+            return 1
 try:
     import pystray
     from PIL import Image, ImageDraw
@@ -1003,7 +1019,7 @@ class ProxyInstance:
         self.telegram_proxy_var: Optional[tk.BooleanVar] = None
 
 
-        # Ensure port 1015 / 1030 defaults
+        # Ensure port 1015 / 1016 / 1030 defaults
         _, port = self.get_listen()
         if str(port) == "1015":
             if "killswitch" not in self.cfg:
@@ -1018,6 +1034,8 @@ class ProxyInstance:
             if "work_proxy" not in self.cfg and "Work_Proxy" not in self.cfg:
                 self.cfg["work_proxy"] = False
                 self.cfg["Work_Proxy"] = False
+            if "claude_account_num" not in self.cfg:
+                self.cfg["claude_account_num"] = 1
         elif str(port) == "1030" or "worproxy" in str(self.cfg.get("name", "")).lower():
             if "work_proxy" not in self.cfg and "Work_Proxy" not in self.cfg:
                 self.cfg["work_proxy"] = True
@@ -1072,6 +1090,19 @@ class ProxyInstance:
         val = bool(self.system_proxy_var.get() if self.system_proxy_var else False)
         self.cfg["system_proxy"] = val
         self.cfg["System_Proxy"] = val
+        if hasattr(self, "claude_info_lbl") and self.claude_info_lbl:
+            if val:
+                _, port = self.get_listen()
+                acc_info = get_vendor_c_account_for_port(port, self.cfg)
+                acc_num = acc_info.get("account_num") or get_default_account_num(port, self.cfg)
+                status_txt = acc_info["email"] if acc_info.get("logged_in") else "Не авторизован"
+                self.claude_info_lbl.config(
+                    text=f"Vendor C [{acc_num}]: {status_txt}",
+                    fg=C["peach"] if acc_info.get("logged_in") else C["subtext"],
+                )
+                self.claude_info_lbl.pack(side=tk.LEFT, padx=(0, 12))
+            else:
+                self.claude_info_lbl.pack_forget()
         self.app.save_all()
         self.app.update_overview_card(self)
 
@@ -1479,6 +1510,20 @@ class ProxyInstance:
             command=self._on_system_proxy_toggled,
         )
         sp_chk.pack(side=tk.LEFT, padx=(0, 12))
+
+        _, cur_port = self.get_listen()
+        acc_info = get_vendor_c_account_for_port(cur_port, self.cfg)
+        acc_num = acc_info.get("account_num") or get_default_account_num(cur_port, self.cfg)
+        status_txt = acc_info["email"] if acc_info.get("logged_in") else "Не авторизован"
+        self.claude_info_lbl = tk.Label(
+            flags_frame,
+            text=f"Vendor C [{acc_num}]: {status_txt}",
+            font=("Segoe UI", 9, "bold"),
+            fg=C["peach"] if acc_info.get("logged_in") else C["subtext"],
+            bg=bg,
+        )
+        if self.is_system_proxy():
+            self.claude_info_lbl.pack(side=tk.LEFT, padx=(0, 12))
 
         self.work_proxy_var = tk.BooleanVar(value=self.is_work_proxy())
         wp_chk = tk.Checkbutton(
@@ -4418,7 +4463,11 @@ class VlessApp(tk.Tk):
         # Single-Instance IPC & Wake-from-sleep Auto-Recovery
         self._power_watcher = PowerBroadcastWatcher(on_resume=self._on_power_resume)
         self._power_watcher.start()
-        self._ipc_server = SingleInstanceIpcServer(on_show=self._ipc_on_show, on_restart=self._ipc_on_restart)
+        self._ipc_server = SingleInstanceIpcServer(
+            on_show=self._ipc_on_show,
+            on_restart=self._ipc_on_restart,
+            on_refresh=self._ipc_on_refresh,
+        )
         self._ipc_server.start()
 
         # WSL watchdog: recovers a hung WSL, leaves a healthy or stopped one alone
@@ -4906,8 +4955,17 @@ class VlessApp(tk.Tk):
         badges = []
         if inst.cfg.get("killswitch", False):
             badges.append((" 🛡️ KS ", C["green"]))
+
+        vendor_c_info = None
         if inst.is_system_proxy():
-            badges.append((f" {t('badge_system_proxy')} ", C["yellow"]))
+            vendor_c_info = get_vendor_c_account_for_port(port, inst.cfg)
+            acc_num = vendor_c_info.get("account_num") or get_default_account_num(port, inst.cfg)
+            badges.append((f" ⚙️ System_Proxy ({acc_num} профиль) ", C["yellow"]))
+            if vendor_c_info.get("logged_in") and vendor_c_info.get("email"):
+                badges.append((f" 👤 {vendor_c_info['email']} ", C["peach"]))
+            else:
+                badges.append((" 👤 Не авторизован ", C["muted"]))
+
         if inst.is_work_proxy():
             badges.append((f" {t('badge_work_proxy')} ", C["teal"]))
         if inst.is_telegram_proxy():
@@ -4938,13 +4996,20 @@ class VlessApp(tk.Tk):
             if b.fg == "#cdd6f4":
                 b.fg = MAC["label"]
 
+        if vendor_c_info:
+            email_or_status = vendor_c_info["email"] if vendor_c_info.get("logged_in") else "Не авторизован"
+            acc_num = vendor_c_info.get("account_num") or get_default_account_num(port, inst.cfg)
+            ports_text = f"SOCKS5: {h}:{port}  |  Vendor C [{acc_num}]: {email_or_status}"
+        else:
+            ports_text = f"SOCKS5: {h}:{port}  |  HTTP: {h}:{http_port}"
+
         selecting = getattr(self, "_selection_mode", False)
         return CardModel(
             key=inst,
             dot=dot,
             order_text=f"#{format_order(inst.get_order())}",
             name=inst.get_display_name(),
-            ports=f"SOCKS5: {h}:{port}  |  HTTP: {h}:{http_port}",
+            ports=ports_text,
             geo=f"{flag} {country}" + (f" ({ip})" if ip else ""),
             geo_fg=C["yellow"] if country != "Unknown" else C["muted"],
             on_order=lambda i=inst: self.prompt_reorder_proxy(i),
@@ -8569,6 +8634,29 @@ class VlessApp(tk.Tk):
             self.after(0, self.restart_all)
         except Exception:
             pass
+
+    def _ipc_on_refresh(self):
+        try:
+            for inst in self.instances:
+                _, port = inst.get_listen()
+                if port and (inst.is_system_proxy() or "vendor_c_account_num" in inst.cfg or "claude_account_num" in inst.cfg):
+                    acc_info = get_vendor_c_account_for_port(port, inst.cfg)
+                    inst.cfg["vendor_c_account_num"] = acc_info["account_num"]
+                    inst.cfg["vendor_c_email"] = acc_info["email"]
+                    inst.cfg["vendor_c_name"] = acc_info["name"]
+                    inst.cfg["vendor_c_updated_at"] = int(time.time())
+                    # Legacy keys for backward compatibility
+                    inst.cfg["claude_account_num"] = acc_info["account_num"]
+                    inst.cfg["claude_email"] = acc_info["email"]
+                    inst.cfg["claude_name"] = acc_info["name"]
+                    inst.cfg["claude_updated_at"] = int(time.time())
+            self.after(0, self.refresh_overview)
+            self.after(0, self.save_all)
+        except Exception:
+            try:
+                self.after(0, self.refresh_overview)
+            except Exception:
+                pass
 
     def _on_power_resume(self):
         self._log("⚡ [PowerWatcher] System resumed from sleep. Scheduling self-recovery in 2.5s...")

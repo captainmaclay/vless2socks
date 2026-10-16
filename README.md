@@ -395,7 +395,17 @@ vless2socks comes integrated with custom autonomous skills designed for Google D
 - **Elimination of Zombie Processes:** Solves the issue where closing an Electron application (e.g., Claude Desktop) in WSL2 fails to terminate the background process due to missing system tray support in WSLg (`kill -TERM`, `chrome_crashpad_handler`).
 - **SingletonLock Recovery:** Automatically cleans stale lockfiles (`~/.config/<App>/SingletonLock`) preventing instances from failing silently on relaunch.
 - **Session DBus Setup:** Ensures `XDG_RUNTIME_DIR` and `DBus` (`/run/user/<uid>/bus`) are properly started before launching graphical applications.
-- **Window Activation Watchdog:** Uses `xdotool` to activate existing visible windows instead of launching duplicate processes.
+### 4. `claude-wsl-gui-manager` — Vendor C Desktop GUI & CLI Environment Isolation (Research & Sandbox)
+- **Research Notice:** Developed strictly for research and testing of Linux (WSL2/WSLg) process containerization, Chromium OSCrypt/GNOME Keyring storage, and proxy socket routing.
+- **Location:** `~/.gemini/config/skills/claude-wsl-gui-manager/SKILL.md`
+- **Toolkit & Scripts:** [`new_claude/`](new_claude/)
+- **Step-by-Step Guide:** [`new_claude/howToCreate.md`](new_claude/howToCreate.md) and [`VENDOR_C_ENVIRONMENT_OVERVIEW.md`](VENDOR_C_ENVIRONMENT_OVERVIEW.md)
+- **Detailed Subsystem Manuals:** [`VENDOR_C_WSL_GUI_ENVIRONMENTS.md`](VENDOR_C_WSL_GUI_ENVIRONMENTS.md) (Linux / WSLg GUI) and [`VENDOR_C_CLI_ENVIRONMENTS.md`](VENDOR_C_CLI_ENVIRONMENTS.md) (Windows CLI)
+- **Key Capabilities:**
+  - **Zero Shared State:** Complete filesystem isolation for Vendor C Desktop (`/home/<user>/.claude-<id>/.config/Claude`) and Vendor C CLI (`C:\Users\<user>\.claude-<id>`).
+  - **GNOME Keyring & Secret Service Integration:** Provisions passwordless `login.keyring` with `--password-store=gnome-libsecret` via `init_wsl_keyring.sh`, resolving system keyring availability.
+  - **Pre-Launch IP Verification & Mac UI Toast:** [`verify_and_notify.py`](new_claude/verify_and_notify.py) checks outbound SOCKS5 IP against target node before launch, showing macOS-styled 4s/5s fadeout toasts.
+  - **Automated Provisioning:** One-click deployment of new instances via [`add_vendor_c_gui_instance.py`](new_claude/add_vendor_c_gui_instance.py) and [`add_vendor_c_cli_instance.py`](new_claude/add_vendor_c_cli_instance.py).
 
 ## License
 
@@ -687,7 +697,17 @@ dist/
 - **Устранение зомби-процессов:** Решает проблему зависания Electron-приложений (например, Claude Desktop) при закрытии крестиком из-за отсутствия системного трея в WSLg (`kill -TERM`, `chrome_crashpad_handler`).
 - **Сброс SingletonLock:** Автоматическая очистка блокировок `~/.config/<App>/SingletonLock`, устраняющая сбои повторного запуска.
 - **Инициализация сессионного DBus:** Гарантирует запуск `XDG_RUNTIME_DIR` и `dbus-daemon` перед стартом GUI-процессов.
-- **Фокусировка окон через `xdotool`:** Активирует существующее открытое окно вместо создания дублирующих экземпляров.
+### 4. `claude-wsl-gui-manager` — Изоляция тестовых сред Вендора C в WSL2/Windows (Исследовательские цели)
+- **Примечание об исследовательской направленности:** Модуль и документация созданы исключительно для исследовательских и образовательных целей: изучение контейнеризации процессов Linux (WSL2/WSLg), криптографических подсистем Chromium OSCrypt/GNOME Keyring и сетевой маршрутизации через сокеты.
+- **Расположение скилла:** `~/.gemini/config/skills/claude-wsl-gui-manager/SKILL.md`
+- **Каталог инструментов и скриптов:** [`new_claude/`](new_claude/)
+- **Главный пошаговый путеводитель:** [`new_claude/howToCreate.md`](new_claude/howToCreate.md) и [`VENDOR_C_ENVIRONMENT_OVERVIEW.md`](VENDOR_C_ENVIRONMENT_OVERVIEW.md)
+- **Подробные руководства по подсистемам:** [`VENDOR_C_WSL_GUI_ENVIRONMENTS.md`](VENDOR_C_WSL_GUI_ENVIRONMENTS.md) (Linux / WSLg GUI) и [`VENDOR_C_CLI_ENVIRONMENTS.md`](VENDOR_C_CLI_ENVIRONMENTS.md) (Windows CLI)
+- **Ключевые возможности:**
+  - **Zero Shared State:** Полное разделение дисковых пространств для GUI Вендора C (`/home/<user>/.claude-<id>/.config/Claude`) и CLI Вендора C (`C:\Users\<user>\.claude-<id>`).
+  - **Интеграция с GNOME Keyring:** Автоматический провижининг беспарольного `login.keyring` и запуск с `--password-store=gnome-libsecret` через `init_wsl_keyring.sh` для поддержки штатного системного шифрования.
+  - **Защита от сетевых утечек и Mac UI уведомления:** Модуль [`verify_and_notify.py`](new_claude/verify_and_notify.py) сверяет исходящий IP перед стартом, отображая стильное плавающее окно (неблокирующие 4 сек при успехе, блокирующие 5 сек при ошибке).
+  - **Развертывание в одну команду:** Автоматическая генерация новых GUI и CLI инстансов скриптами [`add_vendor_c_gui_instance.py`](new_claude/add_vendor_c_gui_instance.py) и [`add_vendor_c_cli_instance.py`](new_claude/add_vendor_c_cli_instance.py).
 
 ## Лицензия
 

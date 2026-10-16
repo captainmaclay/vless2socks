@@ -45,10 +45,12 @@ class SingleInstanceIpcServer:
         port: int = DEFAULT_IPC_PORT,
         on_show: Optional[Callable[[], None]] = None,
         on_restart: Optional[Callable[[], None]] = None,
+        on_refresh: Optional[Callable[[], None]] = None,
     ) -> None:
         self.port = port
         self.on_show = on_show
         self.on_restart = on_restart
+        self.on_refresh = on_refresh
         self._server_sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
@@ -112,6 +114,14 @@ class SingleInstanceIpcServer:
                             self.on_restart()
                         except Exception as e:
                             log.warning(f"Error in on_restart: {e}")
+                    conn.sendall(b"OK\n")
+                elif cmd in ("REFRESH", "UPDATE_CLAUDE", "UPDATE_VENDOR_C"):
+                    log.info(f"Received IPC command: {cmd}")
+                    if self.on_refresh:
+                        try:
+                            self.on_refresh()
+                        except Exception as e:
+                            log.warning(f"Error in on_refresh: {e}")
                     conn.sendall(b"OK\n")
                 elif cmd == "PING":
                     conn.sendall(b"PONG\n")
