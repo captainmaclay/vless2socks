@@ -390,6 +390,10 @@ _LEAK_CHECK_SLOTS = threading.BoundedSemaphore(3)
 #: Proxies starting at the same time on "Start all" / autostart
 START_CONCURRENCY = 6
 START_SPACING_MS = 400
+#: How often the Watcher checks TelegramProxy end to end (a DC must answer through it)
+TELEGRAM_SELF_CHECK_S = 60.0
+#: Grey example in the "paste a SOCKS5 link" field (documentation address, not a real server)
+SOCKS_LINK_PLACEHOLDER = "socks5://user:pass@203.0.113.10:1080"
 #: Short background jobs (geo lookups, killswitch checks) share one pool: starting a new
 #: thread from the GUI thread for each of dozens of proxies made Thread.start() wait on
 #: thread start-up again and again while everything else was busy
@@ -1391,7 +1395,7 @@ class ProxyInstance:
         self.name_label = tk.Label(name_bar, text=self.get_display_name(), font=("Segoe UI", 10, "bold"), fg=fg, bg=bg)
         self.name_label.pack(side=tk.LEFT, padx=(0, 4))
         tk.Button(
-            name_bar, text="✏️", font=("Segoe UI", 9),
+            name_bar, text="✎", font=("Segoe UI", 9),
             bg=bg, fg=C["subtext"], activebackground=C["hover"], activeforeground=C["text"],
             relief=tk.FLAT, bd=0, padx=4, pady=0, cursor="hand2",
             command=self.prompt_rename
@@ -1921,8 +1925,152 @@ class ProxyInstance:
             if self.vless_container:
                 self.vless_container.pack(fill=tk.X)
 
+    def _apply_socks_server(self, srv) -> None:
+        """Use `srv` (vless2socks.url.SocksServer) as this proxy's SOCKS5 upstream."""
+        self.cfg["url"] = srv.to_url()
+        if self.proto_var:
+            self.proto_var.set("socks5")
+        self._update_socks_summary()
+        self._init_geo_from_url()
+        self.app.save_all()
+        self.app.refresh_current_page_tabs()
+        self.app.refresh_overview()
+        self._log(f"Configured SOCKS5 upstream: {srv.describe()}")
+
+    def apply_socks_link(self, text: str) -> Optional[str]:
+        """Parse a pasted socks5:// link and apply it. Returns None, or the error text."""
+        from vless2socks.url import parse_socks_link
+        try:
+            srv = parse_socks_link(text)
+        except Exception as err:
+            return str(err)
+        self._apply_socks_server(srv)
+        return None
+
     def open_socks_dialog(self):
-        """Open SOCKS5 credentials editor dialog matching screenshot."""
+        """"Configure SOCKS5": first a choice - 1) paste a socks5:// link, 2) the field editor."""
+        dlg = tk.Toplevel(self.app)
+        self._socks_choice_dlg = dlg
+        dlg.title(t("dlg_socks_choose_title"))
+        dlg.resizable(False, False)
+        dlg.configure(bg=C["bg"])
+        dlg.transient(self.app)
+        dlg.grab_set()
+
+        # 1. Paste a link
+        grp_link = tk.LabelFrame(
+            dlg, text=f" {t('socks_opt_link')} ", font=("Segoe UI", 9, "bold"),
+            bg=C["bg"], fg=C["text"], bd=1, relief=tk.GROOVE,
+        )
+        grp_link.pack(fill=tk.X, padx=14, pady=(12, 6))
+        tk.Label(grp_link, text=t("socks_opt_link_hint"), font=("Segoe UI", 8), fg=C["subtext"],
+                 bg=C["bg"], justify=tk.LEFT).pack(anchor="w", padx=12, pady=(8, 4))
+        link_ent = tk.Entry(grp_link, font=("Consolas", 10), bg=C["overlay"], fg=C["text"],
+                            insertbackground=C["text"], relief=tk.FLAT, borderwidth=4, width=46)
+        link_ent.pack(fill=tk.X, padx=12, pady=(0, 4))
+        attach_clipboard_and_context_menu(link_ent)
+        self._socks_link_entry = link_ent
+        err_lbl = tk.Label(grp_link, text="", font=("Segoe UI", 8), fg=C["red"], bg=C["bg"],
+                           justify=tk.LEFT, wraplength=440)
+        err_lbl.pack(anchor="w", padx=12)
+        self._socks_link_error = err_lbl
+
+        # grey example while the field is empty and not focused
+        placeholder = SOCKS_LINK_PLACEHOLDER
+        state = {"ph": False}
+
+        def show_placeholder(_e=None):
+            if not link_ent.get():
+                state["ph"] = True
+                link_ent.insert(0, placeholder)
+                link_ent.config(fg=C["muted"])
+
+        def hide_placeholder(_e=None):
+            if state["ph"]:
+                state["ph"] = False
+                link_ent.delete(0, tk.END)
+                link_ent.config(fg=C["text"])
+
+        def link_text() -> str:
+            text = link_ent.get()
+            if state["ph"]:
+                # text added next to the example without clearing it first: drop the example
+                return text.replace(placeholder, "", 1).strip() if text != placeholder else ""
+            return text
+
+        # any way of starting to type or paste removes the example first (a paste from the
+        # right-click menu does not always move the focus into the field)
+        for seq in ("<FocusIn>", "<Button-1>", "<Button-3>", "<<Paste>>", "<Key>"):
+            link_ent.bind(seq, hide_placeholder, add="+")
+        link_ent.bind("<FocusOut>", show_placeholder, add="+")
+        self._socks_link_text = link_text
+
+        def apply_link(_e=None):
+            error = self.apply_socks_link(link_text())
+            if error:
+                err_lbl.config(text=t("msg_socks_link_bad", err=error))
+                link_ent.focus_set()
+                return
+            dlg.destroy()
+
+        tk.Button(
+            grp_link, text=t("btn_socks_apply_link"), font=("Segoe UI", 9, "bold"),
+            bg=C["blue"], fg="#1e1e2e", activebackground=C["teal"], relief=tk.FLAT,
+            padx=14, pady=3, command=apply_link,
+        ).pack(anchor="e", padx=12, pady=(4, 10))
+        link_ent.bind("<Return>", apply_link)
+
+        # 2. The field editor (the old dialog)
+        grp_manual = tk.LabelFrame(
+            dlg, text=f" {t('socks_opt_manual')} ", font=("Segoe UI", 9, "bold"),
+            bg=C["bg"], fg=C["text"], bd=1, relief=tk.GROOVE,
+        )
+        grp_manual.pack(fill=tk.X, padx=14, pady=6)
+
+        def open_manual():
+            dlg.destroy()
+            self.open_socks_manual_dialog()
+
+        tk.Label(grp_manual, text=t("socks_opt_manual_hint"), font=("Segoe UI", 8), fg=C["subtext"],
+                 bg=C["bg"], justify=tk.LEFT).pack(side=tk.LEFT, padx=12, pady=10)
+        tk.Button(
+            grp_manual, text=t("btn_socks_manual"), font=("Segoe UI", 9),
+            bg=C["card"], fg=C["text"], activebackground=C["hover"], relief=tk.GROOVE, bd=1,
+            padx=12, pady=3, command=open_manual,
+        ).pack(side=tk.RIGHT, padx=12, pady=10)
+
+        btn_bar = tk.Frame(dlg, bg=C["bg"])
+        btn_bar.pack(fill=tk.X, padx=14, pady=(6, 12))
+        tk.Button(
+            btn_bar, text=t("btn_cancel"), font=("Segoe UI", 9), bg=C["card"], fg=C["text"],
+            activebackground=C["hover"], relief=tk.GROOVE, bd=1, padx=16, pady=4, command=dlg.destroy,
+        ).pack(side=tk.RIGHT)
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+
+        # a socks link already on the clipboard is offered right away
+        clip = ""
+        try:
+            clip = self.app.clipboard_get().strip()
+        except Exception:
+            pass
+        if clip.lower().startswith(("socks5://", "socks5h://", "socks://")) and "\n" not in clip:
+            link_ent.insert(0, clip)
+            link_ent.focus_set()
+            link_ent.select_range(0, tk.END)
+        else:
+            show_placeholder()
+            btn_bar.focus_set()
+
+        dlg.update_idletasks()
+        try:
+            x = self.app.winfo_x() + (self.app.winfo_width() - dlg.winfo_reqwidth()) // 2
+            y = self.app.winfo_y() + (self.app.winfo_height() - dlg.winfo_reqheight()) // 2
+            dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+
+    def open_socks_manual_dialog(self):
+        """SOCKS5 field editor: name, address, port, version, login, password."""
         from vless2socks.url import parse_socks_url, SocksServer
 
         url = self.cfg.get("url", "").strip()
@@ -2067,16 +2215,7 @@ class ProxyInstance:
                 version=5,
                 remark=name_val,
             )
-            socks_url = srv.to_url()
-            self.cfg["url"] = socks_url
-            if self.proto_var:
-                self.proto_var.set("socks5")
-            self._update_socks_summary()
-            self._init_geo_from_url()
-            self.app.save_all()
-            self.app.refresh_current_page_tabs()
-            self.app.refresh_overview()
-            self._log(f"Configured SOCKS5 upstream: {srv.describe()}")
+            self._apply_socks_server(srv)
             dlg.destroy()
 
         cancel_btn = tk.Button(
@@ -3522,7 +3661,7 @@ def _center_over(win: tk.Toplevel, parent: tk.Misc) -> None:
 
 # ── Proxy Groups Manager Dialog ───────────────────────────────
 class GroupsManagerDialog(tk.Toplevel):
-    """Modal list of proxy groups (10 per page): create, rename with ✏️, delete with ✕.
+    """Modal list of proxy groups (10 per page): create, rename with ✎, delete with ✕.
 
     The window has no fixed size: it takes exactly the room its rows need, and the
     page switcher is shown only when there are at least two pages.
@@ -3622,7 +3761,7 @@ class GroupsManagerDialog(tk.Toplevel):
                 padx=8, cursor="hand2", command=lambda grp=g: self._delete(grp),
             ).pack(side=tk.RIGHT, padx=(0, 6))
             tk.Button(
-                row, text="✏️", font=("Segoe UI", 9), bg=C["card"], fg=C["subtext"],
+                row, text="✎", font=("Segoe UI", 9), bg=C["card"], fg=C["subtext"],
                 activebackground=C["hover"], activeforeground=C["text"], relief=tk.FLAT, bd=0,
                 padx=6, cursor="hand2", command=lambda grp=g: self._rename(grp),
             ).pack(side=tk.RIGHT)
@@ -5081,6 +5220,9 @@ class VlessApp(tk.Tk):
                 from vless2socks import telegram_proxy
                 if not telegram_proxy.get_tg_dispatcher().is_running():
                     submit_background(self._sync_telegram_dispatcher)
+                elif time.monotonic() - getattr(self, "_tg_self_check_at", 0.0) >= TELEGRAM_SELF_CHECK_S:
+                    self._tg_self_check_at = time.monotonic()
+                    submit_background(self._telegram_self_check)
             except Exception:
                 pass
         self.watcher_refresh()
@@ -6188,9 +6330,22 @@ class VlessApp(tk.Tk):
         except Exception:
             pass
 
+    def _telegram_self_check(self) -> bool:
+        """Worker thread: a Telegram DC must answer through the dispatcher's port. A port
+        that answers is not enough - tunnels behind it can be dead while Telegram keeps
+        waiting on them. On failure the dispatcher rotates and drops its open relays."""
+        from vless2socks import telegram_proxy
+        disp = telegram_proxy.get_tg_dispatcher()
+        ok = disp.self_check()
+        if not ok:
+            detail = disp.last_self_check[2]
+            self._log(f"⚠️ [TelegramProxy] self-check failed ({detail}): rotated, dead tunnels dropped")
+        return ok
+
     def _update_telegram_dispatcher_pool(self):
         try:
             from vless2socks import telegram_proxy
+            telegram_proxy.enable_file_log()     # runtime/telegram_proxy.log
             disp = telegram_proxy.get_tg_dispatcher()
             disp.set_pool(self.instances)
             tg_insts = [i for i in getattr(self, "instances", []) if i.is_telegram_proxy()]

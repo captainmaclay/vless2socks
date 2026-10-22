@@ -574,12 +574,12 @@ class OverviewView:
 
         # name row + badges
         ty = y + self.CARD_PAD + self.NAME_H / 2
-        rename_w = (self._w(self.f_small, "✏️") + px(6)) if m.on_rename else 0
+        rename_w = (self._w(self.f_small, "✎") + px(6)) if m.on_rename else 0
         name = self._fit(self.f_name, m.name, limit - x - rename_w)
         cv.create_text(x, ty, text=name, font=self.f_name, fill=C["text"], anchor="w", tags=(tag,))
         bx = x + self._w(self.f_name, name) + px(6)
         if m.on_rename:
-            bx = self._text_button(bx, ty, "✏️", self.f_small, C["subtext"], m.on_rename, tag, m.key, "rename") + px(6)
+            bx = self._text_button(bx, ty, "✎", self.f_small, C["subtext"], m.on_rename, tag, m.key, "rename") + px(6)
         bh = (self.NAME_H - px(2)) / 2
         for text, color in m.badges:
             w = self._w(self.f_badge, text) + px(10)
@@ -608,7 +608,7 @@ class OverviewView:
         name_x = x
         x += self._w(self.f_head, m.name) + px(6)
         if m.on_rename:
-            x = self._text_button(x, mid, "✏️", self.f_small, C["subtext"],
+            x = self._text_button(x, mid, "✎", self.f_small, C["subtext"],
                                   lambda: self._start_edit(m, name_x, mid, name_item), tag, m.key, "rename") + px(6)
             cv.tag_bind(name_item, "<Double-Button-1>", lambda _e: self._start_edit(m, name_x, mid, name_item))
         cv.create_text(x, mid, text=m.count_text, font=self.f_small, fill=C["subtext"], anchor="w", tags=(tag,))

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import logging.handlers
 import os
 import socket
 import struct
@@ -78,6 +79,85 @@ def build_tg_socks_url(
     return url
 
 
+LOG_FILE_NAME = "telegram_proxy.log"
+_file_log_lock = threading.Lock()
+_file_log_path: Optional[str] = None
+
+
+def enable_file_log(path: Optional[str] = None, max_bytes: int = 512 * 1024, backups: int = 2) -> Optional[str]:
+    """Write the dispatcher's log to runtime/telegram_proxy.log (rotated). Without it the
+    GUI (pythonw) dropped every message: exclusions, rotations and failures were invisible.
+    Idempotent; returns the path or None when the file cannot be opened."""
+    global _file_log_path
+    with _file_log_lock:
+        if _file_log_path:
+            return _file_log_path
+        if path is None:
+            from .paths import APP_DIR
+            path = os.path.join(str(APP_DIR), "runtime", LOG_FILE_NAME)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            handler = logging.handlers.RotatingFileHandler(path, maxBytes=max_bytes, backupCount=backups,
+                                                           encoding="utf-8")
+        except OSError:
+            return None
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(handler)
+        if logger.level == logging.NOTSET or logger.level > logging.INFO:
+            logger.setLevel(logging.INFO)
+        _file_log_path = path
+        return path
+
+
+def _recv_exact(sock: socket.socket, n: int) -> bytes:
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError(f"closed after {len(buf)} of {n} bytes")
+        buf += chunk
+    return buf
+
+
+def probe_mtproto(socks_host: str, socks_port: int, dc: Tuple[str, int] = TELEGRAM_DCS[2],
+                  timeout: float = 12.0) -> Tuple[bool, str]:
+    """End-to-end check of a Telegram path: through the SOCKS5 port to a Telegram DC, the
+    first MTProto request (req_pq_multi, abridged transport); a DC answers with resPQ.
+
+    A plain port check is not enough: xray confirms a SOCKS CONNECT before its server is
+    reached, and the dispatcher answers on its port even when every tunnel behind it is
+    dead. Returns (ok, detail)."""
+    started = time.monotonic()
+    try:
+        with socket.create_connection((socks_host, int(socks_port)), timeout=timeout) as s:
+            s.settimeout(timeout)
+            s.sendall(b"\x05\x01\x00")
+            if _recv_exact(s, 2) != b"\x05\x00":
+                return False, "SOCKS5 greeting refused"
+            s.sendall(b"\x05\x01\x00\x01" + socket.inet_aton(dc[0]) + struct.pack(">H", dc[1]))
+            reply = _recv_exact(s, 4)
+            if reply[1] != 0:
+                return False, f"SOCKS5 CONNECT failed (code {reply[1]})"
+            atyp = reply[3]                                  # skip the bound address and port
+            if atyp == 3:
+                _recv_exact(s, _recv_exact(s, 1)[0] + 2)
+            else:
+                _recv_exact(s, (16 if atyp == 4 else 4) + 2)
+            body = struct.pack("<I", 0xBE7E8EF1) + os.urandom(16)               # req_pq_multi
+            msg = struct.pack("<qqi", 0, int(time.time()) << 32, len(body)) + body
+            s.sendall(b"\xef" + bytes([len(msg) // 4]) + msg)                    # abridged
+            first = _recv_exact(s, 1)[0]
+            length = (first if first < 0x7f else int.from_bytes(_recv_exact(s, 3), "little")) * 4
+            data = _recv_exact(s, length)
+            ctor = struct.unpack("<I", data[20:24])[0] if len(data) >= 24 else 0
+            ms = int((time.monotonic() - started) * 1000)
+            if ctor == 0x05162463:
+                return True, f"resPQ in {ms} ms"
+            return False, f"unexpected answer 0x{ctor:08x} in {ms} ms"
+    except Exception as err:
+        return False, f"{type(err).__name__}: {err} after {int((time.monotonic() - started) * 1000)} ms"
+
+
 def is_endpoint_reachable(host: str, port: int, timeout: float = 0.6) -> bool:
     """Быстрая проверка доступности сокета TCP/SOCKS5 без вызова ошибок EOF на сервере."""
     try:
@@ -106,6 +186,15 @@ class TelegramProxyDispatcher:
 
     FAIL_THRESHOLD = 2
     FAIL_COOLDOWN_S = 60.0
+    # A relay where the client sent data and upstream stayed silent this long is a dead
+    # tunnel: it is closed so Telegram reconnects (before, it hung "established" forever).
+    RELAY_STALL_TIMEOUT_S = 60.0
+    # No traffic in either direction this long: the relay is closed (not counted as a failure).
+    RELAY_IDLE_TIMEOUT_S = 600.0
+    # The client closing a relay that got no answer yet is only a failure after this long:
+    # Telegram opens several connections at once and drops the extra ones right away.
+    RESPONSE_GRACE_S = 10.0
+    MONITOR_STEP_S = 5.0
 
     def __init__(
         self,
@@ -132,6 +221,9 @@ class TelegramProxyDispatcher:
         self._health: Dict[Tuple[str, int], bool] = {}
         # Consecutive relays through a proxy that got nothing back: (count, last time)
         self._failures: Dict[Tuple[str, int], Tuple[int, float]] = {}
+        # Open relays (client writer, upstream writer), so a failed self-check can drop them
+        self._relays: set = set()
+        self.last_self_check: Tuple[float, bool, str] = (0.0, True, "")
 
     def is_running(self) -> bool:
         return self._running and is_endpoint_reachable(self.listen_host, self.listen_port, timeout=0.3)
@@ -249,10 +341,10 @@ class TelegramProxyDispatcher:
                     return self._switch_to(idx, "РОТАЦИЯ (нет здоровых, берём доступный)")
             return self._pool[self._current_index]
 
-    def report_result(self, proxy: Optional[Dict[str, Any]], ok: bool) -> None:
+    def report_result(self, proxy: Optional[Dict[str, Any]], ok: Optional[bool]) -> None:
         """Outcome of one relay. After FAIL_THRESHOLD silent relays in a row the proxy
         is skipped for FAIL_COOLDOWN_S and the dispatcher moves on to the next one."""
-        if not proxy:
+        if not proxy or ok is None:
             return
         key = self._key(proxy)
         with self._lock:
@@ -474,9 +566,9 @@ class TelegramProxyDispatcher:
         await client_writer.drain()
 
         # Двунаправленный обмен; молчащий апстрим = мёртвый сервер за живым локальным портом
-        sent, received = await self._pipe_streams(client_reader, client_writer, up_reader, up_writer)
-        if sent:
-            self.report_result(active, received > 0)
+        res = await self._relay(client_reader, client_writer, up_reader, up_writer)
+        self._log_relay(active, f"{dst_host}:{dst_port}", res)
+        self.report_result(active, self.relay_verdict(res))
 
     async def _handle_mtproto(
         self,
@@ -550,104 +642,151 @@ class TelegramProxyDispatcher:
         up_writer.write(bytes(dc_header))
         await up_writer.drain()
 
-        # 4. Двунаправленный обмен с непрерывной перешифровкой (re-encryption):
-        _sent, received = await self._pipe_encrypted_streams(
-            client_reader, client_writer, client_dec, client_enc,
-            up_reader, up_writer, dc_dec, dc_enc
-        )
+        # 4. Двунаправленный обмен с непрерывной перешифровкой (re-encryption);
         # the DC header was sent, so a working path always brings something back
-        self.report_result(active, received > 0)
+        res = await self._relay(
+            client_reader, client_writer, up_reader, up_writer,
+            to_up=lambda data: dc_enc.update(client_dec.update(data)),
+            to_client=lambda data: client_enc.update(dc_dec.update(data)),
+            initial_sent=len(dc_header),
+        )
+        self._log_relay(active, f"DC{dc_id} {dc_host}:{dc_port}", res)
+        self.report_result(active, self.relay_verdict(res))
 
-    async def _pipe_encrypted_streams(
+    async def _relay(
         self,
         client_r: asyncio.StreamReader,
         client_w: asyncio.StreamWriter,
-        client_dec: Any,
-        client_enc: Any,
-        dc_r: asyncio.StreamReader,
-        dc_w: asyncio.StreamWriter,
-        dc_dec: Any,
-        dc_enc: Any,
-    ):
-        """Двунаправленная перекачка с AES-CTR перешифровкой между клиентом и датацентром.
-        Returns (bytes sent to the DC, bytes received from it)."""
-        counts = [0, 0]
+        up_r: asyncio.StreamReader,
+        up_w: asyncio.StreamWriter,
+        to_up: Optional[Callable[[bytes], bytes]] = None,
+        to_client: Optional[Callable[[bytes], bytes]] = None,
+        initial_sent: int = 0,
+    ) -> Dict[str, Any]:
+        """Pump bytes both ways (optionally re-encrypting) until one side closes, the
+        upstream stalls or the relay idles out. Returns what happened: sent / received
+        (bytes to and from upstream), client_closed (the client ended it), stalled, idle,
+        duration."""
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        st: Dict[str, Any] = {"sent": initial_sent, "received": 0, "client_closed": False,
+                              "stalled": False, "idle": False, "last": start,
+                              "pending": start if initial_sent else None}
+        pair = (client_w, up_w)
+        self._relays.add(pair)
 
-        async def _client_to_dc():
-            try:
-                while True:
-                    data = await client_r.read(32768)
-                    if not data:
-                        break
-                    counts[0] += len(data)
-                    plain = client_dec.update(data)
-                    for_dc = dc_enc.update(plain)
-                    dc_w.write(for_dc)
-                    await dc_w.drain()
-            except Exception:
-                pass
-            finally:
-                try:
-                    dc_w.close()
-                except Exception:
-                    pass
-
-        async def _dc_to_client():
-            try:
-                while True:
-                    data = await dc_r.read(32768)
-                    if not data:
-                        break
-                    counts[1] += len(data)
-                    plain = dc_dec.update(data)
-                    for_client = client_enc.update(plain)
-                    client_w.write(for_client)
-                    await client_w.drain()
-            except Exception:
-                pass
-            finally:
-                try:
-                    client_w.close()
-                except Exception:
-                    pass
-
-        t1 = asyncio.create_task(_client_to_dc())
-        t2 = asyncio.create_task(_dc_to_client())
-        await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
-        return counts[0], counts[1]
-
-    async def _pipe_streams(
-        self,
-        r1: asyncio.StreamReader,
-        w1: asyncio.StreamWriter,
-        r2: asyncio.StreamReader,
-        w2: asyncio.StreamWriter,
-    ):
-        """Двунаправленная перекачка байт между клиентом и апстримом.
-        Returns (bytes sent upstream, bytes received from upstream)."""
-        counts = [0, 0]
-
-        async def _forward(src, dst, slot):
+        async def forward(src, dst, transform, upstream: bool):
             try:
                 while True:
                     data = await src.read(32768)
                     if not data:
                         break
-                    counts[slot] += len(data)
-                    dst.write(data)
+                    now = loop.time()
+                    st["last"] = now
+                    if upstream:
+                        st["sent"] += len(data)
+                        if st["pending"] is None:
+                            st["pending"] = now          # now waiting for upstream's answer
+                    else:
+                        st["received"] += len(data)
+                        st["pending"] = None
+                    dst.write(transform(data) if transform else data)
                     await dst.drain()
             except Exception:
                 pass
-            finally:
+
+        async def monitor():
+            while True:
+                await asyncio.sleep(min(self.MONITOR_STEP_S, self.RELAY_STALL_TIMEOUT_S))
+                now = loop.time()
+                if st["pending"] is not None and now - st["pending"] >= self.RELAY_STALL_TIMEOUT_S:
+                    st["stalled"] = True
+                    return
+                if now - st["last"] >= self.RELAY_IDLE_TIMEOUT_S:
+                    st["idle"] = True
+                    return
+
+        up_task = asyncio.create_task(forward(client_r, up_w, to_up, True))
+        down_task = asyncio.create_task(forward(up_r, client_w, to_client, False))
+        mon_task = asyncio.create_task(monitor())
+        try:
+            done, _ = await asyncio.wait([up_task, down_task, mon_task], return_when=asyncio.FIRST_COMPLETED)
+            st["client_closed"] = (up_task in done and down_task not in done
+                                   and not (st["stalled"] or st["idle"]))
+        finally:
+            for task in (up_task, down_task, mon_task):
+                task.cancel()
+            for w in pair:
                 try:
-                    dst.close()
+                    w.close()
                 except Exception:
                     pass
+            self._relays.discard(pair)
+        st["duration"] = loop.time() - start
+        return st
 
-        t1 = asyncio.create_task(_forward(r1, w2, 0))
-        t2 = asyncio.create_task(_forward(r2, w1, 1))
-        await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
-        return counts[0], counts[1]
+    def relay_verdict(self, res: Dict[str, Any]) -> Optional[bool]:
+        """Did this relay prove the upstream working (True), dead (False), or nothing (None)?
+
+        Only an upstream that kept silent counts against it. The client closing a relay
+        before any answer within RESPONSE_GRACE_S says nothing: Telegram opens several
+        connections at once and drops the extra ones, which used to get working proxies
+        excluded one after another."""
+        if res.get("received", 0) > 0:
+            return True
+        if not res.get("sent", 0) or res.get("idle"):
+            return None
+        if res.get("stalled"):
+            return False
+        if res.get("client_closed") and res.get("duration", 0.0) < self.RESPONSE_GRACE_S:
+            return None
+        return False
+
+    def _log_relay(self, proxy: Dict[str, Any], target: str, res: Dict[str, Any]) -> None:
+        if res.get("stalled"):
+            logger.warning("Telegram Proxy: '%s' -> %s: нет ответа %d с после отправки — туннель закрыт",
+                           proxy.get("name"), target, int(self.RELAY_STALL_TIMEOUT_S))
+        elif self.relay_verdict(res) is False:
+            logger.info("Telegram Proxy: '%s' -> %s: без ответа (отправлено %d Б, %.1f с)",
+                        proxy.get("name"), target, res.get("sent", 0), res.get("duration", 0.0))
+
+    def drop_relays(self) -> int:
+        """Close every open relay (after a failed self-check): Telegram reconnects at once
+        instead of waiting on dead tunnels. Thread-safe; returns how many were open."""
+        pairs = list(self._relays)
+        loop = self._loop
+        if not pairs or loop is None:
+            return 0
+
+        def close_all():
+            for pair in pairs:
+                for w in pair:
+                    try:
+                        w.close()
+                    except Exception:
+                        pass
+        try:
+            loop.call_soon_threadsafe(close_all)
+        except RuntimeError:
+            return 0
+        return len(pairs)
+
+    def self_check(self, timeout: float = 12.0) -> bool:
+        """End to end through the dispatcher's own port (what Telegram uses): a Telegram DC
+        must answer req_pq. On failure rotate to the next proxy and drop the open relays.
+        Blocking: call it from a worker thread."""
+        if not self._running or not self.get_pool():
+            return True
+        ok, detail = probe_mtproto(self.listen_host, self.listen_port, timeout=timeout)
+        self.last_self_check = (time.time(), ok, detail)
+        if ok:
+            logger.info("Telegram Proxy self-check OK: %s", detail)
+            return True
+        nxt = self.rotate_to_next()
+        dropped = self.drop_relays()
+        logger.warning("Telegram Proxy self-check FAILED (%s): ротация на '%s', закрыто туннелей: %d",
+                       detail, (nxt or {}).get("name"), dropped)
+        return False
 
 
 # ── Глобальный экземпляр диспетчера ─────────────────────────────────

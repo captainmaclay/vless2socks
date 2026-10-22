@@ -382,6 +382,33 @@ def parse_socks_url(url: str, *, strict: bool = True) -> SocksServer:
     )
 
 
+def parse_socks_link(text: str) -> SocksServer:
+    """A pasted SOCKS5 link, checked strictly: socks5://[user:password@]host:port[#remark].
+
+    Surrounding spaces and quotes are dropped, socks5h:// is taken as socks5://. Host and an
+    explicit port are required (parse_socks_url would fall back to port 1080, which hides a
+    mistyped link). Raises ConfigError with a short reason."""
+    link = str(text or "").strip().strip("'\"").strip()
+    if not link:
+        raise ConfigError("ссылка пустая")
+    if link.lower().startswith("socks5h://"):
+        link = "socks5://" + link[len("socks5h://"):]
+    if not link.lower().startswith(("socks5://", "socks://")):
+        raise ConfigError("ссылка должна начинаться с socks5://")
+    parts = urlsplit(link)
+    if not parts.hostname:
+        raise ConfigError("не указан адрес сервера")
+    try:
+        port = parts.port
+    except ValueError:
+        raise ConfigError("порт должен быть числом от 1 до 65535") from None
+    if not port:
+        raise ConfigError("не указан порт (…@адрес:порт)")
+    if parts.password is not None and not parts.username:
+        raise ConfigError("пароль без логина")
+    return parse_socks_url(link)
+
+
 @dataclass
 class WireGuardServer:
     """Параметры удалённого WireGuard-сервера."""
