@@ -40,6 +40,7 @@ import proxy_groups
 import settings_manager
 import subscriptions
 import proxy_watcher
+import updater
 from macui import MAC, MacButton, MacCheckRow, MacDivider, MacSegmented, MacTabChip, ui_font
 import responsive
 from responsive import Adaptive, AdaptiveRow, variants
@@ -394,6 +395,9 @@ START_SPACING_MS = 400
 TELEGRAM_SELF_CHECK_S = 60.0
 #: Grey example in the "paste a SOCKS5 link" field (documentation address, not a real server)
 SOCKS_LINK_PLACEHOLDER = "socks5://user:pass@203.0.113.10:1080"
+#: Updates from GitHub Releases: first check after start, then every 15 minutes
+UPDATE_FIRST_CHECK_MS = 30_000
+UPDATE_CHECK_INTERVAL_MS = updater.CHECK_INTERVAL_S * 1000
 #: Short background jobs (geo lookups, killswitch checks) share one pool: starting a new
 #: thread from the GUI thread for each of dozens of proxies made Thread.start() wait on
 #: thread start-up again and again while everything else was busy
@@ -4623,6 +4627,9 @@ class VlessApp(tk.Tk):
         # Startup: the Watcher starts the proxies it watches (nothing when it is off)
         self.after(500, self.watcher_initial_start)
 
+        # Updates: first check once the proxies are up, then every 15 minutes
+        self.after(UPDATE_FIRST_CHECK_MS, self._update_check_tick)
+
         # Startup Options: Start minimized to tray
         if HAS_TRAY and settings_manager.get_setting("start_minimized_tray", True):
             self.after(100, self._hide_to_tray)
@@ -4680,6 +4687,12 @@ class VlessApp(tk.Tk):
         )
         self.btn_restart_arrow.pack(side=tk.LEFT, padx=(3, 0), fill=tk.Y)
 
+        # "Update version": left of RestartServices, shown only while a newer release is out
+        self.btn_update_version = MacButton(
+            self.top_bar, text=f"⬆ {t('btn_update_version')}", variant="violet",
+            command=self.start_update,
+        )
+
         # 2. Main Navigation Notebook
         style = ttk.Style()
         style.theme_use("default")
@@ -4726,12 +4739,17 @@ class VlessApp(tk.Tk):
         self.loc_frame = tk.Frame(self.nav_notebook, bg=C["bg"])
         self.nav_notebook.add(self.loc_frame, text=t("nav_localization"))
 
+        # Tab 7: Updates
+        self.update_frame = tk.Frame(self.nav_notebook, bg=C["bg"])
+        self.nav_notebook.add(self.update_frame, text=t("nav_update"))
+
         self._pending_tab_builders = [
             self._build_proxies_tab,
             self._build_options_tab,
             self._build_backup_tab,
             self._build_wsl_isolation_tab,
             self._build_localization_tab,
+            self._build_update_tab,
         ]
         # Each tab is built the first time it is opened. Building them in the background
         # right after launch landed in the middle of the proxies' start wave and froze the
@@ -4742,6 +4760,7 @@ class VlessApp(tk.Tk):
             str(self.backup_frame): self._build_backup_tab,
             str(self.wsl_iso_frame): self._build_wsl_isolation_tab,
             str(self.loc_frame): self._build_localization_tab,
+            str(self.update_frame): self._build_update_tab,
         }
         # Opening a tab that is not built yet builds everything that is still pending
         self.nav_notebook.bind("<<NotebookTabChanged>>", self._on_nav_tab_changed, add="+")
@@ -5124,8 +5143,9 @@ class VlessApp(tk.Tk):
             toggle = OverviewButton(t("btn_on"), inst.toggle_async, bg=MAC["green"], fg="#ffffff", short="▶", **common)
         buttons = [toggle]
         buttons += [
+            # no per-card geo button: geo is checked after every start; "Refresh all geo"
+            # above the list and the proxy tab's own button re-check on demand
             OverviewButton("📁", lambda i=inst: self._open_group_menu(i, None), name="groups"),
-            OverviewButton("🔍", inst.check_geo_now, name="geo"),
             OverviewButton(t("btn_view_tab"), lambda n=idx: self._jump_to_instance(n), name="view",
                            short=responsive.icon_of(t("btn_view_tab"))),
         ]
@@ -5330,6 +5350,7 @@ class VlessApp(tk.Tk):
         self._watcher_menu_open = True
         self.watcher_arrow.config(text="▴")
         win = tk.Toplevel(self)
+        win.withdraw()          # hidden until placed (see open_restart_services_menu)
         win.overrideredirect(True)
         win.attributes("-topmost", True)
         win.configure(bg=MAC["accent"])
@@ -5388,6 +5409,8 @@ class VlessApp(tk.Tk):
             if not self._watcher_menu_open or not win.winfo_exists():
                 return
             win.geometry(f"{width}x{max(1, int(height * step / steps))}+{x}+{y}")
+            if step == 1:
+                win.deiconify()  # first shown already in place, as a thin strip
             if step < steps:
                 self.after(12, lambda: slide(step + 1, steps))
 
@@ -5530,7 +5553,7 @@ class VlessApp(tk.Tk):
                     Adaptive(self.btn_restart_services, variants(f"🔄 {t('btn_restart_services')}", t("short_restart"))),
                     Adaptive(self.add_proxy_btn, variants(t("btn_new_tab"), t("short_new_tab"), "＋")),
                 ],
-                fixed=[self.btn_restart_arrow], gap=int(60 * s))
+                fixed=[self.btn_restart_arrow, self.btn_update_version], gap=int(60 * s))
         if hasattr(self, "start_all_btn"):
             rows["header"] = AdaptiveRow(
                 items=[
@@ -7884,6 +7907,163 @@ class VlessApp(tk.Tk):
         )
         r_ru.pack(anchor="w")
 
+    # ── Updates (GitHub Releases) ─────────────────────────────
+    def _build_update_tab(self):
+        bg = C["bg"]
+        px = 16
+        frame = self.update_frame
+        tk.Label(frame, text=t("upd_title"), font=("Segoe UI", 12, "bold"), fg=C["text"], bg=bg).pack(
+            anchor="w", padx=px, pady=(12, 2))
+        tk.Label(frame, text=t("upd_desc"), font=("Segoe UI", 9), fg=C["subtext"], bg=bg, justify=tk.LEFT).pack(
+            anchor="w", padx=px, pady=(0, 14))
+
+        card = tk.Frame(frame, bg=C["card"])
+        card.pack(fill=tk.X, padx=px, pady=6)
+        info = tk.Frame(card, bg=C["card"])
+        info.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=14, pady=12)
+        self.upd_current_lbl = tk.Label(info, text="", font=("Segoe UI", 10, "bold"), fg=C["text"], bg=C["card"])
+        self.upd_current_lbl.pack(anchor="w")
+        self.upd_latest_lbl = tk.Label(info, text="", font=("Segoe UI", 10), fg=C["text"], bg=C["card"])
+        self.upd_latest_lbl.pack(anchor="w", pady=(4, 0))
+        self.upd_status_lbl = tk.Label(info, text="", font=("Segoe UI", 9), fg=C["subtext"], bg=C["card"],
+                                       justify=tk.LEFT, wraplength=620)
+        self.upd_status_lbl.pack(anchor="w", pady=(6, 0))
+
+        self.upd_tab_btn = MacButton(card, text=t("btn_check_updates"), variant="secondary",
+                                     command=self.check_updates_now)
+        self.upd_tab_btn.pack(side=tk.RIGHT, padx=14, pady=12)
+        self._refresh_update_ui()
+
+    def _update_check_tick(self):
+        """Periodic check (every UPDATE_CHECK_INTERVAL_MS)."""
+        self.check_updates_now(manual=False)
+        self.after(UPDATE_CHECK_INTERVAL_MS, self._update_check_tick)
+
+    def check_updates_now(self, manual: bool = True):
+        """Ask GitHub for the latest release in the background."""
+        if getattr(self, "_update_checking", False) or getattr(self, "_update_downloading", False):
+            return
+        self._update_checking = True
+        self._update_status = t("upd_checking")
+        self._refresh_update_ui()
+        proxies = self._subscription_fallback_proxies()
+
+        def work():
+            result = updater.check(proxies)
+            self.after(0, lambda: self._on_update_result(result, manual))
+
+        submit_background(work)
+
+    def _on_update_result(self, result, manual: bool = False):
+        self._update_checking = False
+        self._update_result = result
+        if result.error:
+            self._update_status = t("upd_error", err=result.error)
+            self._log(f"⚠️ [Update] {result.error}")
+        elif result.available:
+            self._update_status = t("upd_available", version=result.latest.version)
+            if getattr(self, "_update_announced", "") != result.latest.version:
+                self._update_announced = result.latest.version
+                self._log(f"⬆ [Update] {result.latest.tag} is out (now {result.current})")
+        else:
+            self._update_status = t("upd_up_to_date")
+        self._refresh_update_ui()
+
+    def update_available(self):
+        res = getattr(self, "_update_result", None)
+        return res.latest if res is not None and res.available and not res.error else None
+
+    def _refresh_update_ui(self):
+        """Header button only while an update is out; the tab button grey "Check" or violet
+        "Update version"; the tab's labels."""
+        latest = self.update_available()
+        busy = getattr(self, "_update_downloading", False)
+        hdr = getattr(self, "btn_update_version", None)
+        if hdr is not None and hdr.winfo_exists():
+            if latest is not None:
+                hdr.config(text=f"⬆ {t('btn_update_version')} {latest.version}",
+                           state=tk.DISABLED if busy else tk.NORMAL)
+                if not hdr.winfo_manager():
+                    hdr.pack(side=tk.RIGHT, padx=(0, 6), pady=8, after=self.restart_container)
+                    self.after_idle(self._relayout)      # the header row lost room
+            elif hdr.winfo_manager():
+                hdr.pack_forget()
+                self.after_idle(self._relayout)
+        btn = getattr(self, "upd_tab_btn", None)
+        if btn is not None and btn.winfo_exists():
+            if latest is not None:
+                btn.config(text=f"⬆ {t('btn_update_version')}", variant="violet", command=self.start_update,
+                           state=tk.DISABLED if busy else tk.NORMAL)
+            else:
+                btn.config(text=t("btn_check_updates"), variant="secondary", command=self.check_updates_now,
+                           state=tk.DISABLED if getattr(self, "_update_checking", False) else tk.NORMAL)
+        res = getattr(self, "_update_result", None)
+        for name, text in (
+            ("upd_current_lbl", t("upd_current", version=updater.current_version())),
+            ("upd_latest_lbl", t("upd_latest", version=(res.latest.version if res and res.latest else "—"),
+                                 when=(time.strftime("%H:%M", time.localtime(res.checked_at)) if res else "—"))),
+            ("upd_status_lbl", getattr(self, "_update_status", t("upd_not_checked"))),
+        ):
+            lbl = getattr(self, name, None)
+            if lbl is not None and lbl.winfo_exists():
+                lbl.config(text=text)
+
+    def start_update(self):
+        """"Update version": confirm, download the .exe, swap it in and restart."""
+        import os
+        latest = self.update_available()
+        if latest is None or getattr(self, "_update_downloading", False):
+            return
+        if not FROZEN:
+            # running from the source tree: there is no .exe to replace
+            if messagebox.askyesno(t("app_title"), t("upd_source_tree", version=latest.version, url=latest.page_url)):
+                import webbrowser
+                webbrowser.open(latest.page_url)
+            return
+        if not messagebox.askyesno(t("app_title"), t("upd_confirm", version=latest.version)):
+            return
+        self._update_downloading = True
+        self._update_status = t("upd_downloading", pct=0)
+        self._refresh_update_ui()
+        proxies = self._subscription_fallback_proxies()
+        target = sys.executable
+        dest = os.path.join(updater.download_dir(), f"vless2socks-{latest.version}.exe")
+
+        def progress(done, total):
+            if total:
+                pct = int(done * 100 / total)
+                if pct != getattr(self, "_update_pct", -1) and pct % 5 == 0:
+                    self._update_pct = pct
+                    self.after(0, lambda p=pct: self._set_update_status(t("upd_downloading", pct=p)))
+
+        def work():
+            try:
+                updater.download(latest, dest, proxies, progress=progress)
+                updater.launch_swap(dest, target)
+            except Exception as err:
+                self.after(0, lambda e=err: self._on_update_failed(e))
+                return
+            self.after(0, self._on_update_ready)
+
+        # its own thread: a slow download must not hold a slot of the shared background
+        # pool (geo lookups, killswitch checks)
+        threading.Thread(target=work, name="update-download", daemon=True).start()
+
+    def _set_update_status(self, text: str):
+        self._update_status = text
+        self._refresh_update_ui()
+
+    def _on_update_failed(self, err):
+        self._update_downloading = False
+        self._set_update_status(t("upd_failed", err=err))
+        self._log(f"⚠️ [Update] {err}")
+        messagebox.showerror(t("app_title"), t("upd_failed", err=err))
+
+    def _on_update_ready(self):
+        self._set_update_status(t("upd_restarting"))
+        self._log("⬆ [Update] downloaded; restarting into the new version")
+        self.after(300, self._exit)
+
     def _apply_language(self, lang: Optional[str] = None):
         """Switch the interface language now. Tabs that were opened are rebuilt in the new
         language; tabs never opened stay unbuilt and come up in it when first opened."""
@@ -7900,6 +8080,7 @@ class VlessApp(tk.Tk):
             ("nav_backup", self.backup_frame, self._build_backup_tab),
             ("nav_wsl_isolation", self.wsl_iso_frame, self._build_wsl_isolation_tab),
             ("nav_localization", self.loc_frame, self._build_localization_tab),
+            ("nav_update", self.update_frame, self._build_update_tab),
         ]
         pending = getattr(self, "_pending_tab_builders", [])
         for key, frame, builder in frames:
@@ -8211,6 +8392,9 @@ class VlessApp(tk.Tk):
 
         # Create borderless toplevel popup
         self.restart_menu_win = tk.Toplevel(self)
+        # hidden until it is placed: measuring the content (update_idletasks) used to draw
+        # the whole menu for a moment at the window manager's default spot, top-left
+        self.restart_menu_win.withdraw()
         self.restart_menu_win.overrideredirect(True)
         self.restart_menu_win.attributes("-topmost", True)
         self.restart_menu_win.configure(bg=C["border"])

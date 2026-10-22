@@ -273,23 +273,25 @@ class TestInstantLanguage(_Base):
     def test_apply_rebuilds_only_opened_tabs(self):
         app = mock.MagicMock()
         app.lang_var.get.return_value = "ru"
-        frames = {n: tk.Frame(self.app) for n in ("ov", "px", "op", "bk", "ws", "lc")}
+        frames = {n: tk.Frame(self.app) for n in ("ov", "px", "op", "bk", "ws", "lc", "up")}
         for f in frames.values():
             tk.Label(f, text="old").pack()
         app.overview_frame, app.proxies_frame, app.options_frame = frames["ov"], frames["px"], frames["op"]
         app.backup_frame, app.wsl_iso_frame, app.loc_frame = frames["bk"], frames["ws"], frames["lc"]
+        app.update_frame = frames["up"]
         app._pending_tab_builders = [app._build_proxies_tab, app._build_backup_tab]   # never opened
         app._run_tab_builder = lambda b: gui.VlessApp._run_tab_builder(app, b)
         gui.VlessApp._apply_language(app)
         self.assertEqual(i18n.get_current_language(), "ru")
         self.assertEqual(settings_manager.get_setting("language"), "ru")
-        for opened in ("_build_overview_tab", "_build_options_tab", "_build_wsl_isolation_tab", "_build_localization_tab"):
+        for opened in ("_build_overview_tab", "_build_options_tab", "_build_wsl_isolation_tab", "_build_localization_tab",
+                       "_build_update_tab"):
             getattr(app, opened).assert_called_once()
         app._build_proxies_tab.assert_not_called()
         app._build_backup_tab.assert_not_called()
         self.assertEqual(frames["ov"].winfo_children(), [])            # old widgets of opened tabs removed
         self.assertEqual(len(frames["px"].winfo_children()), 1)        # unopened tab untouched
-        self.assertEqual(app.nav_notebook.tab.call_count, 6)           # every tab title translated
+        self.assertEqual(app.nav_notebook.tab.call_count, 7)           # every tab title translated
 
     def test_same_language_is_a_no_op(self):
         app = mock.MagicMock()

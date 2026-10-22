@@ -43,6 +43,7 @@ VARIANTS = {
     "warning": (MAC["orange"], "#1d1d1f"),
     "secondary": (MAC["control"], MAC["label"]),
     "tinted": (MAC["control"], "#64a8ff"),
+    "violet": ("#8b5cf6", "#ffffff"),      # "Update version": a new release is out
     "ghost": ("", MAC["label"]),
 }
 
