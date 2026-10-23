@@ -19,7 +19,11 @@ import os
 import shutil
 import subprocess
 import sys
-from PIL import Image
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 COLOR_HUES = {
     "gold": 0.12,
@@ -139,10 +143,21 @@ def deploy_wsl_launcher(distro, instance_id, socks_port, http_port, wsl_user="ub
     ).strip()
 
     target_bin = f"/usr/local/bin/claude-gui-{instance_id}"
+    health_src = subprocess.check_output(
+        ["wsl.exe", "-d", distro, "wslpath", "-u",
+         os.path.join(os.path.dirname(os.path.abspath(__file__)), "wslg_health.sh").replace("\\", "/")],
+        text=True
+    ).strip()
+    # `install` writes a new inode: a launcher that is running right now keeps reading its old copy
+    # (bash reads scripts incrementally, overwriting in place with `tee` would corrupt it).
     cmd = (
-        f"tr -d '\\r' < {wsl_temp_path} | sudo tee {target_bin} >/dev/null && "
-        f"sudo chmod +x {target_bin} && "
-        f"if [ '{instance_id}' = '1' ]; then sudo cp -f {target_bin} /usr/local/bin/claude-gui; fi && "
+        f"tr -d '\\r' < {wsl_temp_path} > /tmp/claude-gui-{instance_id}.new && "
+        f"sudo install -m 755 -o root -g root /tmp/claude-gui-{instance_id}.new {target_bin} && "
+        f"rm -f /tmp/claude-gui-{instance_id}.new && "
+        f"tr -d '\\r' < '{health_src}' > /tmp/wslg-health.new && "
+        f"sudo install -m 755 -o root -g root /tmp/wslg-health.new /usr/local/bin/wslg-health && "
+        f"rm -f /tmp/wslg-health.new && "
+        f"if [ '{instance_id}' = '1' ]; then sudo install -m 755 -o root -g root {target_bin} /usr/local/bin/claude-gui; fi && "
         f"mkdir -m 700 -p /home/{wsl_user}/.claude-{instance_id}/.config /run/user/{uid}/claude-{instance_id} 2>/dev/null && "
         f"sudo chown -R {wsl_user}:{wsl_user} /home/{wsl_user}/.claude-{instance_id} 2>/dev/null || true && "
         f"if [ -f /usr/local/bin/init-wsl-keyring.sh ]; then sudo -u {wsl_user} /usr/local/bin/init-wsl-keyring.sh /home/{wsl_user}/.claude-{instance_id} 2>/dev/null || true; fi"
@@ -150,6 +165,7 @@ def deploy_wsl_launcher(distro, instance_id, socks_port, http_port, wsl_user="ub
 
     subprocess.check_call(["wsl.exe", "-d", distro, "bash", "-c", cmd])
     print(f"[+] Installed WSL launcher: {target_bin}")
+    print("[+] Installed WSLg health check: /usr/local/bin/wslg-health")
 
     if os.path.exists(temp_script_path):
         os.remove(temp_script_path)

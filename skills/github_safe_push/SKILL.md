@@ -31,6 +31,10 @@ description: >-
 3. **Логи и дампы сессий:**
    - `*.log`, `selftest-output.txt`.
    - Сессионные логи терминалов, пароли Xshell в незашифрованном виде.
+   - Логи WSL GUI-лаунчеров `~/.claude-<id>/.local/state/claude-gui-<id>/launcher.log` и `main.log` Claude Desktop
+     (`~/.claude-<id>/.config/Claude/logs/`): содержат вывод Electron, в т.ч. OAuth-URL входа с одноразовым
+     `hop_nonce`, и выходные IP узлов. В документацию и скиллы переносить только обезличенные выдержки
+     (без URL входа, nonce, реальных IP/хостов прокси-серверов) — см. `skills/claude_wsl_gui/SKILL.md`.
 4. **Временные симлинки и бинарники:**
    - `proxys/link` и `proxys/lnk` (NTFS Junctions).
    - `bin/*.exe` (бинарник Xray-core загружается через `tools/get_xray.py`).

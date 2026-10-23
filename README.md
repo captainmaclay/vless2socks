@@ -395,6 +395,7 @@ vless2socks comes integrated with custom autonomous skills designed for Google D
 - **Elimination of Zombie Processes:** Solves the issue where closing an Electron application (e.g., Claude Desktop) in WSL2 fails to terminate the background process due to missing system tray support in WSLg (`kill -TERM`, `chrome_crashpad_handler`).
 - **SingletonLock Recovery:** Automatically cleans stale lockfiles (`~/.config/<App>/SingletonLock`) preventing instances from failing silently on relaunch.
 - **Session DBus Setup:** Ensures `XDG_RUNTIME_DIR` and `DBus` (`/run/user/<uid>/bus`) are properly started before launching graphical applications.
+- **See also:** [`skills/claude_wsl_gui/SKILL.md`](skills/claude_wsl_gui/SKILL.md) — in-repo specification of the Claude Desktop launcher lifecycle, lockfile and WSLg COPY MODE.
 ### 4. `claude-wsl-gui-manager` — Vendor C Desktop GUI & CLI Environment Isolation (Research & Sandbox)
 - **Research Notice:** Developed strictly for research and testing of Linux (WSL2/WSLg) process containerization, Chromium OSCrypt/GNOME Keyring storage, and proxy socket routing.
 - **Location:** `~/.gemini/config/skills/claude-wsl-gui-manager/SKILL.md`
@@ -403,7 +404,7 @@ vless2socks comes integrated with custom autonomous skills designed for Google D
 - **Detailed Subsystem Manuals:** [`VENDOR_C_WSL_GUI_ENVIRONMENTS.md`](VENDOR_C_WSL_GUI_ENVIRONMENTS.md) (Linux / WSLg GUI) and [`VENDOR_C_CLI_ENVIRONMENTS.md`](VENDOR_C_CLI_ENVIRONMENTS.md) (Windows CLI)
 - **Key Capabilities:**
   - **Zero Shared State:** Complete filesystem isolation for Vendor C Desktop (`/home/<user>/.claude-<id>/.config/Claude`) and Vendor C CLI (`C:\Users\<user>\.claude-<id>`).
-  - **GNOME Keyring & Secret Service Integration:** Provisions passwordless `login.keyring` with `--password-store=gnome-libsecret` via `init_wsl_keyring.sh`, resolving system keyring availability.
+  - **GNOME Keyring & Secret Service Integration:** Provisions passwordless `login.keyring` via `init_wsl_keyring.sh` so no `Unlock Login Keyring` prompt appears; Electron itself runs with `--password-store=basic` (see [`skills/claude_wsl_gui/SKILL.md`](skills/claude_wsl_gui/SKILL.md), Gotcha 8).
   - **Pre-Launch IP Verification & Mac UI Toast:** [`verify_and_notify.py`](new_claude/verify_and_notify.py) checks outbound SOCKS5 IP against target node before launch, showing macOS-styled 4s/5s fadeout toasts.
   - **Automated Provisioning:** One-click deployment of new instances via [`add_vendor_c_gui_instance.py`](new_claude/add_vendor_c_gui_instance.py) and [`add_vendor_c_cli_instance.py`](new_claude/add_vendor_c_cli_instance.py).
 
@@ -446,7 +447,18 @@ vless2socks comes integrated with custom autonomous skills designed for Google D
 - **Automation Scripts:** [`setup_helpers/09_configure_wsl_hidpi_keyring.ps1`](setup_helpers/09_configure_wsl_hidpi_keyring.ps1) & [`new_claude/configure_wsl_hidpi_keyring.sh`](new_claude/configure_wsl_hidpi_keyring.sh)
 - **Key Solutions:**
   - Complete elimination of blocking GNOME Keyring modal dialogs (`Unlock Login Keyring`) by decoupling Electron via `--password-store=basic` and wiping corrupted keystores.
-  - Pixel-perfect native Wayland and High-DPI vector scaling on 2K/3K/4K displays (3072×1920 @ 192 DPI / 200% scaling) via `%USERPROFILE%\.wslgconfig`, `--ozone-platform-hint=auto`, `--force-device-scale-factor=2`, and `/etc/profile.d/wsl_hidpi.sh`.
+  - High-DPI scaling on 2K/3K/4K displays (3072×1920 @ 192 DPI / 200% scaling) via `%USERPROFILE%\.wslgconfig`, `--force-device-scale-factor=1.0` (Weston already applies 2×; a factor of 2 doubled it to 400%), and `/etc/profile.d/wsl_hidpi.sh`. Current scaling math: [`skills/claude_wsl_gui/SKILL.md`](skills/claude_wsl_gui/SKILL.md).
+
+### 9. `claude_wsl_gui` — Claude Desktop GUI in WSL2/WSLg via vless2socks Sockets
+- **Full Specification:** [`skills/claude_wsl_gui/SKILL.md`](skills/claude_wsl_gui/SKILL.md)
+- **Toolkit:** [`new_claude/template_claude_gui.sh`](new_claude/template_claude_gui.sh), [`new_claude/template_run_gui.vbs`](new_claude/template_run_gui.vbs), [`new_claude/add_vendor_c_gui_instance.py`](new_claude/add_vendor_c_gui_instance.py), [`new_claude/update_launchers.py`](new_claude/update_launchers.py), [`new_claude/create_desktop_shortcut.ps1`](new_claude/create_desktop_shortcut.ps1), [`new_claude/verify_and_notify.py`](new_claude/verify_and_notify.py)
+- **Covers:**
+  - Launch chain `.lnk → VBS → verify_and_notify.py pre-flight → wsl.exe → /usr/local/bin/claude-gui-<id>` with per-instance `--proxy-server=socks5://127.0.0.1:<port>` and `ALL_PROXY=socks5h://…`.
+  - HiDPI math (Windows 200% × Weston scale 2 × Chromium DIP) and the double-scaling (400%) bugfix.
+  - Window geometry persistence (`window-geometry.conf` ⇄ `window-state.json`, `xdotool`/`xprop` polling every 1.5 s).
+  - Process lifecycle: close-to-hide zombies, Singleton locks, lockfile against double launch, launch retries, shared DBus bus.
+  - WSLg `[WARN:COPY MODE]` (broken shared memory → blank windows): root cause, detection, `wsl --shutdown` self-heal, `instanceIdleTimeout=-1`.
+  - Diagnostics runbook; templates (`template_claude_gui.sh`, `template_run_gui.vbs`, `wslg_health.sh`) are the single source of truth, redeployed via `update_launchers.py`.
 
 ## License
 
@@ -738,6 +750,7 @@ dist/
 - **Устранение зомби-процессов:** Решает проблему зависания Electron-приложений (например, Claude Desktop) при закрытии крестиком из-за отсутствия системного трея в WSLg (`kill -TERM`, `chrome_crashpad_handler`).
 - **Сброс SingletonLock:** Автоматическая очистка блокировок `~/.config/<App>/SingletonLock`, устраняющая сбои повторного запуска.
 - **Инициализация сессионного DBus:** Гарантирует запуск `XDG_RUNTIME_DIR` и `dbus-daemon` перед стартом GUI-процессов.
+- **См. также:** [`skills/claude_wsl_gui/SKILL.md`](skills/claude_wsl_gui/SKILL.md) — спецификация жизненного цикла лаунчера Claude Desktop, lockfile и WSLg COPY MODE в репозитории.
 ### 4. `claude-wsl-gui-manager` — Изоляция тестовых сред Вендора C в WSL2/Windows (Исследовательские цели)
 - **Примечание об исследовательской направленности:** Модуль и документация созданы исключительно для исследовательских и образовательных целей: изучение контейнеризации процессов Linux (WSL2/WSLg), криптографических подсистем Chromium OSCrypt/GNOME Keyring и сетевой маршрутизации через сокеты.
 - **Расположение скилла:** `~/.gemini/config/skills/claude-wsl-gui-manager/SKILL.md`
@@ -746,7 +759,7 @@ dist/
 - **Подробные руководства по подсистемам:** [`VENDOR_C_WSL_GUI_ENVIRONMENTS.md`](VENDOR_C_WSL_GUI_ENVIRONMENTS.md) (Linux / WSLg GUI) и [`VENDOR_C_CLI_ENVIRONMENTS.md`](VENDOR_C_CLI_ENVIRONMENTS.md) (Windows CLI)
 - **Ключевые возможности:**
   - **Zero Shared State:** Полное разделение дисковых пространств для GUI Вендора C (`/home/<user>/.claude-<id>/.config/Claude`) и CLI Вендора C (`C:\Users\<user>\.claude-<id>`).
-  - **Интеграция с GNOME Keyring:** Автоматический провижининг беспарольного `login.keyring` и запуск с `--password-store=gnome-libsecret` через `init_wsl_keyring.sh` для поддержки штатного системного шифрования.
+  - **Интеграция с GNOME Keyring:** Автоматический провижининг беспарольного `login.keyring` через `init_wsl_keyring.sh`, чтобы не появлялось окно `Unlock Login Keyring`; сам Electron запускается с `--password-store=basic` (см. [`skills/claude_wsl_gui/SKILL.md`](skills/claude_wsl_gui/SKILL.md), Gotcha 8).
   - **Защита от сетевых утечек и Mac UI уведомления:** Модуль [`verify_and_notify.py`](new_claude/verify_and_notify.py) сверяет исходящий IP перед стартом, отображая стильное плавающее окно (неблокирующие 4 сек при успехе, блокирующие 5 сек при ошибке).
   - **Развертывание в одну команду:** Автоматическая генерация новых GUI и CLI инстансов скриптами [`add_vendor_c_gui_instance.py`](new_claude/add_vendor_c_gui_instance.py) и [`add_vendor_c_cli_instance.py`](new_claude/add_vendor_c_cli_instance.py).
 
@@ -789,7 +802,18 @@ dist/
 - **Скрипты автоматизации:** [`setup_helpers/09_configure_wsl_hidpi_keyring.ps1`](setup_helpers/09_configure_wsl_hidpi_keyring.ps1) и [`new_claude/configure_wsl_hidpi_keyring.sh`](new_claude/configure_wsl_hidpi_keyring.sh)
 - **Инженерные решения:**
   - Полное устранение блокирующих модальных окон авторизации GNOME Keyring (`Unlock Login Keyring`) переводом Electron на `--password-store=basic` и очисткой бинарных кейсторов.
-  - Настройка кристально четкого масштабирования интерфейса на Retina/3K/4K мониторах (3072×1920, 192 DPI / 200%) через `%USERPROFILE%\.wslgconfig`, нативные флаги Wayland `--ozone-platform-hint=auto`, `--force-device-scale-factor=2` и профиль `/etc/profile.d/wsl_hidpi.sh`.
+  - Масштабирование интерфейса на Retina/3K/4K мониторах (3072×1920, 192 DPI / 200%) через `%USERPROFILE%\.wslgconfig`, `--force-device-scale-factor=1.0` (Weston уже применяет 2×; фактор 2 удваивал масштаб до 400%) и профиль `/etc/profile.d/wsl_hidpi.sh`. Актуальная математика масштабирования: [`skills/claude_wsl_gui/SKILL.md`](skills/claude_wsl_gui/SKILL.md).
+
+### 9. `claude_wsl_gui` — Claude Desktop GUI в WSL2/WSLg через сокеты vless2socks
+- **Полная спецификация:** [`skills/claude_wsl_gui/SKILL.md`](skills/claude_wsl_gui/SKILL.md)
+- **Инструменты:** [`new_claude/template_claude_gui.sh`](new_claude/template_claude_gui.sh), [`new_claude/template_run_gui.vbs`](new_claude/template_run_gui.vbs), [`new_claude/add_vendor_c_gui_instance.py`](new_claude/add_vendor_c_gui_instance.py), [`new_claude/update_launchers.py`](new_claude/update_launchers.py), [`new_claude/create_desktop_shortcut.ps1`](new_claude/create_desktop_shortcut.ps1), [`new_claude/verify_and_notify.py`](new_claude/verify_and_notify.py)
+- **Содержание:**
+  - Цепочка запуска `.lnk → VBS → pre-flight verify_and_notify.py → wsl.exe → /usr/local/bin/claude-gui-<id>` с `--proxy-server=socks5://127.0.0.1:<порт>` и `ALL_PROXY=socks5h://…` для каждого инстанса.
+  - Математика HiDPI (Windows 200% × масштаб Weston 2 × DIP Chromium) и исправление двойного масштабирования (400%).
+  - Персистентность геометрии окна (`window-geometry.conf` ⇄ `window-state.json`, опрос `xdotool`/`xprop` каждые 1,5 с).
+  - Жизненный цикл процесса: зомби при закрытии крестиком, Singleton locks, lockfile от двойного запуска, ретраи старта, общая шина DBus.
+  - WSLg `[WARN:COPY MODE]` (сломанная общая память → пустые окна): причина, детект, самолечение `wsl --shutdown`, `instanceIdleTimeout=-1`.
+  - Runbook диагностики; шаблоны (`template_claude_gui.sh`, `template_run_gui.vbs`, `wslg_health.sh`) — единственный источник истины, переразвёртывание через `update_launchers.py`.
 
 ## Лицензия
 

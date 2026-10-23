@@ -8,6 +8,13 @@ description: >-
 
 # WSLg High-DPI Scaling & Keyring Bypass Protocol
 
+> [!IMPORTANT]
+> **Первая версия этого скилла задавала масштаб 2** (`--force-device-scale-factor=2`, `GDK_SCALE=2`), что вместе
+> с масштабом Weston 2× давало 400% (баг двойного масштабирования). Раздел 2 приведён к актуальной конфигурации:
+> `--force-device-scale-factor=1.0`, `GDK_SCALE=1`, `QT_SCALE_FACTOR=1`; математика описана в
+> [`skills/claude_wsl_gui/SKILL.md`](../claude_wsl_gui/SKILL.md#4-hidpi-математика-масштабирования).
+> Там же — полная спецификация запуска Claude Desktop в WSLg (vless2socks, геометрия окна, lockfile, COPY MODE).
+
 Данный скилл регламентирует устранение блокирующих модальных окон авторизации связки ключей GNOME Keyring (`Unlock Login Keyring`) и настройку безупречного, кристально четкого масштабирования интерфейса графических приложений Linux (WSLg) на мониторах с высоким разрешением (Retina, 2K, 3K 3072×1920, 4K).
 
 ---
@@ -72,26 +79,32 @@ description: >-
    # C:\Users\<Username>\.wslgconfig
    [system-distro-env]
    WESTON_RDP_DISABLE_FRACTIONAL_HI_DPI_SCALING=false
-   WESTON_RDP_DEBUG_DESKTOP_SCALING_FACTOR=200
    ```
-2. **Перевод Electron на нативный Wayland и масштабирование Chromium:**
-   В параметрах запуска приложения заменяются флаги графического бэкенда:
+   `WESTON_RDP_DEBUG_DESKTOP_SCALING_FACTOR` не задаётся: Weston берёт масштаб монитора Windows сам.
+2. **Флаги графического бэкенда и масштабирования Chromium:**
    ```bash
-   # БЫЛО (размытый растровый X11):
-   --ozone-platform=x11
-
-   # СТАЛО (нативный векторный Wayland + 200% HiDPI):
+   # БЫЛО (первая версия, 400% на экране 200%):
    --ozone-platform-hint=auto --enable-features=WaylandWindowDecorations --force-device-scale-factor=2
+
+   # СТАЛО (масштаб уже даёт Weston: логическая сетка 1536×960 × 2 = 3072×1920):
+   --ozone-platform-hint=auto --enable-features=WaylandWindowDecorations --force-device-scale-factor=1.0
    ```
+   Переопределение: env `CLAUDE_SCALE_FACTOR` или файл `<профиль>/scale-factor.conf`.
+   Фактически Claude Desktop работает через XWayland (`--ozone-platform=x11` у дочерних процессов), см.
+   [`claude_wsl_gui` §4.3](../claude_wsl_gui/SKILL.md#43-фактический-бэкенд-x11-а-не-wayland).
 3. **Глобальные переменные окружения Linux (`/etc/profile.d/wsl_hidpi.sh`):**
    ```bash
    export ELECTRON_OZONE_PLATFORM_HINT=auto
-   export GDK_SCALE=2
-   export GDK_DPI_SCALE=0.5
+   export GDK_SCALE=1
+   export GDK_DPI_SCALE=1
    export QT_AUTO_SCREEN_SCALE_FACTOR=1
-   export QT_SCALE_FACTOR=2
-   export XCURSOR_SIZE=32
+   export QT_SCALE_FACTOR=1
+   export XCURSOR_SIZE=24
    ```
+   > [!NOTE]
+   > С 2026-10-23 эти значения записывают `new_claude/configure_wsl_hidpi_keyring.sh` и
+   > `setup_helpers/09_configure_wsl_hidpi_keyring.ps1` (`-ScaleFactor 1 -Dpi 96`, `Xft.dpi: 96`).
+   > Раньше они писали `GDK_SCALE=2`, `QT_SCALE_FACTOR=2` и `WESTON_RDP_DEBUG_DESKTOP_SCALING_FACTOR=200`.
 
 ---
 
@@ -101,7 +114,7 @@ description: >-
 | :--- | :--- | :--- |
 | [`setup_helpers/09_configure_wsl_hidpi_keyring.ps1`](file:///C:/proj/vless2socks/setup_helpers/09_configure_wsl_hidpi_keyring.ps1) | Автоматическая генерация `.wslgconfig`, провижининг `/etc/profile.d/wsl_hidpi.sh` и сброс кейрингов. | Windows PowerShell |
 | [`new_claude/configure_wsl_hidpi_keyring.sh`](file:///C:/proj/vless2socks/new_claude/configure_wsl_hidpi_keyring.sh) | Баш-скрипт сброса `login.keyring` и фиксации переменных HiDPI внутри дистрибутива. | Linux (WSL) |
-| [`new_claude/template_claude_gui.sh`](file:///C:/proj/vless2socks/new_claude/template_claude_gui.sh) | Эталонный шаблон шелл-лаунчера с флагами `--password-store=basic` и `--force-device-scale-factor=2`. | Linux (WSL) |
+| [`new_claude/template_claude_gui.sh`](file:///C:/proj/vless2socks/new_claude/template_claude_gui.sh) | Эталонный шаблон шелл-лаунчера с флагами `--password-store=basic` и `--force-device-scale-factor=1.0`. | Linux (WSL) |
 
 ---
 
@@ -111,4 +124,4 @@ description: >-
    * Запуск приложения через ярлык на Рабочем столе: `Claude GUI.lnk` или `Claude Code GUI 2.lnk`.
    * **Результат:** Окно `Unlock Login Keyring` **не появляется**. Приложение сразу открывает главный интерфейс.
 2. **Проверка четкости HiDPI:**
-   * Шрифты интерфейса, иконки и элементы ввода отображаются четко с векторным сглаживанием в масштабе 200% без пикселизации.
+   * Интерфейс отображается в масштабе 200% (как остальные окна Windows), а не 400%; окно по умолчанию помещается в экран.
