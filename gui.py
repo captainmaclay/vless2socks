@@ -99,17 +99,13 @@ MAIN_SCRIPT = ROOT_DIR / "main.py"
 VENV_PYTHON = ROOT_DIR / ".venv" / "Scripts" / "python.exe"
 PYTHON = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
 
-#: В собранном виде запускаем этот же исполняемый файл с флагом --cli (или vless2socks-cli если он есть)
-CLI_EXE = ROOT_DIR / ("vless2socks-cli.exe" if sys.platform == "win32" else "vless2socks-cli")
-
-
 def proxy_command(config_path: Path | str) -> list[str]:
     """Команда запуска одного прокси — для скрипта и для сборки по-разному.
-    В режиме frozen (один .exe) вызывает сам себя с флагом --cli.
+    В режиме frozen (один .exe) вызывает сам себя с флагом --cli. Отдельный vless2socks-cli.exe
+    spec больше не собирает; оставшийся рядом от старой сборки файл игнорируется, иначе прокси
+    работали бы на его устаревшем коде (обновление через вкладку Updates меняет только этот .exe).
     """
     if FROZEN:
-        if CLI_EXE.exists():
-            return [str(CLI_EXE), "-c", str(config_path)]
         return [sys.executable, "--cli", "-c", str(config_path)]
     return [PYTHON, str(MAIN_SCRIPT), "-c", str(config_path)]
 
@@ -270,8 +266,10 @@ def find_free_port(start: int = BASE_PORT, host: str = "127.0.0.1", exclude: set
     return start + len(exclude)
 
 
-#: Our own proxy launchers: `python main.py` in a script build, vless2socks-cli.exe in a frozen one.
-_SUPERVISOR_EXE_NAMES = {"python.exe", "vless2socks-cli.exe"}
+#: Our own proxy launchers: `python main.py` in a script build, `vless2socks.exe --cli` in a frozen one
+#: (vless2socks-cli.exe: workers still running from builds made before the single-exe spec).
+#: The GUI itself is never climbed into: it and its ancestors are protected.
+_SUPERVISOR_EXE_NAMES = {"python.exe", "vless2socks.exe", "vless2socks-cli.exe"}
 
 
 def _process_table() -> dict[int, tuple[int, str]]:

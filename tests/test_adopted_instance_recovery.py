@@ -140,6 +140,37 @@ class PortTakeoverKillsWholeProxyTreeTest(unittest.TestCase):
         start = lambda pid: younger_parent.get(pid, pid)
         self.assertEqual(self.expand({self.XRAY}, 900, table, start_time=start), {self.LAUNCHER})
 
+    def test_frozen_worker_is_found_but_the_gui_exe_is_not_climbed_into(self):
+        # Single-exe build: the GUI and its workers are all vless2socks.exe (workers run with --cli)
+        table = {
+            self.GUI: (1, "vless2socks.exe"),
+            self.WORKER: (self.GUI, "vless2socks.exe"),
+            self.XRAY: (self.WORKER, "xray.exe"),
+        }
+        self.assertEqual(self.expand({self.XRAY}, self.GUI, table), {self.WORKER})
+
+    def test_orphaned_frozen_worker_is_found(self):
+        table = {
+            900: (1, "vless2socks.exe"),                   # we: a new GUI, the old one is gone
+            self.WORKER: (self.GUI, "vless2socks.exe"),
+            self.XRAY: (self.WORKER, "xray.exe"),
+        }
+        self.assertEqual(self.expand({self.XRAY}, 900, table), {self.WORKER})
+
+
+class FrozenProxyCommandTest(unittest.TestCase):
+    def test_frozen_build_runs_itself_even_next_to_a_stale_cli_exe(self):
+        import tempfile
+        from pathlib import Path
+
+        import gui
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "vless2socks-cli.exe").write_bytes(b"stale")
+            exe = str(Path(tmp) / "vless2socks.exe")
+            with patch.object(gui, "FROZEN", True), patch.object(gui, "ROOT_DIR", Path(tmp)), \
+                    patch.object(gui.sys, "executable", exe):
+                self.assertEqual(gui.proxy_command("cfg.json"), [exe, "--cli", "-c", "cfg.json"])
+
 
 if __name__ == "__main__":
     unittest.main()

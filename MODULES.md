@@ -688,7 +688,7 @@ ProxyInstance.start()
       │
       ├── subprocess.Popen(proxy_command(...))
       │      script build : python main.py        -c .instance_N.json
-      │      frozen  build: vless2socks-cli.exe   -c .instance_N.json
+      │      frozen  build: vless2socks.exe --cli -c .instance_N.json
       │
       ├── Thread: _reader() → read stdout → append to log_lines deque
       │

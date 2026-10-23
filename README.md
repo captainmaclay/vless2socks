@@ -112,20 +112,20 @@ python main.py -c config.json --ip
 ```
 
 Creates `.venv`, installs the dependencies and PyInstaller if they are missing,
-then builds **two** executables from `vless2socks.spec`:
+then builds a single executable from `vless2socks.spec`:
 
 ```
 dist/
-├── vless2socks.exe        # GUI (windowed)
-├── vless2socks-cli.exe    # console worker — one process per running proxy
+├── vless2socks.exe        # GUI (windowed) and, with --cli, the per-proxy worker
 └── bin/
     ├── xray.exe
     ├── geoip.dat
     └── geosite.dat
 ```
 
-Both executables are required: the GUI runs every proxy as a separate process,
-and a frozen build has no `python.exe` or `main.py` on disk to call.
+The GUI runs every proxy as a separate process: in a frozen build there is no
+`python.exe` or `main.py` on disk, so it starts itself as `vless2socks.exe --cli -c <config>`.
+A `vless2socks-cli.exe` left over from older builds is ignored.
 
 `bin/` is optional. Xray-core deliberately stays **outside** the exe — baking
 65 MB into a onefile build would re-extract it to a temp folder on every launch —
@@ -577,20 +577,20 @@ python main.py -c config.json --ip
 ```
 
 Создаёт `.venv`, доставляет зависимости и PyInstaller, если их нет, и собирает
-по `vless2socks.spec` **два** исполняемых файла:
+по `vless2socks.spec` один исполняемый файл:
 
 ```
 dist/
-├── vless2socks.exe        # GUI (без консоли)
-├── vless2socks-cli.exe    # консольный рабочий процесс — по одному на прокси
+├── vless2socks.exe        # GUI (без консоли), с флагом --cli — рабочий процесс прокси
 └── bin/
     ├── xray.exe
     ├── geoip.dat
     └── geosite.dat
 ```
 
-Нужны оба exe: GUI поднимает каждый прокси отдельным процессом, а внутри сборки
-нет ни `python.exe`, ни `main.py` на диске.
+GUI поднимает каждый прокси отдельным процессом: внутри сборки нет ни `python.exe`,
+ни `main.py` на диске, поэтому он запускает сам себя как `vless2socks.exe --cli -c <конфиг>`.
+Оставшийся от старых сборок `vless2socks-cli.exe` игнорируется.
 
 Папка `bin/` необязательна. Xray-core намеренно лежит **снаружи** exe — зашивать
 65 МБ в onefile-сборку значит распаковывать их во временную папку при каждом
