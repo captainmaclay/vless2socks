@@ -441,6 +441,13 @@ vless2socks comes integrated with custom autonomous skills designed for Google D
   - Pre-push automated scanning against prohibited configuration targets (`instances.json`, `config.json`, `.env`, `vendor_c_accounts.json`).
   - Strict preservation of untracked personal session files while deploying all public skills, tests, and setup helpers.
 
+### 8. `wsl_gui_hidpi` — WSLg High-DPI Scaling & Keyring Bypass Protocol
+- **Full Specification:** [`skills/wsl_gui_hidpi/SKILL.md`](skills/wsl_gui_hidpi/SKILL.md)
+- **Automation Scripts:** [`setup_helpers/09_configure_wsl_hidpi_keyring.ps1`](setup_helpers/09_configure_wsl_hidpi_keyring.ps1) & [`new_claude/configure_wsl_hidpi_keyring.sh`](new_claude/configure_wsl_hidpi_keyring.sh)
+- **Key Solutions:**
+  - Complete elimination of blocking GNOME Keyring modal dialogs (`Unlock Login Keyring`) by decoupling Electron via `--password-store=basic` and wiping corrupted keystores.
+  - Pixel-perfect native Wayland and High-DPI vector scaling on 2K/3K/4K displays (3072×1920 @ 192 DPI / 200% scaling) via `%USERPROFILE%\.wslgconfig`, `--ozone-platform-hint=auto`, `--force-device-scale-factor=2`, and `/etc/profile.d/wsl_hidpi.sh`.
+
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
@@ -776,6 +783,13 @@ dist/
   - Передача токена доступа исключительно через оперативную память процесса без сохранения в `.git/config` или истории терминала.
   - Пре-коммит сканирование на наличие запрещенных файлов (`instances.json`, `config.json`, `.env`, `vendor_c_accounts.json`).
   - Сохранение в публичный репозиторий всех скиллов, тестов и скриптов с гарантией неразглашения приватных данных.
+
+### 8. `wsl_gui_hidpi` — Масштабирование высокого разрешения WSLg и обход Keyring
+- **Полная спецификация:** [`skills/wsl_gui_hidpi/SKILL.md`](skills/wsl_gui_hidpi/SKILL.md)
+- **Скрипты автоматизации:** [`setup_helpers/09_configure_wsl_hidpi_keyring.ps1`](setup_helpers/09_configure_wsl_hidpi_keyring.ps1) и [`new_claude/configure_wsl_hidpi_keyring.sh`](new_claude/configure_wsl_hidpi_keyring.sh)
+- **Инженерные решения:**
+  - Полное устранение блокирующих модальных окон авторизации GNOME Keyring (`Unlock Login Keyring`) переводом Electron на `--password-store=basic` и очисткой бинарных кейсторов.
+  - Настройка кристально четкого масштабирования интерфейса на Retina/3K/4K мониторах (3072×1920, 192 DPI / 200%) через `%USERPROFILE%\.wslgconfig`, нативные флаги Wayland `--ozone-platform-hint=auto`, `--force-device-scale-factor=2` и профиль `/etc/profile.d/wsl_hidpi.sh`.
 
 ## Лицензия
 

@@ -62,7 +62,7 @@ fi
 
 # 8. Auto-start and unlock gnome-keyring-daemon if not already running
 if ! pgrep -u "$USER_UID" -f "gnome-keyring-daemon" >/dev/null 2>&1; then
-    eval $(printf "\n" | gnome-keyring-daemon --daemonize --login --components=secrets 2>/dev/null)
+    eval $(printf "" | gnome-keyring-daemon --daemonize --login --components=secrets 2>/dev/null)
 fi
 
 find_instance_win() {
@@ -113,8 +113,8 @@ if ! command -v claude-desktop >/dev/null 2>&1; then
     exit 1
 fi
 
-# 8. Launch Claude Desktop with Chromium proxy flag and GNOME libsecret keyring
-claude-desktop --no-sandbox --ozone-platform=x11 --password-store=gnome-libsecret --proxy-server="socks5://127.0.0.1:{SOCKS_PORT}" --user-data-dir="$USER_DATA_DIR" "$@" &
+# 8. Launch Claude Desktop with HiDPI scaling, Wayland support, and basic password store (Zero Keyring Popups)
+claude-desktop --no-sandbox --ozone-platform-hint=auto --enable-features=WaylandWindowDecorations --force-device-scale-factor=2 --password-store=basic --proxy-server="socks5://127.0.0.1:{SOCKS_PORT}" --user-data-dir="$USER_DATA_DIR" "$@" &
 MAIN_PID=$!
 echo "$MAIN_PID" > "$PID_FILE"
 

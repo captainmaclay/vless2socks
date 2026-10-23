@@ -100,7 +100,7 @@ if ! command -v claude-desktop >/dev/null 2>&1; then
 fi
 
 # 3. Launch Primary claude-desktop in background with secure GNOME libsecret keyring
-claude-desktop --no-sandbox --ozone-platform=x11 --password-store=gnome-libsecret --user-data-dir="$USER_DATA_DIR" "$@" &
+claude-desktop --no-sandbox --ozone-platform-hint=auto --enable-features=WaylandWindowDecorations --force-device-scale-factor=2 --password-store=basic --user-data-dir="$USER_DATA_DIR" "$@" &
 MAIN_PID=$!
 echo "$MAIN_PID" > "$PID_FILE"
 
@@ -255,7 +255,7 @@ if ! command -v claude-desktop >/dev/null 2>&1; then
 fi
 
 # 3. Launch Secondary claude-desktop in background routed strictly via Socket 1016 with GNOME libsecret
-claude-desktop --no-sandbox --ozone-platform=x11 --password-store=gnome-libsecret --proxy-server="socks5://127.0.0.1:1016" --user-data-dir="$USER_DATA_DIR" "$@" &
+claude-desktop --no-sandbox --ozone-platform-hint=auto --enable-features=WaylandWindowDecorations --force-device-scale-factor=2 --password-store=basic --proxy-server="socks5://127.0.0.1:1016" --user-data-dir="$USER_DATA_DIR" "$@" &
 MAIN_PID=$!
 echo "$MAIN_PID" > "$PID_FILE"
 

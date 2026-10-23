@@ -190,6 +190,26 @@
         "Формат INI прокси в Xshell строго требует кодировку UTF-16 LE с BOM (0xFF, 0xFE)."
       ],
       "remediation_action": "Использовать setup_helpers.xshell.shortcuts для исправления ярлыков и setup_helpers.xshell.proxy для генерации валидного UTF-16 LE файла."
+    },
+    {
+      "step_id": "STEP_10_CONFIGURE_WSL_HIDPI_KEYRING",
+      "order": 10,
+      "user_request_raw": "keyring мешает устрани, в скиллах есть помощь как и разрешение настрой высокое разрешение в убунте - по скиллам, если нет скиллов для этого. В случае успеха добавь скилл в соответствии с иерархией скриптов и внеси его в структуру",
+      "normalized_task_prompt": "Устранить блокирующие модальные окна Unlock Login Keyring через флаг --password-store=basic и очистку зашифрованных кейсторов. Настроить масштабирование высокого разрешения (HiDPI / 2K / 3K / 4K) в WSLg через .wslgconfig, Wayland/Ozone флаги --force-device-scale-factor=2 и профиль /etc/profile.d/wsl_hidpi.sh.",
+      "subagent_role": "WSLg Display & Keyring Systems Specialist",
+      "script_runner": "setup_helpers/09_configure_wsl_hidpi_keyring.ps1",
+      "command_line": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\proj\\vless2socks\\setup_helpers\\09_configure_wsl_hidpi_keyring.ps1\"",
+      "preconditions": [
+        "WSL2 дистрибутив Ubuntu-24.04 активен",
+        "Файл new_claude/configure_wsl_hidpi_keyring.sh доступен"
+      ],
+      "verification_command": "Test-Path \"$env:USERPROFILE\\.wslgconfig\"; Test-Path \"C:\\proj\\vless2socks\\skills\\wsl_gui_hidpi\\SKILL.md\"",
+      "expected_output_pattern": "True.*True",
+      "known_pitfalls": [
+        "Флаг --password-store=gnome-libsecret без дисплейного менеджера вызывает pinentry-gnome3 окно 'Unlock Login Keyring'.",
+        "Флаг --ozone-platform=x11 на 3K/4K экранах (3072x1920) дает размытый растровый интерфейс без HiDPI масштабирования."
+      ],
+      "remediation_action": "Применить --password-store=basic, включить --ozone-platform-hint=auto и сбросить бинарные кейсторы через setup_helpers/09_configure_wsl_hidpi_keyring.ps1."
     }
   ]
 }
