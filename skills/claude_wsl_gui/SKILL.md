@@ -278,6 +278,13 @@ instanceIdleTimeout=-1
 (`general.instanceIdleTimeout` есть в `wslservice.exe`). Применяется после `wsl --shutdown`.
 Цена: VM и дистрибутив постоянно держат память.
 
+Кто выставляет:
+- [`setup_helpers/02_enable_wsl2_subsystem.ps1`](../../setup_helpers/02_enable_wsl2_subsystem.ps1) — пишет `.wslconfig`
+  целиком, секция `[general]` входит в шаблон.
+- `ensure_wslconfig_idle_timeout()` в `add_vendor_c_gui_instance.py` — при каждом деплое GUI-инстанса
+  идемпотентно добавляет или исправляет ключ, сохраняя остальные секции и стиль переводов строк (CRLF/LF).
+  `wsl --shutdown` деплоер сам не делает, чтобы не убить работающие процессы WSL, а только сообщает об изменении.
+
 ---
 
 ## 8. WSLg COPY MODE
@@ -332,6 +339,10 @@ rdp_allocate_shared_memory: Failed to open "/mnt/shared_memory/{...}" with error
    но Electron при `basic` его **не использует**. Он нужен только для того, чтобы не всплывал `Unlock Login Keyring`
    у других потребителей. Утверждение «keyring обеспечивает safeStorage» для текущей конфигурации неверно:
    это компромисс между отсутствием модального окна и сохранением сессии (см. `wsl_gui_hidpi`).
+   `init_wsl_keyring.sh` (ставится деплоером в `/usr/local/bin/init-wsl-keyring.sh`) проверяет keyring через
+   `secret-tool` и прямо пишет, что `safeStorage` остаётся на `basic_text`. Демон запускается с пустым паролем
+   `printf ""`, так же как в лаунчере (шаг 8) и по регламенту `wsl_gui_hidpi`; self-test с ним проходит
+   (проверено 2026-10-23 на остановленном и заново запущенном демоне).
 9. **Логин через браузер.** В дистрибутиве нет браузера: `xdg-open: no method available for opening 'https://claude.com/cai/login/...'`.
    OAuth-вход из GUI не откроет страницу автоматически.
 10. **Нативный Wayland.** См. 4.3: при переходе Electron на Wayland `xdotool` перестанет видеть окно.
@@ -374,11 +385,12 @@ bash -x /usr/local/bin/claude-gui-1                                   # поша
 | [`new_claude/template_claude_gui.sh`](../../new_claude/template_claude_gui.sh) | Шаблон WSL-лаунчера (разделы 3–7) |
 | [`new_claude/template_run_gui.vbs`](../../new_claude/template_run_gui.vbs) | Шаблон VBS-раннера: pre-flight → `wslg-health` (ретраи) → самолечение → запуск |
 | [`new_claude/wslg_health.sh`](../../new_claude/wslg_health.sh) | Детект WSLg COPY MODE (exit 0/10/11) |
-| [`new_claude/add_vendor_c_gui_instance.py`](../../new_claude/add_vendor_c_gui_instance.py) | Иконка (HSV), лаунчер + `wslg-health` через `install`, VBS, BAT, ярлыки |
+| [`new_claude/add_vendor_c_gui_instance.py`](../../new_claude/add_vendor_c_gui_instance.py) | Иконка (HSV), `.wslconfig` (`instanceIdleTimeout=-1`), лаунчер + `wslg-health` + `init-wsl-keyring.sh` через `install`, VBS, BAT, ярлыки |
 | [`new_claude/update_launchers.py`](../../new_claude/update_launchers.py) | Переразвёртывание инстансов 1 (1015) и 2 (1016) из шаблонов |
 | [`new_claude/create_desktop_shortcut.ps1`](../../new_claude/create_desktop_shortcut.ps1) | `.lnk` в трёх каталогах + сброс кэша иконок |
 | [`new_claude/verify_and_notify.py`](../../new_claude/verify_and_notify.py) | Pre-flight IP + тост |
-| [`new_claude/init_wsl_keyring.sh`](../../new_claude/init_wsl_keyring.sh) | Keyring + self-test `secret-tool` (его вывод «safeStorage guaranteed TRUE» неверен при `--password-store=basic`, см. Gotcha 8) |
+| [`new_claude/init_wsl_keyring.sh`](../../new_claude/init_wsl_keyring.sh) | Беспарольный keyring + self-test `secret-tool` (см. Gotcha 8) |
+| [`setup_helpers/02_enable_wsl2_subsystem.ps1`](../../setup_helpers/02_enable_wsl2_subsystem.ps1) | `.wslconfig`: mirrored-сеть + `[general] instanceIdleTimeout=-1` |
 | [`new_claude/configure_wsl_hidpi_keyring.sh`](../../new_claude/configure_wsl_hidpi_keyring.sh), [`setup_helpers/09_*.ps1`](../../setup_helpers/09_configure_wsl_hidpi_keyring.ps1) | Keyring + HiDPI env (scale 1, `Xft.dpi` 96) |
 
 Проверка шаблона после правок (рендер для инстанса 1 и побайтное сравнение с установленным лаунчером):
@@ -387,9 +399,8 @@ sed -e 's/{INSTANCE_ID}/1/g; s/{SOCKS_PORT}/1015/g; s/{HTTP_PORT}/11015/g; s/{WS
     new_claude/template_claude_gui.sh | tr -d '\r' | cmp - /usr/local/bin/claude-gui-1
 ```
 
-Открытые задачи:
-1. Добавить `instanceIdleTimeout=-1` в провижининг `.wslconfig` (сейчас выставлен вручную).
-2. Исправить вывод `init_wsl_keyring.sh` про `safeStorage` или перейти на `--password-store=gnome-libsecret` после проверки, что окно разблокировки не возвращается.
+Возможное развитие: перейти на `--password-store=gnome-libsecret`, чтобы сессия переживала перезапуск
+(`safeStorage` = true), но только после проверки, что окно `Unlock Login Keyring` не возвращается.
 
 ---
 

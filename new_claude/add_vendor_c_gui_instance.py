@@ -143,11 +143,15 @@ def deploy_wsl_launcher(distro, instance_id, socks_port, http_port, wsl_user="ub
     ).strip()
 
     target_bin = f"/usr/local/bin/claude-gui-{instance_id}"
-    health_src = subprocess.check_output(
-        ["wsl.exe", "-d", distro, "wslpath", "-u",
-         os.path.join(os.path.dirname(os.path.abspath(__file__)), "wslg_health.sh").replace("\\", "/")],
-        text=True
-    ).strip()
+    def to_wsl_path(name):
+        return subprocess.check_output(
+            ["wsl.exe", "-d", distro, "wslpath", "-u",
+             os.path.join(os.path.dirname(os.path.abspath(__file__)), name).replace("\\", "/")],
+            text=True
+        ).strip()
+
+    health_src = to_wsl_path("wslg_health.sh")
+    keyring_src = to_wsl_path("init_wsl_keyring.sh")
     # `install` writes a new inode: a launcher that is running right now keeps reading its old copy
     # (bash reads scripts incrementally, overwriting in place with `tee` would corrupt it).
     cmd = (
@@ -157,6 +161,9 @@ def deploy_wsl_launcher(distro, instance_id, socks_port, http_port, wsl_user="ub
         f"tr -d '\\r' < '{health_src}' > /tmp/wslg-health.new && "
         f"sudo install -m 755 -o root -g root /tmp/wslg-health.new /usr/local/bin/wslg-health && "
         f"rm -f /tmp/wslg-health.new && "
+        f"tr -d '\\r' < '{keyring_src}' > /tmp/init-wsl-keyring.new && "
+        f"sudo install -m 755 -o root -g root /tmp/init-wsl-keyring.new /usr/local/bin/init-wsl-keyring.sh && "
+        f"rm -f /tmp/init-wsl-keyring.new && "
         f"if [ '{instance_id}' = '1' ]; then sudo install -m 755 -o root -g root {target_bin} /usr/local/bin/claude-gui; fi && "
         f"mkdir -m 700 -p /home/{wsl_user}/.claude-{instance_id}/.config /run/user/{uid}/claude-{instance_id} 2>/dev/null && "
         f"sudo chown -R {wsl_user}:{wsl_user} /home/{wsl_user}/.claude-{instance_id} 2>/dev/null || true && "
@@ -166,9 +173,52 @@ def deploy_wsl_launcher(distro, instance_id, socks_port, http_port, wsl_user="ub
     subprocess.check_call(["wsl.exe", "-d", distro, "bash", "-c", cmd])
     print(f"[+] Installed WSL launcher: {target_bin}")
     print("[+] Installed WSLg health check: /usr/local/bin/wslg-health")
+    print("[+] Installed keyring provisioner: /usr/local/bin/init-wsl-keyring.sh")
 
     if os.path.exists(temp_script_path):
         os.remove(temp_script_path)
+
+
+def ensure_wslconfig_idle_timeout():
+    """Sets [general] instanceIdleTimeout=-1 in %USERPROFILE%\\.wslconfig, keeping all other settings.
+
+    Restarting the distro inside a running WSL VM (idle stop -> next launch) breaks WSLg shared memory
+    ("[WARN:COPY MODE]", blank GUI windows), so the distro must never stop on idle.
+    Returns True if the file was changed (takes effect after `wsl --shutdown`).
+    """
+    path = os.path.join(os.path.expanduser("~"), ".wslconfig")
+    content = ""
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8-sig", newline="") as f:  # keep CRLF visible for detection
+            content = f.read()
+    newline = "\r\n" if "\r\n" in content else "\n"
+    lines = content.splitlines()
+
+    section_start = next((i for i, l in enumerate(lines) if l.strip().lower() == "[general]"), None)
+    if section_start is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines += [
+            "[general]",
+            "# Never stop the distro on idle: restarting it inside a running VM breaks WSLg shared",
+            "# memory (\"[WARN:COPY MODE]\", blank GUI windows). -1 = disabled.",
+            "instanceIdleTimeout=-1",
+        ]
+    else:
+        section_end = next((i for i in range(section_start + 1, len(lines)) if lines[i].strip().startswith("[")), len(lines))
+        key_idx = next((i for i in range(section_start + 1, section_end)
+                        if lines[i].split("=", 1)[0].strip().lower() == "instanceidletimeout"), None)
+        if key_idx is None:
+            lines.insert(section_start + 1, "instanceIdleTimeout=-1")
+        elif lines[key_idx].split("=", 1)[1].strip() == "-1":
+            return False
+        else:
+            lines[key_idx] = "instanceIdleTimeout=-1"
+
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(newline.join(lines) + newline)
+    print(f"[+] Set [general] instanceIdleTimeout=-1 in {path} (applies after `wsl --shutdown`)")
+    return True
 
 
 def deploy_windows_launchers(distro, instance_id, socks_port, shortcut_name, icon_path, wsl_user="ubuntu"):
@@ -296,6 +346,9 @@ def main():
     repo_proxy_ico = os.path.join(r"C:\proj\vless2socks\proxys\ico", os.path.basename(out_ico))
     os.makedirs(os.path.dirname(repo_proxy_ico), exist_ok=True)
     shutil.copy2(out_ico, repo_proxy_ico)
+
+    # Keep the distro alive between GUI sessions (WSLg COPY MODE prevention)
+    ensure_wslconfig_idle_timeout()
 
     # Deploy WSL launcher
     deploy_wsl_launcher(

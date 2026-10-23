@@ -1,8 +1,11 @@
 #!/bin/bash
 # ==============================================================================
 # WSL2 / WSLg GNOME Keyring & Secret Service Provisioner for Claude Desktop
-# Ensures Electron safeStorage.isEncryptionAvailable() returns true
-# Prevents "Your sign-in won't be saved on this device" error
+# Provisions a passwordless, unlocked login.keyring so Secret Service clients never show
+# the "Unlock Login Keyring" prompt.
+# NOTE: the Claude Desktop launchers run Electron with --password-store=basic, so Electron does NOT
+# use this keyring: safeStorage.isEncryptionAvailable() is false (backend=basic_text) and app
+# secrets are stored in plaintext inside the isolated profile. See skills/claude_wsl_gui/SKILL.md.
 # ==============================================================================
 set -e
 
@@ -74,7 +77,8 @@ fi
 # 5. Start and unlock gnome-keyring-daemon if not running
 if ! pgrep -u "$USER_UID" -f "gnome-keyring-daemon" >/dev/null 2>&1; then
     echo "[*] Launching gnome-keyring-daemon..."
-    eval $(printf "\n" | gnome-keyring-daemon --daemonize --login --components=secrets 2>/dev/null)
+    # Empty password on stdin (not "\n"): matches the passwordless login.keyring, same as the launchers
+    eval $(printf "" | gnome-keyring-daemon --daemonize --login --components=secrets 2>/dev/null)
     sleep 0.5
 fi
 
@@ -86,7 +90,8 @@ if echo "$TEST_VAL" | secret-tool store --label="Claude Keyring Probe" service c
     secret-tool clear service claude_probe user test 2>/dev/null || true
     if [ "$READ_VAL" = "$TEST_VAL" ]; then
         echo "[+] SUCCESS: GNOME Keyring is active, unlocked, and responsive on DBus!"
-        echo "[+] Electron safeStorage.isEncryptionAvailable() is guaranteed to return TRUE."
+        echo "[i] Claude Desktop launchers use --password-store=basic: Electron safeStorage stays on"
+        echo "    basic_text (isEncryptionAvailable=false); this keyring only prevents unlock prompts."
         exit 0
     fi
 fi

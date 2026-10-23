@@ -86,7 +86,7 @@
 ШАГ 2: Активация виртуализации Windows и WSL2
 - Включи компоненты: VirtualMachinePlatform и Microsoft-Windows-Subsystem-Linux.
 - Задай в BCD: `bcdedit /set hypervisorlaunchtype Auto`.
-- Запиши C:\Users\<User>\.wslconfig: networkingMode=mirrored, dnsTunneling=true, firewall=true, autoProxy=true.
+- Запиши C:\Users\<User>\.wslconfig: [wsl2] networkingMode=mirrored, dnsTunneling=true, firewall=true, autoProxy=true; [general] instanceIdleTimeout=-1 (иначе после простоя WSLg уходит в COPY MODE и GUI-окна пустые).
 - ВНИМАНИЕ (ПОДВОДНЫЙ КАМЕНЬ): Если гипервизор NT не был активирован ранее, требуется 1 перезагрузка хоста Windows! Проверь через `wsl --status`. Если выдается ошибка 0x80370114, остановись и запроси ребут.
 - Скрипт-раннер: `powershell -File C:\proj\vless2socks\setup_helpers\02_enable_wsl2_subsystem.ps1`.
 

@@ -21,12 +21,17 @@ bcdedit.exe /set hypervisorlaunchtype Auto | Out-Null
 $userProfile = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
 $wslConfigPath = Join-Path $userProfile ".wslconfig"
 
+# [general] instanceIdleTimeout=-1: never stop the distro on idle. Restarting it inside a running VM breaks
+# WSLg shared memory ("[WARN:COPY MODE]", blank GUI windows), see skills/claude_wsl_gui/SKILL.md.
 $wslConfigContent = @"
 [wsl2]
 networkingMode=mirrored
 dnsTunneling=true
 firewall=true
 autoProxy=true
+
+[general]
+instanceIdleTimeout=-1
 "@
 
 Write-Host "[+] Deploying Mirrored Network config: $wslConfigPath..." -ForegroundColor Yellow
