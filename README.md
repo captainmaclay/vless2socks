@@ -14,7 +14,9 @@
   <sub>Professional GUI for managing unlimited SOCKS5 proxies over VLESS (TCP/TLS/REALITY) with Xray-core backend</sub>
 </p>
 
-![screenshot](https://i.imgur.com/LReRDxM.png)
+<p align="center">
+  <img src="docs/screenshots/01_overview.png" width="860" alt="vless2socks — Overview tab" />
+</p>
 
 ---
 
@@ -136,15 +138,19 @@ first run from templates bundled inside the exe, so `dist/` ships as-is.
 
 ## GUI Overview
 
-The application has **6 main tabs**:
+The application has **7 main tabs**. Screenshots show the current version with demo data (fictional `*.example.net` servers).
 
 ### 🏠 Overview
+<img src="docs/screenshots/01_overview.png" width="760" alt="Overview tab" />
+
 Real-time dashboard showing all configured SOCKS5 proxies with their status, ports, country flags, and quick actions:
 - Start/Stop All buttons and Refresh Geo for batch operations.
 - **Copy TG_socks** quick button on any proxy instance flagged with `TelegramProxy`.
 - **RestartServices Widget** with live health status indicator and slide-down context menu showing the active TelegramProxy upstream socket (`TelegramProxy ({active_socket})`).
 
 ### 🛡️ Proxies
+<img src="docs/screenshots/02_proxies.png" width="760" alt="Proxies tab" />
+
 Paginated proxy management (10 per page). Each proxy card includes:
 - VLESS URL field (hidden by default with 👁️ toggle)
 - Host / Port configuration with auto-free-port finder
@@ -157,6 +163,8 @@ Paginated proxy management (10 per page). Each proxy card includes:
 - Backend engine selection (Auto / Python / Xray)
 
 ### ⚙️ Options
+<img src="docs/screenshots/03_options.png" width="760" alt="Options tab" />
+
 Persistent settings saved to `settings.json`:
 - **Force Port Takeover** — kill processes occupying required ports (default: ON)
 - **Auto-Start Proxies on Launch** — start all proxies when app opens (default: ON)
@@ -166,6 +174,8 @@ Persistent settings saved to `settings.json`:
 - **TelegramProxy Virtual Port** — customizable listening port for the Telegram relay virtual socket (default: `1373`, with "Reset to 1373" button)
 
 ### 💾 Backup & Security
+<img src="docs/screenshots/04_backup.png" width="760" alt="Backup & Security tab" />
+
 - **Master Password** with SHA-256 fingerprint display
 - **Create Encrypted Backup** — exports `.hbak` file (AES-256-GCM)
 - **Restore from Backup** — decrypt and restore all configurations
@@ -174,6 +184,8 @@ Persistent settings saved to `settings.json`:
 - **Factory Reset** — wipe all instances, configs, and credentials
 
 ### 🛡️ WSL Isolation (WSL2 Network Isolation Guard)
+<img src="docs/screenshots/05_wsl_isolation.png" width="760" alt="WSL Isolation tab" />
+
 - **Kernel Firewall Jail:** Strict lockdown of WSL2 outbound traffic using `nftables` (with `iptables` fallback) — permits loopback (`lo`, `loopback0`) and rejects direct WAN/LAN connections (`counter reject`).
 - **Bypass Defense:** Explicitly drops bypass attempts to unauthorized local ports (e.g. `2080`).
 - **DNS Leak Protection:** Automatically configures `ALL_PROXY='socks5h://127.0.0.1:1015'` in `/etc/profile.d/` for remote DNS resolution (Zero DNS leaks).
@@ -182,7 +194,14 @@ Persistent settings saved to `settings.json`:
 - **Guaranteed Windows Direct IP:** Removes Windows Firewall interference so host tools (`node.exe`, browsers) retain direct internet.
 
 ### 🌐 Localization
+<img src="docs/screenshots/06_localization.png" width="760" alt="Localization tab" />
+
 Switch between English and Russian with one click. All labels, buttons, and messages update instantly without restart.
+
+### ⬆ Updates
+<img src="docs/screenshots/07_update.png" width="760" alt="Updates tab" />
+
+Shows the installed version and checks GitHub Releases for a new `.exe` every 15 minutes (or on demand via **Check for updates**). When a release is out, a violet **Update version** button appears here and in the header.
 
 ## Configuration Files
 
@@ -585,15 +604,19 @@ dist/
 
 ## Вкладки GUI
 
-В приложении **6 основных вкладок**:
+В приложении **7 основных вкладок**. На скриншотах — текущая версия на демо-данных (вымышленные серверы `*.example.net`).
 
 ### 🏠 Обзор (Overview)
+<img src="docs/screenshots/01_overview.png" width="760" alt="Вкладка Обзор" />
+
 Панель мониторинга со всеми настроенными прокси: статус, порты, флаги стран, кнопки управления:
 - Групповые операции «Запустить все» / «Остановить все» и «Обновить GeoIP».
 - Быстрая кнопка **Copy TG_socks** на карточках прокси, отмеченных флагом `TelegramProxy`.
 - Виджет **RestartServices** с живым индикатором состояния и выпадающим меню со строкой активного сокета `TelegramProxy ({активный_сокет})` (или `не выбрано`).
 
 ### 🛡️ Прокси (Proxies)
+<img src="docs/screenshots/02_proxies.png" width="760" alt="Вкладка Прокси" />
+
 Управление прокси с пагинацией (10 на страницу). Каждая карточка содержит:
 - Поле VLESS URL (скрыто по умолчанию, кнопка 👁️)
 - Хост / Порт с автоподбором свободного порта
@@ -606,6 +629,8 @@ dist/
 - Выбор движка (Auto / Python / Xray)
 
 ### ⚙️ Опции (Options)
+<img src="docs/screenshots/03_options.png" width="760" alt="Вкладка Опции" />
+
 Постоянные настройки в `settings.json`:
 - **Force Port Takeover** — принудительное освобождение портов (по умолчанию: ВКЛ)
 - **Auto-Start Proxies on Launch** — запуск прокси при старте (по умолчанию: ВКЛ)
@@ -615,6 +640,8 @@ dist/
 - **Порт TelegramProxy** — настраиваемый порт виртуального сокета для Telegram (по умолчанию: `1373`, с кнопкой сброса к 1373)
 
 ### 💾 Бэкап и Безопасность (Backup & Security)
+<img src="docs/screenshots/04_backup.png" width="760" alt="Вкладка Бэкап и Безопасность" />
+
 - Мастер-пароль с отпечатком SHA-256
 - Создание зашифрованного бэкапа `.hbak` (AES-256-GCM)
 - Восстановление из бэкапа
@@ -623,6 +650,8 @@ dist/
 - Полный сброс (Factory Reset)
 
 ### 🛡️ WSL Изоляция (WSL2 Isolation Guard)
+<img src="docs/screenshots/05_wsl_isolation.png" width="760" alt="Вкладка WSL Изоляция" />
+
 - **Сетевая тюрьма ядра Linux:** Жесткая блокировка исходящего трафика WSL2 через `nftables` (или `iptables`) — разрешен только loopback (`lo`, `loopback0`), весь прямой WAN/LAN трафик отсекается правилом `counter reject`.
 - **Защита от обходов:** Блокировка попыток выхода через сторонние сокеты (например, `127.0.0.1:2080`).
 - **Удаленный DNS (Zero Leaks):** Автоматическая настройка `ALL_PROXY='socks5h://127.0.0.1:1015'` в `/etc/profile.d/` — доменные имена разрешаются на стороне прокси, исключая утечки хостового DNS.
@@ -631,7 +660,14 @@ dist/
 - **Свобода Windows-хоста:** Автоматическое удаление правил брандмауэра Windows — процессы Windows (`node.exe`, браузеры) сохраняют прямой доступ (Direct IP).
 
 ### 🌐 Локализация (Localization)
+<img src="docs/screenshots/06_localization.png" width="760" alt="Вкладка Локализация" />
+
 Переключение между английским и русским одним кликом. Все элементы обновляются мгновенно.
+
+### ⬆ Обновления (Updates)
+<img src="docs/screenshots/07_update.png" width="760" alt="Вкладка Обновления" />
+
+Показывает установленную версию и каждые 15 минут проверяет GitHub Releases на новый `.exe` (или по кнопке **Check for updates**). Когда релиз вышел, здесь и в шапке появляется фиолетовая кнопка **Update version**.
 
 ## Файлы конфигурации
 
