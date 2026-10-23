@@ -1,6 +1,6 @@
 # ==============================================================================
 # Windows Shortcut Generator for Isolated Claude Desktop Instances
-# Creates Desktop & Proxy/ink shortcuts with multi-res colored icons
+# Creates Desktop, Proxy/ink, and proxys/ink shortcuts with multi-res colored icons
 # ==============================================================================
 param(
     [Parameter(Mandatory=$true)]
@@ -19,6 +19,7 @@ param(
 $wsh = New-Object -ComObject WScript.Shell
 $desktopDir = [Environment]::GetFolderPath('Desktop')
 $proxyInkDir = "C:\MyFiles\Proxy\ink"
+$projInkDir = "C:\proj\vless2socks\proxys\ink"
 $workDir = "C:\MyFiles\herdrCenter"
 $wscript = "$env:SystemRoot\System32\wscript.exe"
 $arguments = "`"$VbsPath`""
@@ -26,10 +27,14 @@ $arguments = "`"$VbsPath`""
 if (!(Test-Path $proxyInkDir)) {
     New-Item -ItemType Directory -Path $proxyInkDir -Force | Out-Null
 }
+if (!(Test-Path $projInkDir)) {
+    New-Item -ItemType Directory -Path $projInkDir -Force | Out-Null
+}
 
 $targets = @(
     (Join-Path $desktopDir "$ShortcutName.lnk"),
-    (Join-Path $proxyInkDir "$ShortcutName.lnk")
+    (Join-Path $proxyInkDir "$ShortcutName.lnk"),
+    (Join-Path $projInkDir "$ShortcutName.lnk")
 )
 
 foreach ($target in $targets) {

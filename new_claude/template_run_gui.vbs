@@ -9,5 +9,5 @@ ret = WshShell.Run("pythonw ""C:\MyFiles\vless2socks\new_claude\verify_and_notif
 
 ' 2. Launch only if IP verification succeeded
 If ret = 0 Then
-    WshShell.Run "wsl.exe -d {DISTRO} bash -lc ""/usr/local/bin/claude-gui-{INSTANCE_ID}""", 0, False
+    WshShell.Run "wsl.exe -d {DISTRO} -u {WSL_USER} bash -lc ""/usr/local/bin/claude-gui-{INSTANCE_ID}""", 0, False
 End If
