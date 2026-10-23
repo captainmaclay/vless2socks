@@ -20,7 +20,7 @@
       "step_id": "STEP_01_BUILD_CORE",
       "order": 1,
       "user_request_raw": "скачай проект C:\\proj https://github.com/captainmaclay/vless2socks - собери именно сборку в папку с одноименном названием vless2socks",
-      "normalized_task_prompt": "Клонировать репозиторий vless2socks в C:\\proj\\vless2socks, переключиться на тег v1.2.3, настроить виртуальное окружение .venv, установить зависимости (pefile, pillow, pyinstaller), скачать ядро Xray-core и собрать автономный релиз vless2socks.exe и vless2socks-cli.exe через PyInstaller. Создать NTFS Junction C:\\MyFiles\\vless2socks -> C:\\proj\\vless2socks.",
+      "normalized_task_prompt": "Клонировать репозиторий vless2socks в C:\\proj\\vless2socks, динамически определить и переключиться на самый актуальный релизный тег с GitHub (без хардкодинга версий), настроить виртуальное окружение .venv, установить зависимости (pefile, pillow, pyinstaller), скачать ядро Xray-core и собрать автономный релиз vless2socks.exe и vless2socks-cli.exe через PyInstaller. Создать NTFS Junction C:\\MyFiles\\vless2socks -> C:\\proj\\vless2socks.",
       "subagent_role": "Core Build & Release Engineer",
       "script_runner": "setup_helpers/01_build_vless2socks.ps1",
       "command_line": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\proj\\vless2socks\\setup_helpers\\01_build_vless2socks.ps1\"",
@@ -31,7 +31,7 @@
       "verification_command": "Test-Path \"C:\\proj\\vless2socks\\dist\\vless2socks\\vless2socks.exe\"; Test-Path \"C:\\MyFiles\\vless2socks\"",
       "expected_output_pattern": "True.*True",
       "known_pitfalls": [
-        "Ветка main не содержит модули Vendor C и WSL isolation; обязателен тег v1.2.3.",
+        "Для получения всех модулей изоляции обязателен актуальный релизный тег (Latest Tag), подтягиваемый динамически с origin через git fetch --tags.",
         "Внутренние пути жестко завязаны на C:\\MyFiles\\vless2socks; обязателен NTFS Junction."
       ],
       "remediation_action": "При отсутствии Xray-core запустить 'python tools/get_xray.py'. При ошибках путей пересоздать junction через New-Item -ItemType Junction."

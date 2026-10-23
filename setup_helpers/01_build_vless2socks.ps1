@@ -14,10 +14,25 @@ if (-not (Test-Path $root)) {
 
 Set-Location $root
 
-Write-Host "[+] Ensuring repository is on release tag v1.2.4 or main..." -ForegroundColor Yellow
-if ((git tag -l "v1.2.4")) {
-    git checkout v1.2.4
+Write-Host "[+] Fetching latest release tags from GitHub origin..." -ForegroundColor Yellow
+git fetch --tags origin 2>$null
+
+# Determine latest release tag dynamically (no hardcoded versions)
+$latestTag = (git tag --sort=-v:refname | Where-Object { $_ -match '^v?\d+\.\d+' } | Select-Object -First 1)
+if (-not $latestTag) {
+    try {
+        $releaseInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/captainmaclay/vless2socks/releases/latest" -Headers @{"User-Agent"="vless2socks"} -TimeoutSec 5 -ErrorAction SilentlyContinue
+        $latestTag = $releaseInfo.tag_name
+    } catch {
+        $latestTag = $null
+    }
+}
+
+if ($latestTag) {
+    Write-Host "[+] Checking out dynamically discovered latest release tag: $latestTag" -ForegroundColor Green
+    git checkout $latestTag
 } else {
+    Write-Host "[!] No release tags found, remaining on default branch (main)..." -ForegroundColor Yellow
     git checkout main
 }
 

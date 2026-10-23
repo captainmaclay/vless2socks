@@ -414,7 +414,7 @@ vless2socks comes integrated with custom autonomous skills designed for Google D
 - **Machine-Readable Trajectory (XML):** [`skills/initial_start/chat_reference.xml`](skills/initial_start/chat_reference.xml)
 - **Automation Package:** [`setup_helpers/`](setup_helpers/) (`01` to `08`, [`install_all.ps1`](install_all.ps1))
 - **Key Modules & Solved Pitfalls:**
-  - Automated build from source (Git tag `v1.2.3`), Xray fetch, and `C:\MyFiles\vless2socks` NTFS junction.
+  - Automated build from source (dynamic Git latest release tag resolution), Xray fetch, and `C:\MyFiles\vless2socks` NTFS junction.
   - Mirrored network mode WSL2 setup with non-interactive kernel packages (`nftables`, `iptables`, `curl`).
   - Strict netfilter network jail (`lo`/`loopback0` only, reject WAN/LAN, bypass port 2080 drop).
   - Autonomous boot guard in Windows Task Scheduler (`WSL_AutoIsolation_Guard`) with multi-locale parsing (Russian/English).
@@ -750,7 +750,7 @@ dist/
 - **Машиночитаемый XML-лог траектории:** [`skills/initial_start/chat_reference.xml`](skills/initial_start/chat_reference.xml)
 - **Модульные скрипты:** [`setup_helpers/`](setup_helpers/) (`01`–`08`, мастер-скрипт [`install_all.ps1`](install_all.ps1))
 - **Решенные задачи и 19 подводных камней:**
-  - Автоматическая сборка из Git-тега `v1.2.3`, загрузка Xray, создание NTFS Junction `C:\MyFiles\vless2socks`.
+  - Автоматическая сборка из актуального Git-тега (динамическое разрешение Latest Tag), загрузка Xray, создание NTFS Junction `C:\MyFiles\vless2socks`.
   - Mirrored Network режим WSL2 с неинтерактивной установкой пакетов ядра (`nftables`, `iptables`, `curl`).
   - Тюрьма netfilter в ядре Linux (только `lo`/`loopback0`, безусловный reject WAN/LAN, блок обхода 2080).
   - Демон автозапуска в Планировщике Windows (`WSL_AutoIsolation_Guard`) с поддержкой русской локали `wsl --status`.

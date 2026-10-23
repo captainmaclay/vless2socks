@@ -1,6 +1,6 @@
 ================================================================================
                     РУКОВОДСТВО ПО УСТАНОВКЕ И ЗАПУСКУ ВОРКФЛОУ
-                         ПРОЕКТ: vless2socks (v1.2.4)
+                         ПРОЕКТ: vless2socks (Latest Release / актуальная версия)
 ================================================================================
 
 ЧАСТЬ 1: АРХИТЕКТУРНОЕ ОБЪЯСНЕНИЕ ДЛЯ ЧЕЛОВЕКА И МОДЕЛИ
@@ -76,7 +76,16 @@
 ПОСЛЕДОВАТЕЛЬНОСТЬ ИСПОЛНЕНИЯ (СТРОГО ШАГ ЗА ШАГОМ):
 
 ШАГ 1: Сборка ядра vless2socks
-- Убедись, что Git находится на теге v1.2.3: `git checkout v1.2.3`.
+- Динамически подтяни и переключись на самый свежий релизный тег с GitHub (без хардкодинга версий!):
+  PowerShell:
+    git fetch --tags origin
+    $latestTag = (git tag --sort=-v:refname | Where-Object { $_ -match '^v?\d+\.\d+' } | Select-Object -First 1)
+    if (-not $latestTag) { $latestTag = (Invoke-RestMethod -Uri "https://api.github.com/repos/captainmaclay/vless2socks/releases/latest" -Headers @{"User-Agent"="vless2socks"}).tag_name }
+    git checkout $latestTag
+  Bash:
+    git fetch --tags origin
+    git checkout $(git tag --sort=-v:refname | head -n 1)
+  (Или запусти раннер setup_helpers\01_build_vless2socks.ps1, который автоматически определяет и чекаутит актуальный релиз).
 - Создай и активируй .venv, установи зависимости: `pip install -r requirements.txt pefile pillow pyinstaller`.
 - Скачай ядро Xray через `python tools/get_xray.py`.
 - Собери бинарники через `pyinstaller --clean vless2socks.spec`.
