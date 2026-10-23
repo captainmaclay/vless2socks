@@ -1,0 +1,142 @@
+================================================================================
+                    РУКОВОДСТВО ПО УСТАНОВКЕ И ЗАПУСКУ ВОРКФЛОУ
+                         ПРОЕКТ: vless2socks (v1.2.3)
+================================================================================
+
+ЧАСТЬ 1: АРХИТЕКТУРНОЕ ОБЪЯСНЕНИЕ ДЛЯ ЧЕЛОВЕКА И МОДЕЛИ
+--------------------------------------------------------------------------------
+
+Проект vless2socks — это комплексный сетевой хаб и защищенный контур изоляции 
+для Windows 10/11 x64, решающий задачу безопасного перенаправления и строгого
+ограничения интернет-трафика через локальные SOCKS5/HTTP-прокси на базе ядра Xray-core.
+
+В репозитории реализован полный цикл изоляции Zero Shared State & Zero Leaks:
+1. Ядро vless2socks:
+   - Фоновые воркеры на портах 1015, 1016, 1020, 1021, 1030, 1080-1085.
+   - Отказоустойчивый виртуальный хаб TelegramProxy (127.0.0.1:1373) с авторотацией.
+   - Симлинк NTFS Junction: C:\MyFiles\vless2socks -> C:\proj\vless2socks.
+
+2. Сетевая тюрьма ядра Linux в WSL2 (Ubuntu 24.04 LTS):
+   - Сетевой стек в режиме Mirrored Network (networkingMode=mirrored, dnsTunneling=true).
+   - Фильтр ядра Linux netfilter (таблица herdr_filter в nftables):
+     * Разрешены ТОЛЬКО loopback интерфейсы (lo и loopback0).
+     * Порт обхода 127.0.0.1:2080 заблокирован.
+     * Весь прямой трафик WAN/LAN безусловно отсекается (counter reject).
+     * DNS-запросы направляются удаленному серверу через socks5h://127.0.0.1:1015.
+   - Автозапуск при старте Windows через Планировщик (WSL_AutoIsolation_Guard)
+     и директиву [boot] в /etc/wsl.conf.
+
+3. Изолированные тестовые среды Claude Code CLI (Vendor C):
+   - Профиль 1 (порт 1015, Gold) и Профиль 2 (порт 1016, Gold Secondary).
+   - Предотвращение коллизий в Windows Credential Manager через независимые
+     переменные CLAUDE_CONFIG_DIR (.claude-1 и .claude-secondary).
+   - Пре-лаунч валидация исходящего IP и Killswitch-защита (verify_and_notify.py).
+   - Автоматическая синхронизация профилей с vless2socks (vendor_c_sync.py).
+
+4. Изолированные профили Google Chrome:
+   - Независимые сессии и каталоги --user-data-dir="%LOCALAPPDATA%\Google\Chrome\Proxy<PORT>".
+   - Цветные многослойные иконки .ico, извлеченные из chrome.exe (pefile + HSV).
+   - Типобезопасные симлинки link/lnk -> ink и ярлык Proxys.lnk на Рабочем столе.
+
+5. Интеграция NetSarang Xshell 8:
+   - Обход ошибки 40004 в nslicense.dll (RVA 0x3450) при прямом запуске MSI.
+   - Генерация UTF-16 LE с BOM прокси-файлов в Common\Proxy\SOCKS5_<PORT>.ini.
+   - Шифрование паролей сессий по алгоритму NetSarang v7/v8:
+     ((Username[::-1] + SID)[::-1] -> SHA256 -> ARC4 + Checksum -> Base64).
+
+КАРТА ФАЙЛОВ И СПЕЦИФИКАЦИЙ В РЕПОЗИТОРИИ:
+- initial_start.md / skills/initial_start/SKILL.md — Главная спецификация и скилл.
+- workflow_sequence.json — Машиночитаемый план всех шагов для оркестратора.
+- WORKFLOW_ORCHESTRATOR.md — Руководство по запуску субагентов и контролю шагов.
+- skills/initial_start/chat_reference.xml — Полная XML-стенограмма всей сессии.
+- skills/xshell/SKILL.md & chat_history.xml — Спецификация и реверс Xshell 8.
+- setup_helpers/ — Модульные скрипты шагов (01_build .. 08_audit, install_all.ps1).
+- setup_helpers/xshell/ — Пакет автоматизации Xshell (cli.py, installer, proxy, session).
+
+
+================================================================================
+ЧАСТЬ 2: ГОТОВЫЙ ПРОМПТ ДЛЯ ИИ-МОДЕЛИ / АВТОНОМНОГО АГЕНТА
+--------------------------------------------------------------------------------
+Скопируйте текст ниже (между маркерами START_PROMPT и END_PROMPT) и передайте
+любой ИИ-модели или субагенту в начале работы:
+
+--- START_PROMPT ---
+Ты действуешь как ведущий системный инженер и автономный оркестратор развертывания проекта vless2socks на платформе Windows 10/11 x64.
+
+ТВОЯ ЦЕЛЬ:
+Полностью развернуть, собрать, изолировать и протестировать защищенный сетевой контур vless2socks в каталоге C:\proj\vless2socks, доведя проверку сетевой изоляции WSL2 до вердикта [VERDICT: 100% ISOLATED] без каких-либо утечек трафика и коллизий токенов.
+
+ОСНОВНЫЕ ИНСТРУКЦИИ И ДОКУМЕНТЫ ДЛЯ ИЗУЧЕНИЯ ПЕРЕД СТАРТОМ:
+1. Прочитай и строго следуй шагам из файлов:
+   - C:\proj\vless2socks\workflow_sequence.json (структурированный план шагов)
+   - C:\proj\vless2socks\WORKFLOW_ORCHESTRATOR.md (руководство ролей субагентов)
+   - C:\proj\vless2socks\initial_start.md (полная спецификация и 19 подводных камней)
+   - C:\proj\vless2socks\skills\xshell\SKILL.md (спецификация NetSarang Xshell 8)
+
+ПОСЛЕДОВАТЕЛЬНОСТЬ ИСПОЛНЕНИЯ (СТРОГО ШАГ ЗА ШАГОМ):
+
+ШАГ 1: Сборка ядра vless2socks
+- Убедись, что Git находится на теге v1.2.3: `git checkout v1.2.3`.
+- Создай и активируй .venv, установи зависимости: `pip install -r requirements.txt pefile pillow pyinstaller`.
+- Скачай ядро Xray через `python tools/get_xray.py`.
+- Собери бинарники через `pyinstaller --clean vless2socks.spec`.
+- Создай NTFS Junction: `New-Item -ItemType Junction -Path "C:\MyFiles\vless2socks" -Target "C:\proj\vless2socks"`.
+- Скрипт-раннер: `powershell -File C:\proj\vless2socks\setup_helpers\01_build_vless2socks.ps1`.
+
+ШАГ 2: Активация виртуализации Windows и WSL2
+- Включи компоненты: VirtualMachinePlatform и Microsoft-Windows-Subsystem-Linux.
+- Задай в BCD: `bcdedit /set hypervisorlaunchtype Auto`.
+- Запиши C:\Users\<User>\.wslconfig: networkingMode=mirrored, dnsTunneling=true, firewall=true, autoProxy=true.
+- ВНИМАНИЕ (ПОДВОДНЫЙ КАМЕНЬ): Если гипервизор NT не был активирован ранее, требуется 1 перезагрузка хоста Windows! Проверь через `wsl --status`. Если выдается ошибка 0x80370114, остановись и запроси ребут.
+- Скрипт-раннер: `powershell -File C:\proj\vless2socks\setup_helpers\02_enable_wsl2_subsystem.ps1`.
+
+ШАГ 3: Инициализация rootfs Ubuntu 24.04 и установка пакетов ядра
+- Инициализируй rootfs: `ubuntu2404.exe install --root`.
+- Назначь Ubuntu дефолтным дистрибутивом: `wsl --set-default Ubuntu-24.04`.
+- Установи сетевые пакеты ядра внутри Ubuntu в НЕИНТЕРАКТИВНОМ режиме:
+  `DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y -o Dpkg::Options::="--force-confold" nftables iptables curl`.
+- Скрипт-раннер: `powershell -File C:\proj\vless2socks\setup_helpers\03_initialize_ubuntu_environment.ps1`.
+
+ШАГ 4: Применение сетевой тюрьмы ядра Linux на сокет 1015
+- Загрузи таблицу nftables `herdr_filter`: разреши oifname { "lo", "loopback0" }, заблокируй порт обхода 2080, отсеки весь прямой трафик WAN/LAN (counter reject).
+- Настрой /etc/profile.d/herdr_claude_env.sh: ALL_PROXY='socks5h://127.0.0.1:1015'.
+- Добавь секцию [boot] command=/usr/local/bin/herdr_boot_isolation.sh в /etc/wsl.conf.
+- Очисти правила Windows Firewall (`Remove-NetFirewallRule`), чтобы хост Windows оставался свободным.
+- Скрипт-раннер: `powershell -File C:\proj\vless2socks\setup_helpers\04_lockdown_wsl_kernel_prison.ps1 -Port 1015`.
+
+ШАГ 5: Регистрация службы автозапуска в Планировщике Windows
+- Зарегистрируй задачу WSL_AutoIsolation_Guard с триггером AtLogOn и наивысшими правами.
+- Убедись, что auto_isolate_daemon.ps1 использует мультилокальный парсинг `wsl --status` (распознает русскую строку "Версия по умолчанию: 2").
+- Скрипт-раннер: `powershell -File C:\proj\vless2socks\setup_helpers\05_register_auto_isolation_daemon.ps1`.
+
+ШАГ 6: Настройка изолированных сред Claude Code CLI (Vendor C)
+- Убедись в наличии Node.js LTS и глобального пакета `@anthropic-ai/claude-code`.
+- Создай батники Vendor_C_Socket_1015.bat и Vendor_C_Socket_1016.bat с пре-лаунч валидацией `verify_and_notify.py` (Killswitch).
+- Раздели хранилища Windows Credential Manager через `set CLAUDE_CONFIG_DIR=C:\Users\<User>\.claude-1` (для 1015) и `set CLAUDE_CONFIG_DIR=C:\Users\<User>\.claude-secondary` (для 1016).
+- Создай ярлыки с золотыми иконками claude_gold.ico на Рабочем столе и в папке C:\MyFiles\Proxy\ink.
+- Скрипт-раннер: `powershell -File C:\proj\vless2socks\setup_helpers\06_setup_vendor_c_claude_cli.ps1`.
+
+ШАГ 7: Генерация изолированных инстансов Google Chrome
+- Сгенерируй батники под все настроенные порты сокетов (1015, 1016, 1020, 1021, 1030, 1080-1085).
+- Задай обязательные флаги: `--proxy-server="socks5://127.0.0.1:<PORT>"` и уникальный изолированный каталог `--user-data-dir="%LOCALAPPDATA%\Google\Chrome\Proxy<PORT>"`.
+- Извлеки многослойные иконки из chrome.exe (pefile) и перекрась их в цвета профилей по HSV.
+- Создай симлинки `proxys\link -> ink` и `proxys\lnk -> ink`, а также ярлык `Proxys.lnk` на Рабочем столе.
+- Скрипт-раннер: `python C:\proj\vless2socks\setup_helpers\07_generate_chrome_instances.py`.
+
+ШАГ 8: Комплексный аудит сетевой изоляции
+- Запусти полный аудит периметра: доступность сокетов 1015/11015, фильтрация ядра Linux, тест прямого выхода Direct IP Leak Test (должен быть заблокирован ядром), удаленный DNS socks5h, защита от обхода 2080.
+- Критерий успеха: вывод должен содержать: `[VERDICT: 100% ISOLATED]`.
+- Скрипт-раннер: `powershell -File C:\proj\vless2socks\setup_helpers\08_run_full_isolation_audit.ps1 -Port 1015`.
+
+ШАГ 9: Интеграция NetSarang Xshell 8
+- При необходимости развертывания Xshell 8 используй пакет `setup_helpers.xshell`:
+  * Не запускай чистый MSI! Используй официальный установщик `Xshell-latest-p.exe`, чтобы исключить ошибку 40004 в nslicense.dll.
+  * Почини битые ярлыки: `python -m setup_helpers.xshell.cli fix-shortcuts`.
+  * Сконфигурируй SOCKS5 на порт 1030 (UTF-16 LE с BOM) и привяжи к default.xshf:
+    `python -m setup_helpers.xshell.cli set-proxy --port 1030 --host 127.0.0.1`.
+  * Создай SSH-сессии с зашифрованными паролями ARC4:
+    `python -m setup_helpers.xshell.cli add-session --host <IP> --user <User> --password <Pass> --proxy SOCKS5_1030`.
+
+ПРАВИЛО РАБОТЫ АГЕНТА:
+Не останавливайся на промежуточных предупреждениях. Если встречаешь сбой, обратись к разделу "Детальный реестр всех 19 подводных камней" в initial_start.md, устрани причину и доведи все шаги до 100% завершения.
+--- END_PROMPT ---

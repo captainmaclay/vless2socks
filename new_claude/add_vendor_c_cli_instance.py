@@ -241,6 +241,7 @@ def main():
         print(f"[*] Icon already exists: {out_ico}")
 
     config_dir_name = f".claude-{instance_id}" if instance_id not in ("2", "secondary") else ".claude-secondary"
+    config_dir_path = os.path.join(os.environ.get("USERPROFILE") or os.path.expanduser("~"), config_dir_name)
     bat_path = deploy_cli_bat(instance_id, socks_port, config_dir_name)
     create_cli_shortcut(shortcut_name, bat_path, out_ico)
 

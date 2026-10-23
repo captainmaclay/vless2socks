@@ -120,8 +120,16 @@ table inet herdr_filter {{
 """
 
     boot_script_content = f"""#!/bin/bash
-# Herdr WSL2 Autonomous Boot Containment Guard
-nft -f /etc/nftables.conf 2>/dev/null || true
+# Herdr WSL2 Autonomous Boot Containment Guard - Always active on boot / restart
+if ! nft -f /etc/nftables.conf 2>/dev/null; then
+    iptables -N HERDR_ISOLATE 2>/dev/null || iptables -F HERDR_ISOLATE
+    iptables -C OUTPUT -j HERDR_ISOLATE 2>/dev/null || iptables -I OUTPUT 1 -j HERDR_ISOLATE
+    iptables -F HERDR_ISOLATE
+    iptables -A HERDR_ISOLATE -p tcp -d 127.0.0.1 --dport 2080 -j REJECT
+    iptables -A HERDR_ISOLATE -o lo -j ACCEPT
+    iptables -A HERDR_ISOLATE -o loopback0 -j ACCEPT
+    iptables -A HERDR_ISOLATE -j REJECT
+fi
 
 cat << 'HERDR_ENV' > /etc/profile.d/herdr_claude_env.sh
 export HTTPS_PROXY='http://127.0.0.1:{http_port}'
@@ -132,6 +140,25 @@ export http_proxy='http://127.0.0.1:{http_port}'
 export all_proxy='socks5h://127.0.0.1:{port}'
 HERDR_ENV
 chmod 644 /etc/profile.d/herdr_claude_env.sh
+
+# Persist in /etc/environment for all non-login shells and system services
+if [ -f /etc/environment ]; then
+    sed -i '/_PROXY/d' /etc/environment 2>/dev/null || true
+fi
+cat << 'HERDR_ENV_SYS' >> /etc/environment
+ALL_PROXY=socks5h://127.0.0.1:{port}
+all_proxy=socks5h://127.0.0.1:{port}
+HTTP_PROXY=http://127.0.0.1:{http_port}
+http_proxy=http://127.0.0.1:{http_port}
+HTTPS_PROXY=http://127.0.0.1:{http_port}
+https_proxy=http://127.0.0.1:{http_port}
+HERDR_ENV_SYS
+
+# Fallback for /etc/bash.bashrc
+if [ -f /etc/bash.bashrc ] && ! grep -q 'ALL_PROXY' /etc/bash.bashrc; then
+    echo "export ALL_PROXY='socks5h://127.0.0.1:{port}'" >> /etc/bash.bashrc
+    echo "export all_proxy='socks5h://127.0.0.1:{port}'" >> /etc/bash.bashrc
+fi
 """
 
     b64_nft = base64.b64encode(nft_conf_content.encode("utf-8")).decode("ascii")

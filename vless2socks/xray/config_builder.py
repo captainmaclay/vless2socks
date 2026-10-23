@@ -101,6 +101,9 @@ def build_xray_config(config: AppConfig, *, legacy_vnext: bool = False) -> dict[
         # (AllowedIPs), всё остальное — через локальный SOCKS5 (обычно System Proxy), а не в никуда.
         fb_host, fb_port = fallback
         inbound_tags = ["socks-in", "http-in", _DNS_TAG]
+        # Домен в WireGuard-outbound резолвится его собственным стеком внутри туннеля (публичный DNS),
+        # а split tunnel туда не пускает — соединение висит. Отдаём в туннель уже готовый IP.
+        primary_outbound["targetStrategy"] = "ForceIPv4"
         outbounds.append({
             "tag": "fallback",
             "protocol": "socks",

@@ -29,3 +29,8 @@ bin/*
 !bin/.gitkeep
 runtime/
 Claude outputs/
+
+# Proxy launcher junctions
+proxys/link
+proxys/lnk
+

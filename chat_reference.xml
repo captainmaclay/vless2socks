@@ -1,0 +1,420 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<chat_transcript id="vless2socks-initial-start" version="1.0">
+  <metadata>
+    <project_name>vless2socks</project_name>
+    <title>Полная хроника настройки, сборки, сетевой изоляции WSL2, Vendor C CLI и Google Chrome</title>
+    <os_target>Windows 10/11 x64 (NT Kernel)</os_target>
+    <wsl_target>Ubuntu 24.04 LTS (WSL2 Mirrored Network Mode)</wsl_target>
+    <node_version>v24.22.1 LTS</node_version>
+    <claude_version>@anthropic-ai/claude-code 2.1.309</claude_version>
+    <recorded_at>2026-10-23T09:40:00+03:00</recorded_at>
+    <security_standard>Herdr Control Center Zero Leaks Isolation Architecture</security_standard>
+  </metadata>
+
+  <summary>
+    <description>
+      Полная эталонная стенограмма всех пользовательских запросов, возникших технических препятствий,
+      методов их преодоления и финальной валидации 100% герметичного сетевого контура.
+    </description>
+  </summary>
+
+  <steps>
+    <!-- STEP 1 -->
+    <step index="1">
+      <user_request>
+        <![CDATA[скачай проект C:\proj https://github.com/captainmaclay/vless2socks - собери именно сборку в папку с одноименном названием vless2socks]]>
+      </user_request>
+      <intent>
+        Клонировать репозиторий vless2socks в C:\proj, подготовить виртуальное окружение Python, скачать бинарник Xray и собрать автономный релиз vless2socks.exe в одноименную папку.
+      </intent>
+      <challenges_faced>
+        <challenge id="PITFALL-01">
+          <title>Отсутствие необходимых файлов Vendor C в ветке main</title>
+          <description>
+            Ветка `main` содержала базовый функционал без папки `new_claude/`, `vendor_c_accounts.py` и документации по разделению профилей CLI.
+          </description>
+          <resolution>
+            Переключение на релизный тег `v1.2.3` (`git checkout v1.2.3`), где присутствовали все модули интеграции с Vendor C CLI и WSL isolation.
+          </resolution>
+        </challenge>
+        <challenge id="PITFALL-02">
+          <title>Необходимость симлинка C:\MyFiles\vless2socks</title>
+          <description>
+            Внутренние скрипты проекта и ярлыки жестко завязаны на путь `C:\MyFiles\vless2socks`.
+          </description>
+          <resolution>
+            Создан NTFS Junction `New-Item -ItemType Junction -Path "C:\MyFiles\vless2socks" -Target "C:\proj\vless2socks"`.
+          </resolution>
+        </challenge>
+      </challenges_faced>
+      <executed_actions>
+        <command>git clone https://github.com/captainmaclay/vless2socks C:\proj\vless2socks</command>
+        <command>git checkout v1.2.3</command>
+        <command>python -m venv C:\proj\vless2socks\.venv</command>
+        <command>pip install -r requirements.txt pefile pillow</command>
+        <command>python tools/get_xray.py</command>
+        <command>pyinstaller --clean vless2socks.spec</command>
+      </executed_actions>
+      <verified_outcome>
+        Автономные бинарники vless2socks.exe, vless2socks-cli.exe и bin/xray.exe успешно собраны и протестированы.
+      </verified_outcome>
+    </step>
+
+    <!-- STEP 2 -->
+    <step index="2">
+      <user_request>
+        <![CDATA[установи wsl]]>
+      </user_request>
+      <intent>
+        Установить и активировать подсистему WSL2 в Windows для последующей сетевой изоляции.
+      </intent>
+      <challenges_faced>
+        <challenge id="PITFALL-03">
+          <title>Требование перезагрузки хоста NT (Ошибка 0x80370114)</title>
+          <description>
+            Включение компонентов Windows `VirtualMachinePlatform` и `Microsoft-Windows-Subsystem-Linux` через DISM активирует драйвер виртуализации ядра, но hypervisor не начинает работать до полноценного перезапуска ОС. Попытка запустить WSL до ребута выдает ошибку `0x80370114`.
+          </description>
+          <resolution>
+            Включение BCD-параметра `bcdedit /set hypervisorlaunchtype Auto`, загрузка дистрибутива `Ubuntu_2404.2024.426.0_x64.appx`, подготовка автоскрипта и планирование обязательного ребута машины.
+          </resolution>
+        </challenge>
+      </challenges_faced>
+      <executed_actions>
+        <command>dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart</command>
+        <command>dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart</command>
+        <command>bcdedit.exe /set hypervisorlaunchtype Auto</command>
+        <command>Add-AppxPackage -Path "C:\proj\vless2socks\Ubuntu_2404.2024.426.0_x64.appx"</command>
+      </executed_actions>
+      <verified_outcome>
+        Компоненты ядра активированы в реестре, пакет приложения Ubuntu 24.04 LTS установлен в WindowsApps.
+      </verified_outcome>
+    </step>
+
+    <!-- STEP 3 -->
+    <step index="3">
+      <user_request>
+        <![CDATA[теперь изолируй wsl на 1015 сокет как по инструкции во vless]]>
+      </user_request>
+      <intent>
+        Заблокировать прямой интернет-трафик внутри WSL2 и перенаправить его исключительно через локальный SOCKS5 сокет 127.0.0.1:1015 с предотвращением утечек DNS (socks5h).
+      </intent>
+      <challenges_faced>
+        <challenge id="PITFALL-04">
+          <title>Сетевой режим Mirrored и петлевой интерфейс loopback0</title>
+          <description>
+            В современных версиях WSL2 с режимом mirrored сетевой стек Windows и Linux делит loopback. Требуется разрешать не только стандартный `lo`, но и интерфейс `loopback0`, иначе локальный трафик к сокету 1015 блокируется фильтром ядра.
+          </description>
+          <resolution>
+            Создан файл `C:\Users\Admin\.wslconfig` с параметрами:
+            networkingMode=mirrored
+            dnsTunneling=true
+            firewall=true
+            autoProxy=true
+            В правилах netfilter явно разрешены `oifname { "lo", "loopback0" } counter accept`.
+          </resolution>
+        </challenge>
+      </challenges_faced>
+      <executed_actions>
+        <command>Set-Content C:\Users\Admin\.wslconfig -Value "[wsl2]`nnetworkingMode=mirrored`ndnsTunneling=true`nfirewall=true`nautoProxy=true"</command>
+        <command>python wsl-proxy-isolation/cli.py apply --port 1015</command>
+      </executed_actions>
+      <verified_outcome>
+        Конфигурация `.wslconfig` применена. Скрипты генерации правил ядра сформированы.
+      </verified_outcome>
+    </step>
+
+    <!-- STEP 4 -->
+    <step index="4">
+      <user_request>
+        <![CDATA[сделай так чтобы wsl сразу после старта запускала тюрьму изоляцию автоматом -без включения ручного - всегда при старте, перезагрузке wsl включалась изоляция]]>
+      </user_request>
+      <intent>
+        Обеспечить 100% автономный автоматический запуск изоляции при включении или перезагрузке ПК без участия человека.
+      </intent>
+      <challenges_faced>
+        <challenge id="PITFALL-05">
+          <title>Мультилокальный парсинг wsl.exe --status в русской Windows</title>
+          <description>
+            В скрипте ожидания готовности подсистемы проверялась английская регулярка `2\.[0-9]`. В русской Windows команда `wsl.exe --status` возвращает строку `Версия по умолчанию: 2`, из-за чего скрипт застревал в цикле ожидания и считал, что WSL не готова.
+          </description>
+          <resolution>
+            Регулярное выражение было расширено: `if ($content -match "2" -or $content -match "Ubuntu" -or $content -match "Default" -or $content -match "Версия")`.
+          </resolution>
+        </challenge>
+        <challenge id="PITFALL-06">
+          <title>Персистентность в /etc/wsl.conf</title>
+          <description>
+            Если WSL перезапускается изнутри без перезагрузки Windows хоста, правила nftables сбрасываются.
+          </description>
+          <resolution>
+            В `/etc/wsl.conf` добавлена секция `[boot] command=/usr/local/bin/herdr_boot_isolation.sh`, гарантирующая активацию тюрьмы с 1-й миллисекунды поднятия ядра Linux.
+          </resolution>
+        </challenge>
+      </challenges_faced>
+      <executed_actions>
+        <command>Создан фоновый демон auto_isolate_daemon.ps1</command>
+        <command>Регистрация задачи в Task Scheduler: Register-ScheduledTask -TaskName 'WSL_AutoIsolation_Guard' -Trigger (New-ScheduledTaskTrigger -AtLogOn) ...</command>
+      </executed_actions>
+      <verified_outcome>
+        Служба Task Scheduler зарегистрирована, стартует при каждом входе в систему и контролирует состояние WSL2.
+      </verified_outcome>
+    </step>
+
+    <!-- STEP 5 -->
+    <step index="5">
+      <user_request>
+        <![CDATA[установи claude code cli для виндовс - настрой работу через 1015 исключительно по киллсвитч клиент эту работу настрой через скилы описания vless2socks]]>
+      </user_request>
+      <intent>
+        Установить Node.js, Claude Code CLI (@anthropic-ai/claude-code) и настроить строго через Killswitch на сокет 1015.
+      </intent>
+      <challenges_faced>
+        <challenge id="PITFALL-07">
+          <title>Отсутствие Node.js в Windows хосте</title>
+          <description>
+            Утилита Claude Code CLI требует рабочую среду Node.js LTS (v18+).
+          </description>
+          <resolution>
+            Установлен Node.js LTS v24.22.1 через официальный установщик MSI, затем глобально развернут пакет `@anthropic-ai/claude-code`.
+          </resolution>
+        </challenge>
+      </challenges_faced>
+      <executed_actions>
+        <command>msiexec /i node-v24.22.1-x64.msi /quiet /qn</command>
+        <command>npm install -g @anthropic-ai/claude-code</command>
+      </executed_actions>
+      <verified_outcome>
+        Claude Code CLI версии 2.1.309 установлен по пути %APPDATA%\npm\claude.cmd.
+      </verified_outcome>
+    </step>
+
+    <!-- STEP 6 -->
+    <step index="6">
+      <user_request>
+        <![CDATA[в описании и скиллах называется вендор c ищи]]>
+      </user_request>
+      <intent>
+        Найти описание архитектуры «Vendor C» в репозитории vless2socks и применить ее для изоляции токенов и профилей.
+      </intent>
+      <challenges_faced>
+        <challenge id="PITFALL-08">
+          <title>Коллизия учетных данных в Windows Credential Manager</title>
+          <description>
+            Claude Code CLI по умолчанию хранит токен авторизации в Windows Credential Manager под единым ключом `Claude Code-credentials`. Запуск второй копии CLI перезаписывает токен первой.
+          </description>
+          <resolution>
+            Использование переменных `CLAUDE_CONFIG_DIR` и `CLAUDE_SECURESTORAGE_CONFIG_DIR`. При их установке Claude CLI вычисляет SHA-256 хеш пути и создает независимый ключ `Claude Code-credentials-xxxxxxxx`.
+          </resolution>
+        </challenge>
+        <challenge id="PITFALL-09">
+          <title>Символ &amp; в комментариях REM командной строки Windows</title>
+          <description>
+            В батниках комментарий `REM Pre-launch &amp; Killswitch` приводит к синтаксической ошибке CMD, так как `&amp;` воспринимается как оператор склейки команд.
+          </description>
+          <resolution>
+            Исключение неэкранированных амперсандов из текстовых блоков bat-файлов.
+          </resolution>
+        </challenge>
+      </challenges_faced>
+      <executed_actions>
+        <command>Создан лаунчер C:\MyFiles\Proxy\Vendor_C_Socket_1015.bat</command>
+        <command>Создан лаунчер C:\MyFiles\Proxy\Claude_Socket_1015.bat</command>
+        <command>Интегрирован pre-launch валидатор verify_and_notify.py</command>
+        <command>Созданы ярлыки CLI_1015.lnk и Claude Code 1015.lnk с иконкой claude_gold.ico</command>
+      </executed_actions>
+      <verified_outcome>
+        Профиль 1 на сокете 1015 с изоляцией в C:\Users\Admin\.claude-1 и Killswitch успешно протестирован.
+      </verified_outcome>
+    </step>
+
+    <!-- STEP 7 -->
+    <step index="7">
+      <user_request>
+        <![CDATA[проведи тест изоляции из vless2socks - проанализируй чего еще не хватает для полной изоляции полноценной]]>
+      </user_request>
+      <intent>
+        Выполнить аудит герметичности изоляции и выявить недостающие звенья до перезагрузки хоста.
+      </intent>
+      <challenges_faced>
+        <challenge id="PITFALL-10">
+          <title>Недоступность подсистемы до ребута</title>
+          <description>
+            Попытка обращения к WSL выдала ошибку отсутствия запущенного гипервизора Windows.
+          </description>
+          <resolution>
+            Зафиксирована необходимость физической перезагрузки хоста для старта NT Hypervisor.
+          </resolution>
+        </challenge>
+      </challenges_faced>
+      <executed_actions>
+        <command>python wsl-proxy-isolation/isolation_tester.py</command>
+      </executed_actions>
+      <verified_outcome>
+        Диагностирован статус ожидания перезагрузки Windows NT.
+      </verified_outcome>
+    </step>
+
+    <!-- STEP 8 -->
+    <step index="8">
+      <user_request>
+        <![CDATA[ты можешь в папку C:\proj\vless2socks\proxys - создать инстансы гугл хрома со своими сокетами по гайдам и инструкциями в vless2socks]]>
+      </user_request>
+      <intent>
+        Сгенерировать изолированные инстансы Google Chrome для всех настроенных портов vless2socks с динамически перекрашенными иконками и раздельными каталогами профилей.
+      </intent>
+      <challenges_faced>
+        <challenge id="PITFALL-11">
+          <title>Смешивание профилей браузера и утечки сессий</title>
+          <description>
+            Если запустить chrome.exe с одним флагом `--proxy-server`, но без `--user-data-dir`, Chrome подключится к существующему окну пользователя и будет использовать прямой выход или куки основной сессии.
+          </description>
+          <resolution>
+            Для каждого порта задан уникальный изолированный каталог `--user-data-dir="%LOCALAPPDATA%\Google\Chrome\Proxy<PORT>"`.
+          </resolution>
+        </challenge>
+        <challenge id="PITFALL-12">
+          <title>Извлечение и перекраска иконок без сторонних бинарников</title>
+          <description>
+            Требовалось создать качественные многослойные ICO (16, 32, 48, 256px), соответствующие цвету прокси-ноды из vless2socks.
+          </description>
+          <resolution>
+            Разработан генератор на Python с использованием библиотеки `pefile` для извлечения RT_GROUP_ICON и RT_ICON ресурсов из `chrome.exe`, преобразования пикселей через HSV-цветовое пространство (`colorsys`) и сохранения в `ico/`.
+          </resolution>
+        </challenge>
+        <challenge id="PITFALL-13">
+          <title>Защита от опечаток путей (Typo-guard symlinks)</title>
+          <description>
+            Пользователи и скрипты часто путают папки `ink`, `link` и `lnk`.
+          </description>
+          <resolution>
+            Созданы NTFS Junctions `link -> ink` и `lnk -> ink`.
+          </resolution>
+        </challenge>
+      </challenges_faced>
+      <executed_actions>
+        <command>python C:\proj\vless2socks\generate_proxys.py</command>
+      </executed_actions>
+      <verified_outcome>
+        Создано 11 батников Chrome, 9 многослойных цветных иконок, ярлыки в `ink/`, симлинки `link/lnk` и рабочий ярлык `Proxys.lnk` на рабочем столе.
+      </verified_outcome>
+    </step>
+
+    <!-- STEP 9 -->
+    <step index="9">
+      <user_request>
+        <![CDATA[почему изоляция еще не 100%? по vless2socks проверке?]]>
+      </user_request>
+      <intent>
+        Разобрать причину статуса PARTIAL на скриншоте пользователя и довести изоляцию до 100% ISOLATED.
+      </intent>
+      <challenges_faced>
+        <challenge id="PITFALL-14">
+          <title>Дистрибутив в состоянии (None) и ошибка -1 "WSL not available"</title>
+          <description>
+            После перезагрузки хоста дистрибутив Ubuntu 24.04 из AppX не был зарегистрирован (`ubuntu2404 install --root`), поэтому `wsl -l -v` возвращал пустоту.
+          </description>
+          <resolution>
+            Выполнена автоматическая инициализация корня `ubuntu2404.exe install --root`.
+          </resolution>
+        </challenge>
+        <challenge id="PITFALL-15">
+          <title>Отсутствие пакетов nftables, iptables, curl в облачном образе Ubuntu 24.04</title>
+          <description>
+            Минимальный образ Ubuntu 24.04 не содержит утилит фильтрации netfilter. Попытки вызвать `nft` или `iptables` падали с ошибкой command not found.
+          </description>
+          <resolution>
+            Выполнен `apt-get update &amp;&amp; DEBIAN_FRONTEND=noninteractive apt-get install -y nftables iptables curl`.
+          </resolution>
+        </challenge>
+        <challenge id="PITFALL-16">
+          <title>Интерактивная блокировка dpkg на файле /etc/nftables.conf</title>
+          <description>
+            Пакетный менеджер запрашивал подтверждение перезаписи файла конфигурации на stdin.
+          </description>
+          <resolution>
+            В поток ввода передан ответ `N` для сохранения правил проекта.
+          </resolution>
+        </challenge>
+        <challenge id="PITFALL-17">
+          <title>Ложноположительный тест Direct IP Leak Test</title>
+          <description>
+            Когда дистрибутив возвращал ошибку -1, скрипт аудита проверял `if code != 0` и ошибочно рапортовал "Трафик заблокирован ядром", хотя WSL вообще не запускалась.
+          </description>
+          <resolution>
+            Устранено после полноценного старта Ubuntu и компиляции правил ядра Linux.
+          </resolution>
+        </challenge>
+      </challenges_faced>
+      <executed_actions>
+        <command>ubuntu2404.exe install --root</command>
+        <command>wsl -d Ubuntu-24.04 -u root -e bash -c "apt-get update &amp;&amp; DEBIAN_FRONTEND=noninteractive apt-get install -y nftables iptables curl"</command>
+        <command>python wsl-proxy-isolation/cli.py apply --port 1015</command>
+        <command>python wsl-proxy-isolation/cli.py test --port 1015</command>
+      </executed_actions>
+      <verified_outcome>
+        Полный аудит выдал вердикт: СТАТУС: ISOLATED (ИДЕАЛЬНАЯ ИЗОЛЯЦИЯ). Прямой выход заблокирован, выход через сокет 1015 работает (внешний IP: 2.26.149.65), DNS защищен.
+      </verified_outcome>
+    </step>
+
+    <!-- STEP 10 -->
+    <step index="10">
+      <user_request>
+        <![CDATA[теперь по образцу скиллам и описанию настрой работу cli виндовс клод для порта 1016]]>
+      </user_request>
+      <intent>
+        Настроить профиль 2 (Secondary) Claude Code CLI строго через сокет 1016 с индивидуальным каталогом настроек, разделением ключей в Credential Manager и Killswitch.
+      </intent>
+      <challenges_faced>
+        <challenge id="PITFALL-18">
+          <title>Изоляция токена профиля 2 от профиля 1</title>
+          <description>
+            Необходимо исключить перезапись OAuth токена первого аккаунта (`ligneoussarcoid@outlook.com`) вторым аккаунтом (`putativepilcrow@gmail.com`).
+          </description>
+          <resolution>
+            Задан `CLAUDE_CONFIG_DIR=C:\Users\Admin\.claude-secondary`, что принудительно создало отдельный слот хранения в Windows Credential Manager.
+          </resolution>
+        </challenge>
+      </challenges_faced>
+      <executed_actions>
+        <command>Создан файл C:\MyFiles\Proxy\Vendor_C_Socket_1016.bat</command>
+        <command>Создан файл C:\MyFiles\Proxy\Claude_Socket_1016.bat</command>
+        <command>Создана рабочая папка C:\Users\Admin\Downloads\Vendor_C_1016</command>
+        <command>Создана папка конфигурации C:\Users\Admin\.claude-secondary</command>
+        <command>Созданы ярлыки CLI_1016.lnk и Claude Code 1016.lnk на Рабочем столе и в каталогах прокси</command>
+        <command>Вызвана синхронизация python vendor_c_sync.py --port 1016</command>
+      </executed_actions>
+      <verified_outcome>
+        Команда `Vendor_C_Socket_1016.bat --version` успешно вернула `2.1.309 (Claude Code)`. Протестирован Killswitch на мертвом порту (код завершения 1, утечка пресечена).
+      </verified_outcome>
+    </step>
+
+    <!-- STEP 11 -->
+    <step index="11">
+      <user_request>
+        <![CDATA[Сохрани эту последовательность всех моих запросов в чате и корректировок в Спеку - initial_start.md skill распиши подробно все подводные камни с которыми столкнулись при установки, сформируй xml этого чата как образец на который скилл будет ссылаться. Напиши вспомогательные скрипты, которые будут делать последовательности, которые сработали в этой установке все это сложи во vless2socks папку утилиту - с сохранением логики файловой системы директорий - разбей пакеты также]]>
+      </user_request>
+      <intent>
+        Упаковать весь опыт сессии в автономную воспроизводимую спецификацию (SKILL.md), reference XML и модульный пакет скриптов автоматизации в vless2socks.
+      </intent>
+      <challenges_faced>
+        <challenge id="PITFALL-19">
+          <title>Необходимость модульного разбиения и согласованности директорий</title>
+          <description>
+            Скрипты должны сохранять логику файловой системы проекта (wsl-proxy-isolation, new_claude, proxys, setup_helpers) и выполняться как независимо, так и через единый мастер-скрипт.
+          </description>
+          <resolution>
+            Разделение на шаги: 01_build, 02_wsl_features, 03_ubuntu_core, 04_kernel_prison, 05_daemon_service, 06_claude_cli, 07_chrome_instances, 08_audit и мастер install_all.ps1.
+          </resolution>
+        </challenge>
+      </challenges_faced>
+      <executed_actions>
+        <command>Формирование chat_reference.xml</command>
+        <command>Написание спецификации-скилла initial_start.md</command>
+        <command>Создание пакета вспомогательных скриптов в setup_helpers/</command>
+      </executed_actions>
+      <verified_outcome>
+        Полный комплект документации, XML-образца и исполняемых скриптов интегрирован в состав проекта vless2socks.
+      </verified_outcome>
+    </step>
+  </steps>
+</chat_transcript>

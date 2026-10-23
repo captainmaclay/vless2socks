@@ -1,0 +1,195 @@
+{
+  "workflow_metadata": {
+    "workflow_id": "vless2socks-autonomous-deployment-v1",
+    "name": "vless2socks Autonomous Full-Stack Deployment and Hardening Workflow",
+    "version": "1.2.3",
+    "target_platform": "Windows 10/11 x64 (NT Kernel) with WSL2 Ubuntu 24.04 LTS",
+    "author": "Antigravity Engineering Pair-Programming Team",
+    "description": "Последовательность задач для запуска через оркестратор субагентов. Каждый шаг содержит точный пользовательский промпт, нормализованную инструкцию субагенту, скрипт исполнения, верификацию и обработку подводных камней.",
+    "references": {
+      "skill_specification": "skills/initial_start/SKILL.md",
+      "root_specification": "initial_start.md",
+      "chat_reference_xml": "skills/initial_start/chat_reference.xml",
+      "xshell_skill": "skills/xshell/SKILL.md",
+      "xshell_chat_history": "skills/xshell/chat_history.xml",
+      "orchestrator_guide": "WORKFLOW_ORCHESTRATOR.md"
+    }
+  },
+  "execution_sequence": [
+    {
+      "step_id": "STEP_01_BUILD_CORE",
+      "order": 1,
+      "user_request_raw": "скачай проект C:\\proj https://github.com/captainmaclay/vless2socks - собери именно сборку в папку с одноименном названием vless2socks",
+      "normalized_task_prompt": "Клонировать репозиторий vless2socks в C:\\proj\\vless2socks, переключиться на тег v1.2.3, настроить виртуальное окружение .venv, установить зависимости (pefile, pillow, pyinstaller), скачать ядро Xray-core и собрать автономный релиз vless2socks.exe и vless2socks-cli.exe через PyInstaller. Создать NTFS Junction C:\\MyFiles\\vless2socks -> C:\\proj\\vless2socks.",
+      "subagent_role": "Core Build & Release Engineer",
+      "script_runner": "setup_helpers/01_build_vless2socks.ps1",
+      "command_line": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\proj\\vless2socks\\setup_helpers\\01_build_vless2socks.ps1\"",
+      "preconditions": [
+        "Git установлен и доступен в PATH",
+        "Python 3.10+ установлен и доступен в PATH"
+      ],
+      "verification_command": "Test-Path \"C:\\proj\\vless2socks\\dist\\vless2socks\\vless2socks.exe\"; Test-Path \"C:\\MyFiles\\vless2socks\"",
+      "expected_output_pattern": "True.*True",
+      "known_pitfalls": [
+        "Ветка main не содержит модули Vendor C и WSL isolation; обязателен тег v1.2.3.",
+        "Внутренние пути жестко завязаны на C:\\MyFiles\\vless2socks; обязателен NTFS Junction."
+      ],
+      "remediation_action": "При отсутствии Xray-core запустить 'python tools/get_xray.py'. При ошибках путей пересоздать junction через New-Item -ItemType Junction."
+    },
+    {
+      "step_id": "STEP_02_ENABLE_WSL_FEATURES",
+      "order": 2,
+      "user_request_raw": "установи wsl",
+      "normalized_task_prompt": "Активировать компоненты Windows VirtualMachinePlatform и Microsoft-Windows-Subsystem-Linux, перевести BCD hypervisorlaunchtype в Auto, установить пакет Ubuntu 24.04 AppX и сконфигурировать C:\\Users\\Admin\\.wslconfig в режиме networkingMode=mirrored с dnsTunneling=true и firewall=true.",
+      "subagent_role": "Windows Kernel & Virtualization Specialist",
+      "script_runner": "setup_helpers/02_enable_wsl2_subsystem.ps1",
+      "command_line": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\proj\\vless2socks\\setup_helpers\\02_enable_wsl2_subsystem.ps1\"",
+      "preconditions": [
+        "Сессия PowerShell запущена с правами Администратора"
+      ],
+      "verification_command": "Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform | Select-Object -ExpandProperty State; Test-Path \"$env:USERPROFILE\\.wslconfig\"",
+      "expected_output_pattern": "Enabled.*True",
+      "known_pitfalls": [
+        "Драйвер виртуализации ядра Windows NT требует обязательной однократной перезагрузки ОС (ошибка 0x80370114 при запуске до ребута)."
+      ],
+      "remediation_action": "Если wsl --status выдает ошибку гипервизора, уведомить оркестратор о необходимости перезагрузки и продолжить со шага 3 после ребута."
+    },
+    {
+      "step_id": "STEP_03_INITIALIZE_UBUNTU_ROOTFS",
+      "order": 3,
+      "user_request_raw": "инициализируй дистрибутив и подготовь сетевые пакеты ядра",
+      "normalized_task_prompt": "Выполнить регистрацию корневой файловой системы дистрибутива через 'ubuntu2404.exe install --root', назначить Ubuntu-24.04 дефолтным дистрибутивом WSL и неинтерактивно установить сетевые утилиты ядра (nftables, iptables, curl) с флагом -o Dpkg::Options::=\"--force-confold\".",
+      "subagent_role": "Linux System Administrator",
+      "script_runner": "setup_helpers/03_initialize_ubuntu_environment.ps1",
+      "command_line": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\proj\\vless2socks\\setup_helpers\\03_initialize_ubuntu_environment.ps1\"",
+      "preconditions": [
+        "Хост перезагружен, гипервизор WSL2 активен",
+        "Пакет Ubuntu 24.04 AppX зарегистрирован в WindowsApps"
+      ],
+      "verification_command": "wsl.exe -d Ubuntu-24.04 -u root -e bash -c \"which nft && which iptables && which curl\"",
+      "expected_output_pattern": "/usr/sbin/nft.*/usr/sbin/iptables.*/usr/bin/curl",
+      "known_pitfalls": [
+        "Минимальный образ Ubuntu 24.04 не содержит nftables/iptables из коробки.",
+        "dpkg может зависнуть на stdin с вопросом о перезаписи /etc/nftables.conf; требуется неинтерактивный режим."
+      ],
+      "remediation_action": "Использовать 'DEBIAN_FRONTEND=noninteractive' и ключ '--force-confold'."
+    },
+    {
+      "step_id": "STEP_04_LOCKDOWN_WSL_KERNEL_PRISON",
+      "order": 4,
+      "user_request_raw": "теперь изолируй wsl на 1015 сокет как по инструкции во vless",
+      "normalized_task_prompt": "Скомпилировать и загрузить в ядро Linux правила netfilter таблицы herdr_filter: разрешить только loopback (lo и loopback0 для mirrored mode), заблокировать порт обхода 2080, отсечь весь прямой трафик WAN/LAN (counter reject). Записать ALL_PROXY='socks5h://127.0.0.1:1015' в /etc/profile.d/ и зафиксировать автозапуск в /etc/wsl.conf.",
+      "subagent_role": "Netfilter & Network Prison Hardener",
+      "script_runner": "setup_helpers/04_lockdown_wsl_kernel_prison.ps1",
+      "command_line": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\proj\\vless2socks\\setup_helpers\\04_lockdown_wsl_kernel_prison.ps1\" -Port 1015",
+      "preconditions": [
+        "Шаг 3 выполнен, nftables установлен в Ubuntu 24.04",
+        "vless2socks ядро слушает порт 127.0.0.1:1015"
+      ],
+      "verification_command": "wsl.exe -d Ubuntu-24.04 -u root -e bash -c \"nft list table inet herdr_filter 2>/dev/null | grep -E '(loopback0|reject)'\"",
+      "expected_output_pattern": "loopback0.*reject",
+      "known_pitfalls": [
+        "В режиме Mirrored Network блокировка loopback0 ломает доступ к Windows хосту.",
+        "Обычный socks5:// вызывает локальные DNS-утечки; обязателен socks5h://."
+      ],
+      "remediation_action": "При падении правил перезапустить 'python wsl-proxy-isolation/cli.py apply --port 1015'."
+    },
+    {
+      "step_id": "STEP_05_REGISTER_BOOT_DAEMON",
+      "order": 5,
+      "user_request_raw": "сделай так чтобы wsl сразу после старта запускала тюрьму изоляцию автоматом -без включения ручного - всегда при старте, перезагрузке wsl включалась изоляция",
+      "normalized_task_prompt": "Зарегистрировать задачу в Планировщике Windows WSL_AutoIsolation_Guard, выполняющую auto_isolate_daemon.ps1 при входе пользователя с наивысшими правами. Обеспечить корректное мультилокальное распознавание статуса WSL на русских и английских сборках Windows.",
+      "subagent_role": "Windows Automation & Task Scheduler Engineer",
+      "script_runner": "setup_helpers/05_register_auto_isolation_daemon.ps1",
+      "command_line": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\proj\\vless2socks\\setup_helpers\\05_register_auto_isolation_daemon.ps1\"",
+      "preconditions": [
+        "Скрипт auto_isolate_daemon.ps1 существует в wsl-proxy-isolation/"
+      ],
+      "verification_command": "Get-ScheduledTask -TaskName \"WSL_AutoIsolation_Guard\" | Select-Object -ExpandProperty State",
+      "expected_output_pattern": "Ready",
+      "known_pitfalls": [
+        "Парсер статуса WSL зависает, если ожидает английскую строку 2.[0-9]; в русской Windows выводится 'Версия по умолчанию: 2'."
+      ],
+      "remediation_action": "Регулярное выражение должно проверять -match '2' -or -match 'Ubuntu' -or -match 'Версия'."
+    },
+    {
+      "step_id": "STEP_06_SETUP_CLAUDE_CLI_1015_AND_1016",
+      "order": 6,
+      "user_request_raw": "установи claude code cli для виндовс - настрой работу через 1015 исключительно по киллсвитч клиент эту работу настрой через скилы описания vless2socks / в описании и скиллах называется вендор c ищи / теперь по образцу скиллам и описанию настрой работу cli виндовс клод для порта 1016",
+      "normalized_task_prompt": "Развернуть Node.js LTS и @anthropic-ai/claude-code. Сформировать лаунчеры Vendor_C_Socket_1015.bat и Vendor_C_Socket_1016.bat с пре-лаунч валидацией verify_and_notify.py (Killswitch). Изолировать конфигурации в .claude-1 и .claude-secondary для предотвращения перезаписи ключей в Windows Credential Manager. Создать ярлыки с золотыми иконками claude_gold.ico на Рабочем столе и в Proxy\\ink.",
+      "subagent_role": "CLI Process Isolation & Security Specialist",
+      "script_runner": "setup_helpers/06_setup_vendor_c_claude_cli.ps1",
+      "command_line": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\proj\\vless2socks\\setup_helpers\\06_setup_vendor_c_claude_cli.ps1\"",
+      "preconditions": [
+        "Сокеты 1015 и 1016 активны в instances.json",
+        "Python venv содержит Pillow"
+      ],
+      "verification_command": "cmd.exe /c \"C:\\MyFiles\\Proxy\\Vendor_C_Socket_1015.bat --version\"; cmd.exe /c \"C:\\MyFiles\\Proxy\\Vendor_C_Socket_1016.bat --version\"",
+      "expected_output_pattern": "2\\.[0-9]+\\.[0-9]+ \\(Claude Code\\).*2\\.[0-9]+\\.[0-9]+ \\(Claude Code\\)",
+      "known_pitfalls": [
+        "Windows Credential Manager затирает токен первого аккаунта, если не заданы уникальные CLAUDE_CONFIG_DIR.",
+        "Амперсанд & в комментариях REM батников приводит к аварийному завершению CMD."
+      ],
+      "remediation_action": "Использовать CLAUDE_CONFIG_DIR и экранировать специальные символы в батниках."
+    },
+    {
+      "step_id": "STEP_07_GENERATE_CHROME_PROXYS",
+      "order": 7,
+      "user_request_raw": "ты можешь в папку C:\\proj\\vless2socks\\proxys - создать инстансы гугл хрома со своими сокетами по гайдам и инструкциями в vless2socks",
+      "normalized_task_prompt": "Сгенерировать изолированные инстансы Google Chrome для всех настроенных портов (1015, 1016, 1020, 1021, 1030, 1080-1085). Для каждого инстанса задать --user-data-dir и --proxy-server. Извлечь иконки из chrome.exe через pefile, перекрасить в цвета нод по HSV, разложить в ico/, ink/ и создать типобезопасные симлинки link/lnk -> ink и ярлык Proxys.lnk на Рабочем столе.",
+      "subagent_role": "Browser Isolation & GUI Asset Engineer",
+      "script_runner": "setup_helpers/07_generate_chrome_instances.py",
+      "command_line": "& \"C:\\proj\\vless2socks\\.venv\\Scripts\\python.exe\" \"C:\\proj\\vless2socks\\setup_helpers\\07_generate_chrome_instances.py\"",
+      "preconditions": [
+        "Google Chrome установлен в Program Files",
+        "pefile и Pillow установлены в .venv"
+      ],
+      "verification_command": "Get-ChildItem -Path \"C:\\proj\\vless2socks\\proxys\\*.bat\" | Measure-Object | Select-Object -ExpandProperty Count; Test-Path \"C:\\Users\\Admin\\Desktop\\Proxys.lnk\"",
+      "expected_output_pattern": "11.*True",
+      "known_pitfalls": [
+        "Без флага --user-data-dir Chrome объединяет окна и пускает трафик в обход прокси.",
+        "Стандартные ярлыки с 1 слоем размываются; требуются слои 16, 32, 48, 256px."
+      ],
+      "remediation_action": "Запустить 07_generate_chrome_instances.py повторно для регенерации поврежденных ярлыков."
+    },
+    {
+      "step_id": "STEP_08_FULL_SECURITY_AUDIT",
+      "order": 8,
+      "user_request_raw": "проведи тест изоляции из vless2socks - проанализируй чего еще не хватает для полной изоляции полноценной / почему изоляция еще не 100%? по vless2socks проверке?",
+      "normalized_task_prompt": "Запустить комплексный аудит герметичности изоляции ядра (SOCKS5 handshake, HTTP CONNECT, проверка правил nftables herdr_filter, тест прямого выхода Direct IP Leak Test, удаленный резолвинг DNS socks5h, блокировка обходного порта 2080). Подтвердить получение финального вердикта '100% ISOLATED (ИДЕАЛЬНАЯ ИЗОЛЯЦИЯ)'.",
+      "subagent_role": "Perimeter Security & Penetration Audit Specialist",
+      "script_runner": "setup_helpers/08_run_full_isolation_audit.ps1",
+      "command_line": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\proj\\vless2socks\\setup_helpers\\08_run_full_isolation_audit.ps1\" -Port 1015",
+      "preconditions": [
+        "vless2socks запущен и активен сокет 1015",
+        "Шаги 1-7 выполнены"
+      ],
+      "verification_command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\proj\\vless2socks\\setup_helpers\\08_run_full_isolation_audit.ps1\" -Port 1015",
+      "expected_output_pattern": "\\[VERDICT: 100% ISOLATED\\]",
+      "known_pitfalls": [
+        "Если дистрибутив остановлен в режиме ожидания, первый вызов может дать Wsl/Service/E_UNEXPECTED; требуется прогрев wsl -e echo 'ready'."
+      ],
+      "remediation_action": "Выполнить прогрев подсистемы через wsl -d Ubuntu-24.04 -e true и повторить тест."
+    },
+    {
+      "step_id": "STEP_09_SETUP_XSHELL_INTEGRATION",
+      "order": 9,
+      "user_request_raw": "Добавь интеграцию NetSarang Xshell 8: документацию, решение ошибки 40004 nslicense.dll, генерацию UTF-16 LE SOCKS5 INI, шифрование сессий ARC4+SHA256 и CLI-утилиту в setup_helpers.xshell",
+      "normalized_task_prompt": "Интегрировать пакет setup_helpers.xshell, документировать решение ошибки 40004 в nslicense.dll (RVA 0x3450), изоляцию станций WinSta0\\default, генерацию UTF-16 LE SOCKS5 INI в Common\\Proxy, шифрование паролей сессий по алгоритму ((Username[::-1] + SID)[::-1] -> SHA256 -> ARC4 + SHA256 Checksum) и создать меню setup_xshell.bat.",
+      "subagent_role": "Enterprise Terminal Integration & Cryptography Engineer",
+      "script_runner": "setup_helpers/setup_xshell.bat",
+      "command_line": "python -m setup_helpers.xshell.cli set-proxy --port 1030 --host 127.0.0.1",
+      "preconditions": [
+        "Python venv активен",
+        "Пакет setup_helpers.xshell существует"
+      ],
+      "verification_command": "Test-Path \"C:\\proj\\vless2socks\\skills\\xshell\\SKILL.md\"; Test-Path \"C:\\proj\\vless2socks\\setup_helpers\\xshell\\cli.py\"",
+      "expected_output_pattern": "True.*True",
+      "known_pitfalls": [
+        "Прямой запуск msiexec /i 'Xshell 8.msi' без InstallScript обходит nslicense.dll и вызывает фатальную ошибку 40004.",
+        "Формат INI прокси в Xshell строго требует кодировку UTF-16 LE с BOM (0xFF, 0xFE)."
+      ],
+      "remediation_action": "Использовать setup_helpers.xshell.shortcuts для исправления ярлыков и setup_helpers.xshell.proxy для генерации валидного UTF-16 LE файла."
+    }
+  ]
+}

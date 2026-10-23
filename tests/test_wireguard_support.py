@@ -197,6 +197,8 @@ class WireGuardXrayConfigTest(unittest.TestCase):
         # The catch-all fallback rule would swallow domains unless they are resolved at the IP rule
         self.assertEqual(split["routing"]["domainStrategy"], "IPOnDemand")
         self.assertIn(split["dns"]["tag"], rules[1]["inboundTag"])
+        # Domains must reach WireGuard as IPs: its in-tunnel resolver can't reach public DNS
+        self.assertEqual(by_tag["proxy"]["targetStrategy"], "ForceIPv4")
 
         # No fallback configured, a full-tunnel profile, or a fallback pointing at itself: routing stays as before
         for cfg in (
@@ -206,6 +208,7 @@ class WireGuardXrayConfigTest(unittest.TestCase):
         ):
             self.assertNotIn("fallback", [o["tag"] for o in cfg["outbounds"]])
             self.assertNotIn("dns", cfg)
+            self.assertNotIn("targetStrategy", cfg["outbounds"][0])
             self.assertEqual(cfg["routing"]["rules"][0]["outboundTag"], "proxy")
             self.assertNotIn("ip", cfg["routing"]["rules"][0])
 

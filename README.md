@@ -407,6 +407,40 @@ vless2socks comes integrated with custom autonomous skills designed for Google D
   - **Pre-Launch IP Verification & Mac UI Toast:** [`verify_and_notify.py`](new_claude/verify_and_notify.py) checks outbound SOCKS5 IP against target node before launch, showing macOS-styled 4s/5s fadeout toasts.
   - **Automated Provisioning:** One-click deployment of new instances via [`add_vendor_c_gui_instance.py`](new_claude/add_vendor_c_gui_instance.py) and [`add_vendor_c_cli_instance.py`](new_claude/add_vendor_c_cli_instance.py).
 
+### 5. `initial-start` — Autonomous Full-Stack Deployment, WSL2 Hardening & Subagent Workflow
+- **Starter Prompt & Guide:** [`0_HowToInstall.txt`](0_HowToInstall.txt)
+- **Full Specification:** [`skills/initial_start/SKILL.md`](skills/initial_start/SKILL.md) & [`initial_start.md`](initial_start.md)
+- **Subagent Workflow & Orchestrator:** [`WORKFLOW_ORCHESTRATOR.md`](WORKFLOW_ORCHESTRATOR.md) & [`workflow_sequence.json`](workflow_sequence.json)
+- **Machine-Readable Trajectory (XML):** [`skills/initial_start/chat_reference.xml`](skills/initial_start/chat_reference.xml)
+- **Automation Package:** [`setup_helpers/`](setup_helpers/) (`01` to `08`, [`install_all.ps1`](install_all.ps1))
+- **Key Modules & Solved Pitfalls:**
+  - Automated build from source (Git tag `v1.2.3`), Xray fetch, and `C:\MyFiles\vless2socks` NTFS junction.
+  - Mirrored network mode WSL2 setup with non-interactive kernel packages (`nftables`, `iptables`, `curl`).
+  - Strict netfilter network jail (`lo`/`loopback0` only, reject WAN/LAN, bypass port 2080 drop).
+  - Autonomous boot guard in Windows Task Scheduler (`WSL_AutoIsolation_Guard`) with multi-locale parsing (Russian/English).
+  - Multi-profile Vendor C Claude Code CLI (ports 1015 & 1016) with Killswitch (`verify_and_notify.py`) and Windows Credential Manager key isolation (`.claude-1`, `.claude-secondary`).
+  - Multi-profile Google Chrome instances with HSV-recolored ICOs and typo-proof junctions (`link/lnk -> ink`).
+  - Full perimeter penetration audit yielding **100% ISOLATED** verdict.
+
+### 6. `xshell` — NetSarang Xshell 8 SOCKS5 Integration & Session Cryptography
+- **Full Specification:** [`skills/xshell/SKILL.md`](skills/xshell/SKILL.md)
+- **Machine-Readable Trajectory (XML):** [`skills/xshell/chat_history.xml`](skills/xshell/chat_history.xml)
+- **Automation Package:** [`setup_helpers/xshell/`](setup_helpers/xshell/) & [`setup_helpers/setup_xshell.bat`](setup_helpers/setup_xshell.bat)
+- **Key Solutions & Reverse-Engineering:**
+  - Circumvention of InstallScript bypass (msiexec raw install error 40004 in `nslicense.dll` RVA 0x3450) and repair of empty `TargetPath` / `SHELL_OBJECT_FOLDER`.
+  - Background WinSta0\default desktop isolation handling via `SetThreadDesktop`.
+  - UTF-16 LE BOM SOCKS5 proxy INI generation (`Documents\NetSarang Computer\8\Common\Proxy\SOCKS5_<PORT>.ini`) with registry mirror and `default.xshf` template binding.
+  - NetSarang v7/v8 ARC4 session password encryption via reverse Username+SID KDF.
+
+### 7. `github_safe_push` — Security Sanitation & Safe GitHub Push Protocol
+- **Full Specification:** [`skills/github_safe_push/SKILL.md`](skills/github_safe_push/SKILL.md)
+- **Automation Script:** [`setup_helpers/git_safe_push.ps1`](setup_helpers/git_safe_push.ps1)
+- **Mandatory Policy (Review Every Push):** Before performing **every push**, agents and developers **must review and update this skill** to verify that no new sensitive files, API tokens, `.env` configs, or private credentials are inadvertently committed.
+- **Key Protections:**
+  - In-memory credential forwarding preventing token persistence in `.git/config` or shell history.
+  - Pre-push automated scanning against prohibited configuration targets (`instances.json`, `config.json`, `.env`, `vendor_c_accounts.json`).
+  - Strict preservation of untracked personal session files while deploying all public skills, tests, and setup helpers.
+
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
@@ -708,6 +742,40 @@ dist/
   - **Интеграция с GNOME Keyring:** Автоматический провижининг беспарольного `login.keyring` и запуск с `--password-store=gnome-libsecret` через `init_wsl_keyring.sh` для поддержки штатного системного шифрования.
   - **Защита от сетевых утечек и Mac UI уведомления:** Модуль [`verify_and_notify.py`](new_claude/verify_and_notify.py) сверяет исходящий IP перед стартом, отображая стильное плавающее окно (неблокирующие 4 сек при успехе, блокирующие 5 сек при ошибке).
   - **Развертывание в одну команду:** Автоматическая генерация новых GUI и CLI инстансов скриптами [`add_vendor_c_gui_instance.py`](new_claude/add_vendor_c_gui_instance.py) и [`add_vendor_c_cli_instance.py`](new_claude/add_vendor_c_cli_instance.py).
+
+### 5. `initial-start` — Автономное развертывание, изоляция WSL2 и оркестрация субагентов
+- **Стартовый промпт и руководство:** [`0_HowToInstall.txt`](0_HowToInstall.txt)
+- **Полная спецификация:** [`skills/initial_start/SKILL.md`](skills/initial_start/SKILL.md) и [`initial_start.md`](initial_start.md)
+- **Оркестратор субагентов:** [`WORKFLOW_ORCHESTRATOR.md`](WORKFLOW_ORCHESTRATOR.md) и [`workflow_sequence.json`](workflow_sequence.json)
+- **Машиночитаемый XML-лог траектории:** [`skills/initial_start/chat_reference.xml`](skills/initial_start/chat_reference.xml)
+- **Модульные скрипты:** [`setup_helpers/`](setup_helpers/) (`01`–`08`, мастер-скрипт [`install_all.ps1`](install_all.ps1))
+- **Решенные задачи и 19 подводных камней:**
+  - Автоматическая сборка из Git-тега `v1.2.3`, загрузка Xray, создание NTFS Junction `C:\MyFiles\vless2socks`.
+  - Mirrored Network режим WSL2 с неинтерактивной установкой пакетов ядра (`nftables`, `iptables`, `curl`).
+  - Тюрьма netfilter в ядре Linux (только `lo`/`loopback0`, безусловный reject WAN/LAN, блок обхода 2080).
+  - Демон автозапуска в Планировщике Windows (`WSL_AutoIsolation_Guard`) с поддержкой русской локали `wsl --status`.
+  - Изоляция профилей Claude Code CLI (1015 и 1016) с Killswitch (`verify_and_notify.py`) и раздельными слотами в Windows Credential Manager (`.claude-1`, `.claude-secondary`).
+  - Генерация 11 профилей Google Chrome со своими цветными ICO из `chrome.exe` и защитой от опечаток (`link/lnk -> ink`).
+  - Комплексный аудит периметра с получением финального вердикта **100% ISOLATED**.
+
+### 6. `xshell` — Интеграция NetSarang Xshell 8 с SOCKS5 и криптографией сессий
+- **Полная спецификация:** [`skills/xshell/SKILL.md`](skills/xshell/SKILL.md)
+- **Машиночитаемый XML-лог (реверс-инжиниринг):** [`skills/xshell/chat_history.xml`](skills/xshell/chat_history.xml)
+- **Пакет автоматизации:** [`setup_helpers/xshell/`](setup_helpers/xshell/) и меню [`setup_helpers/setup_xshell.bat`](setup_helpers/setup_xshell.bat)
+- **Инженерные решения:**
+  - Обход InstallScript при запуске MSI (ошибка 40004 в `nslicense.dll` RVA 0x3450), восстановление `TargetPath` ярлыков и чистка `SHELL_OBJECT_FOLDER`.
+  - Запуск GUI-инсталлятора из фоновых сессий с привязкой к интерактивному десктопу `WinSta0\default` через `SetThreadDesktop`.
+  - Генерация SOCKS5 INI в кодировке UTF-16 LE с BOM (`Documents\NetSarang Computer\8\Common\Proxy\SOCKS5_<PORT>.ini`), синхронизация с реестром и привязка к `default.xshf`.
+  - KDF и шифрование паролей сессий по алгоритму NetSarang v7/v8: `((Username[::-1] + SID)[::-1] -> SHA256 -> ARC4 + Checksum)`.
+
+### 7. `github_safe_push` — Протокол безопасного пуша на GitHub и аудит утечек
+- **Полная спецификация:** [`skills/github_safe_push/SKILL.md`](skills/github_safe_push/SKILL.md)
+- **Скрипт автоматизации:** [`setup_helpers/git_safe_push.ps1`](setup_helpers/git_safe_push.ps1)
+- **Обязательное правило перед каждым пушем:** Агент или разработчик **обязан перед каждым пушем заглядывать в данный скилл и дополнять его** в связи с текущими обновлениями, проверяя отсутствие в коммитах новых чувствительных файлов, ключей, персональных токенов и конфигураций.
+- **Ключевые защитные механизмы:**
+  - Передача токена доступа исключительно через оперативную память процесса без сохранения в `.git/config` или истории терминала.
+  - Пре-коммит сканирование на наличие запрещенных файлов (`instances.json`, `config.json`, `.env`, `vendor_c_accounts.json`).
+  - Сохранение в публичный репозиторий всех скиллов, тестов и скриптов с гарантией неразглашения приватных данных.
 
 ## Лицензия
 
