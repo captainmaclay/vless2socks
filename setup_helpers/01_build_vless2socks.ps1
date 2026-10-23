@@ -14,8 +14,12 @@ if (-not (Test-Path $root)) {
 
 Set-Location $root
 
-Write-Host "[+] Ensuring repository is on tag v1.2.3 (contains Vendor C & WSL Isolation modules)..." -ForegroundColor Yellow
-git checkout v1.2.3
+Write-Host "[+] Ensuring repository is on release tag v1.2.4 or main..." -ForegroundColor Yellow
+if ((git tag -l "v1.2.4")) {
+    git checkout v1.2.4
+} else {
+    git checkout main
+}
 
 # Virtual environment setup
 $venvDir = Join-Path $root ".venv"

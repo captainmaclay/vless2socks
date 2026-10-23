@@ -2,7 +2,7 @@
   "workflow_metadata": {
     "workflow_id": "vless2socks-autonomous-deployment-v1",
     "name": "vless2socks Autonomous Full-Stack Deployment and Hardening Workflow",
-    "version": "1.2.3",
+    "version": "1.2.4",
     "target_platform": "Windows 10/11 x64 (NT Kernel) with WSL2 Ubuntu 24.04 LTS",
     "author": "Antigravity Engineering Pair-Programming Team",
     "description": "Последовательность задач для запуска через оркестратор субагентов. Каждый шаг содержит точный пользовательский промпт, нормализованную инструкцию субагенту, скрипт исполнения, верификацию и обработку подводных камней.",
