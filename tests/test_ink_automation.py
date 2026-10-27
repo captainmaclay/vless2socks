@@ -113,6 +113,18 @@ class InkAutomationTestCase(unittest.TestCase):
         ports = load_instances_ports(mock_json)
         self.assertEqual(ports, [1015, 1030, 1085])
 
+    def test_load_instances_ports_from_dir(self):
+        """Tests loading ports from instances/ directory with .instance_*.json files."""
+        inst_dir = os.path.join(self.temp_dir, "instances")
+        os.makedirs(inst_dir, exist_ok=True)
+        with open(os.path.join(inst_dir, ".instance_0.json"), "w", encoding="utf-8") as f:
+            json.dump({"listen": "127.0.0.1:1015"}, f)
+        with open(os.path.join(inst_dir, ".instance_1.json"), "w", encoding="utf-8") as f:
+            json.dump({"listen": "127.0.0.1:1085"}, f)
+
+        ports = load_instances_ports(inst_dir)
+        self.assertEqual(ports, [1015, 1085])
+
     def test_ensure_folder_aliases(self):
         """Tests junction/folder alias creation for ink, link, and lnk."""
         ensure_folder_aliases(self.temp_dir, "ink")

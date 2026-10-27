@@ -40,6 +40,7 @@ COLOR_HUES = {
 PORT_THEMES = {
     1015: ("terracotta", "Claude GUI (Socket 1015)"),
     1016: ("gold", "Claude Code GUI 2 (Socket 1016)"),
+    1017: ("gold", "Claude Code GUI 3 (Socket 1017)"),
     1020: ("purple", "Russia-0.1 1020"),
     1021: ("orange", "02-Russia 1021"),
     1030: ("blue", "WorProxy 1030"),

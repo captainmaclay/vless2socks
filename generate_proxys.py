@@ -181,6 +181,84 @@ def build_ico(frames, theme, out_path):
     base.save(out_path, format='ICO', sizes=sizes, append_images=append_list)
     print(f"Saved {out_path}")
 
+def discover_instances(proj_dir):
+    DEFAULT_SOCKET_THEMES = {
+        1015: "gold",    # System Proxy (Amber Gold)
+        1016: "gold",    # System Proxy 2 (Amber Gold)
+        1017: "gold",    # System Proxy 3 (Amber Gold)
+        1030: "blue",    # WorkProxy (Royal Blue)
+        1020: "purple",  # Russia-0.1 (Violet Purple)
+        1021: "orange",  # 02-Russia (Vivid Orange)
+        1080: "cyan",    # Cyan / Turquoise
+        1081: "black",   # Charcoal Black
+        1082: "green",   # Emerald Green
+        1083: "red",     # Ruby Red
+        1084: "cyan",    # Turquoise Cyan
+        1085: "pink",    # Rose Pink
+    }
+    ROTATION_THEMES = ["cyan", "green", "orange", "purple", "red", "pink", "blue", "gold", "black"]
+
+    instances = {}
+
+    # 1. Look in instances/.instance_*.json
+    instances_dir = os.path.join(proj_dir, "instances")
+    if os.path.isdir(instances_dir):
+        for fn in sorted(os.listdir(instances_dir)):
+            if fn.startswith(".instance_") and fn.endswith(".json"):
+                fp = os.path.join(instances_dir, fn)
+                try:
+                    with open(fp, "r", encoding="utf-8") as f:
+                        d = json.load(f)
+                    listen = d.get("listen", "")
+                    if ":" in listen:
+                        port = int(listen.split(":")[-1])
+                        name = d.get("name", "")
+                        instances[port] = name
+                except Exception:
+                    pass
+
+    # 2. Look in instances.json
+    inst_json = os.path.join(proj_dir, "instances.json")
+    if os.path.isfile(inst_json):
+        try:
+            with open(inst_json, "r", encoding="utf-8") as f:
+                for d in json.load(f):
+                    listen = d.get("listen", "")
+                    if ":" in listen:
+                        port = int(listen.split(":")[-1])
+                        if port not in instances:
+                            instances[port] = d.get("name", "")
+        except Exception:
+            pass
+
+    # 3. Look in config.json
+    cfg_json = os.path.join(proj_dir, "config.json")
+    if os.path.isfile(cfg_json):
+        try:
+            with open(cfg_json, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            listen = d.get("listen", "")
+            if ":" in listen:
+                port = int(listen.split(":")[-1])
+                if port not in instances:
+                    instances[port] = d.get("name", "")
+        except Exception:
+            pass
+
+    if not instances:
+        for p in [1015, 1016, 1030, 1020, 1021, 1080, 1081, 1082, 1083, 1084, 1085]:
+            instances[p] = ""
+
+    proxies = []
+    for port in sorted(instances.keys()):
+        theme = DEFAULT_SOCKET_THEMES.get(port, ROTATION_THEMES[(port - 1080) % len(ROTATION_THEMES)])
+        label = f"Chrome Socket {port}"
+        profile = f"Proxy{port}"
+        ico_file = f"chrome_{theme}.ico"
+        proxies.append((port, label, profile, theme, ico_file))
+
+    return proxies
+
 def main():
     target_dir = r"C:\proj\vless2socks\proxys"
     myfiles_dir = r"C:\MyFiles\Proxy"
@@ -190,26 +268,27 @@ def main():
 
     ico_dir = os.path.join(target_dir, "ico")
     ink_dir = os.path.join(target_dir, "ink")
+    myfiles_ico_dir = os.path.join(myfiles_dir, "ico")
+    myfiles_ink_dir = os.path.join(myfiles_dir, "ink")
+
     os.makedirs(ico_dir, exist_ok=True)
     os.makedirs(ink_dir, exist_ok=True)
+    os.makedirs(myfiles_ico_dir, exist_ok=True)
+    os.makedirs(myfiles_ink_dir, exist_ok=True)
 
     orig_frames = extract_original_frames()
     print("Extracted original chrome.exe frames.")
 
-    # All primary proxies with specific themes and labels
-    core_proxies = [
-        (1015, "Chrome Socket 1015", "Proxy1015", "gold",   "chrome_gold.ico"),
-        (1016, "Chrome Socket 1016", "Proxy1016", "gold",   "chrome_gold.ico"),
-        (1030, "Chrome Socket 1030", "Proxy1030", "blue",   "chrome_blue.ico"),
-        (1020, "Chrome Socket 1020", "Proxy1020", "purple", "chrome_purple.ico"),
-        (1021, "Chrome Socket 1021", "Proxy1021", "orange", "chrome_orange.ico"),
-        (1080, "Chrome Socket 1080", "Proxy1080", "cyan",   "chrome_cyan.ico"),
-        (1081, "Chrome Socket 1081", "Proxy1081", "black",  "chrome_black.ico"),
-        (1082, "Chrome Socket 1082", "Proxy1082", "green",  "chrome_green.ico"),
-        (1083, "Chrome Socket 1083", "Proxy1083", "red",    "chrome_red.ico"),
-        (1084, "Chrome Socket 1084", "Proxy1084", "cyan",   "chrome_cyan.ico"),
-        (1085, "Chrome Socket 1085", "Proxy1085", "pink",   "chrome_pink.ico"),
-    ]
+    proj_dir = os.path.abspath(os.path.dirname(__file__))
+    if not os.path.isdir(os.path.join(proj_dir, "instances")):
+        proj_parent = os.path.abspath(os.path.join(proj_dir, ".."))
+        if os.path.isdir(os.path.join(proj_parent, "instances")):
+            proj_dir = proj_parent
+        else:
+            proj_dir = r"C:\proj\vless2socks"
+
+    core_proxies = discover_instances(proj_dir)
+    print(f"Discovered {len(core_proxies)} proxy instances.")
 
     # Generate or refresh unique colored icons
     themes_generated = set()
@@ -219,7 +298,6 @@ def main():
             build_ico(orig_frames, theme, ico_path)
             # Also copy to C:\MyFiles\Proxy\ico for compatibility
             myfiles_ico = os.path.join(myfiles_dir, "ico", ico_file)
-            os.makedirs(os.path.dirname(myfiles_ico), exist_ok=True)
             build_ico(orig_frames, theme, myfiles_ico)
             themes_generated.add(theme)
 
@@ -244,7 +322,10 @@ start "" "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --proxy-se
         "$wsh = New-Object -ComObject WScript.Shell",
         f"$targetDir = '{target_dir}'",
         f"$inkDir = '{ink_dir}'",
-        f"$icoDir = '{ico_dir}'"
+        f"$icoDir = '{ico_dir}'",
+        f"$myfilesDir = '{myfiles_dir}'",
+        f"$myfilesInkDir = '{myfiles_ink_dir}'",
+        f"$myfilesIcoDir = '{myfiles_ico_dir}'"
     ]
 
     for port, label, profile, theme, ico_file in core_proxies:
@@ -269,6 +350,26 @@ start "" "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --proxy-se
         ps_lines.append(f"$scRoot.Description = \"Google Chrome via SOCKS5 127.0.0.1:{port}\"")
         ps_lines.append(f"$scRoot.Save()")
 
+        # Shortcut in myfiles ink/
+        ps_lines.append(f"$myfilesLnk = [System.IO.Path]::Combine($myfilesInkDir, '{label}.lnk')")
+        ps_lines.append(f"$myfilesBat = [System.IO.Path]::Combine($myfilesDir, '{bat_name}')")
+        ps_lines.append(f"$myfilesIco = [System.IO.Path]::Combine($myfilesIcoDir, '{ico_file}')")
+        ps_lines.append(f"$scMf = $wsh.CreateShortcut($myfilesLnk)")
+        ps_lines.append(f"$scMf.TargetPath = $myfilesBat")
+        ps_lines.append(f"$scMf.WorkingDirectory = $myfilesDir")
+        ps_lines.append(f"$scMf.IconLocation = \"$myfilesIco,0\"")
+        ps_lines.append(f"$scMf.Description = \"Google Chrome via SOCKS5 127.0.0.1:{port}\"")
+        ps_lines.append(f"$scMf.Save()")
+
+    # Desktop shortcut Proxys.lnk
+    ps_lines.append(f"$deskLnk = [System.IO.Path]::Combine([Environment]::GetFolderPath('Desktop'), 'Proxys.lnk')")
+    ps_lines.append(f"$scDesk = $wsh.CreateShortcut($deskLnk)")
+    ps_lines.append(f"$scDesk.TargetPath = '{target_dir}'")
+    ps_lines.append(f"$scDesk.WorkingDirectory = '{target_dir}'")
+    ps_lines.append(f"$deskIco = [System.IO.Path]::Combine($icoDir, 'chrome_cyan.ico')")
+    ps_lines.append(f"$scDesk.IconLocation = \"$deskIco,0\"")
+    ps_lines.append(f"$scDesk.Save()")
+
     ps_script_path = os.path.join(target_dir, "create_shortcuts.ps1")
     with open(ps_script_path, "w", encoding="utf-8-sig") as f:
         f.write("\r\n".join(ps_lines))
@@ -281,15 +382,17 @@ start "" "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --proxy-se
     if os.path.exists(ps_script_path):
         os.remove(ps_script_path)
 
-    # Typo protection junctions (link -> ink, lnk -> ink)
-    for alias in ("link", "lnk"):
-        alias_path = os.path.join(target_dir, alias)
-        if not os.path.exists(alias_path):
-            try:
-                subprocess.run(f'cmd /c mklink /J "{alias_path}" "{ink_dir}"', shell=True)
-                print(f"Created junction: {alias_path} -> {ink_dir}")
-            except Exception as e:
-                print(f"Junction error: {e}")
+    # Typo protection junctions (link -> ink, lnk -> ink) in both target_dir and myfiles_dir
+    for base_d in (target_dir, myfiles_dir):
+        base_ink = os.path.join(base_d, "ink")
+        for alias in ("link", "lnk"):
+            alias_path = os.path.join(base_d, alias)
+            if not os.path.exists(alias_path):
+                try:
+                    subprocess.run(f'cmd /c mklink /J "{alias_path}" "{base_ink}"', shell=True)
+                    print(f"Created junction: {alias_path} -> {base_ink}")
+                except Exception as e:
+                    print(f"Junction error: {e}")
 
     subprocess.run(["ie4uinit.exe", "-show"])
     print("\n[SUCCESS] Successfully generated all Chrome instances in C:\\proj\\vless2socks\\proxys!")

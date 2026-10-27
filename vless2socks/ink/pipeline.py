@@ -24,9 +24,12 @@ DEFAULT_WORKSPACE_DIR = r"C:\MyFiles\Proxy"
 # Default theme assignments based on socket / role
 DEFAULT_SOCKET_THEMES: Dict[int, str] = {
     1015: "gold",    # System Proxy (Amber Gold)
-    1030: "blue",    # WorProxy (Royal Blue)
+    1016: "gold",    # System Proxy 2 (Amber Gold)
+    1017: "gold",    # System Proxy 3 (Amber Gold)
+    1030: "blue",    # WorkProxy (Royal Blue)
     1020: "purple",  # Russia-0.1 (Violet Purple)
     1021: "orange",  # 02-Russia (Vivid Orange)
+    1080: "cyan",    # Cyan / Turquoise
     1081: "black",   # FI FINLAND 3 (Charcoal Black)
     1082: "green",   # FI FINLAND 4 (Emerald Green)
     1083: "red",     # FR FRANCE 1 (Ruby Red)
@@ -34,27 +37,88 @@ DEFAULT_SOCKET_THEMES: Dict[int, str] = {
     1085: "pink",    # Latvia (Rose Pink)
 }
 
+ROTATION_THEMES: List[str] = [
+    "cyan",
+    "green",
+    "orange",
+    "purple",
+    "red",
+    "pink",
+    "blue",
+    "gold",
+    "black",
+]
+
 
 def load_instances_ports(instances_path: Optional[Union[str, Path]] = None) -> List[int]:
-    """Loads listen ports from instances.json or defaults."""
-    if instances_path and os.path.isfile(instances_path):
+    """Loads listen ports from instances/ directory, instances.json, or defaults."""
+    ports: set[int] = set()
+
+    def _extract_port(listen_str: str) -> Optional[int]:
+        if ":" in listen_str:
+            try:
+                return int(listen_str.split(":")[-1])
+            except ValueError:
+                pass
+        return None
+
+    def _scan_json_file(fp: Path) -> None:
         try:
-            with open(instances_path, "r", encoding="utf-8") as f:
+            with open(fp, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            ports = []
-            for item in data:
-                listen = item.get("listen", "")
-                if ":" in listen:
-                    try:
-                        ports.append(int(listen.split(":")[-1]))
-                    except ValueError:
-                        pass
-            if ports:
-                return sorted(list(set(ports)))
+            if isinstance(data, list):
+                for item in data:
+                    p = _extract_port(item.get("listen", ""))
+                    if p:
+                        ports.add(p)
+            elif isinstance(data, dict):
+                p = _extract_port(data.get("listen", ""))
+                if p:
+                    ports.add(p)
         except Exception:
             pass
 
-    return [1015, 1020, 1021, 1030, 1081, 1082, 1083, 1084, 1085]
+    def _scan_dir_for_instances(dp: Path) -> None:
+        if not dp.is_dir():
+            return
+        if (dp / "instances").is_dir():
+            _scan_dir_for_instances(dp / "instances")
+        for fn in sorted(os.listdir(dp)):
+            if fn.endswith(".json") and (fn.startswith(".instance_") or fn.startswith("instance_") or fn == "instances.json"):
+                _scan_json_file(dp / fn)
+
+    if instances_path:
+        p = Path(instances_path)
+        if p.is_file():
+            _scan_json_file(p)
+            if ports:
+                return sorted(list(ports))
+        elif p.is_dir():
+            _scan_dir_for_instances(p)
+            if ports:
+                return sorted(list(ports))
+
+    # Auto-discovery if instances_path was None or yielded no ports
+    repo_root = Path(__file__).resolve().parents[2]
+    candidate_paths = [
+        repo_root / "instances",
+        repo_root / "instances.json",
+        repo_root / "config.json",
+        Path(r"C:\proj\vless2socks\instances"),
+        Path(r"C:\proj\vless2socks\instances.json"),
+        Path(r"C:\proj\vless2socks\config.json"),
+    ]
+
+    for cand in candidate_paths:
+        if cand.is_dir():
+            _scan_dir_for_instances(cand)
+        elif cand.is_file():
+            _scan_json_file(cand)
+
+    if ports:
+        return sorted(list(ports))
+
+    return [1015, 1016, 1020, 1021, 1030, 1080, 1081, 1082, 1083, 1084, 1085]
 
 
 def generate_proxy_workspace(
@@ -91,7 +155,7 @@ def generate_proxy_workspace(
     theme_keys = list(THEMES.keys())
 
     for idx, port in enumerate(ports):
-        theme = DEFAULT_SOCKET_THEMES.get(port, theme_keys[idx % len(theme_keys)])
+        theme = DEFAULT_SOCKET_THEMES.get(port, ROTATION_THEMES[(port - 1080) % len(ROTATION_THEMES)])
         ico_name = f"chrome_{theme}.ico"
         ico_path = ico_dir / ico_name
 
