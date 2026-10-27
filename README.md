@@ -439,7 +439,7 @@ vless2socks comes integrated with custom autonomous skills designed for Google D
   - Mirrored network mode WSL2 setup with non-interactive kernel packages (`nftables`, `iptables`, `curl`).
   - Strict netfilter network jail (`lo`/`loopback0` only, reject WAN/LAN, bypass port 2080 drop).
   - Autonomous boot guard in Windows Task Scheduler (`WSL_AutoIsolation_Guard`) with multi-locale parsing (Russian/English).
-  - Multi-profile Vendor C Claude Code CLI (ports 1015 & 1016) with Killswitch (`verify_and_notify.py`) and Windows Credential Manager key isolation (`.claude-1`, `.claude-secondary`).
+  - Multi-profile Vendor C Claude Code CLI (ports 1015 & 1016) with Killswitch (`verify_and_notify.py`) and Windows Credential Manager key isolation (`.claude-1`, `.claude-2`).
   - Multi-profile Google Chrome instances with HSV-recolored ICOs and typo-proof junctions (`link/lnk -> ink`).
   - Full perimeter penetration audit yielding **100% ISOLATED** verdict.
 
@@ -812,7 +812,7 @@ GUI поднимает каждый прокси отдельным процес
   - Mirrored Network режим WSL2 с неинтерактивной установкой пакетов ядра (`nftables`, `iptables`, `curl`).
   - Тюрьма netfilter в ядре Linux (только `lo`/`loopback0`, безусловный reject WAN/LAN, блок обхода 2080).
   - Демон автозапуска в Планировщике Windows (`WSL_AutoIsolation_Guard`) с поддержкой русской локали `wsl --status`.
-  - Изоляция профилей Claude Code CLI (1015 и 1016) с Killswitch (`verify_and_notify.py`) и раздельными слотами в Windows Credential Manager (`.claude-1`, `.claude-secondary`).
+  - Изоляция профилей Claude Code CLI (1015 и 1016) с Killswitch (`verify_and_notify.py`) и раздельными слотами в Windows Credential Manager (`.claude-1`, `.claude-2`).
   - Генерация 11 профилей Google Chrome со своими цветными ICO из `chrome.exe` и защитой от опечаток (`link/lnk -> ink`).
   - Комплексный аудит периметра с получением финального вердикта **100% ISOLATED**.
 

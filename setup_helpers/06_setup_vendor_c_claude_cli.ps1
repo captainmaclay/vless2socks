@@ -1,9 +1,9 @@
-# Step 6: Setup Vendor C / Claude Code CLI isolated profiles with Killswitch (Ports 1015 and 1016)
+# Step 6: Setup Vendor C / Claude Code CLI isolated profiles with Killswitch (Ports 1015, 1016 and 1017)
 [CmdletBinding()]
 param()
 
 $ErrorActionPreference = "Stop"
-Write-Host "=== [6/8] Configuring Vendor C Claude Code CLI Environments (Ports 1015 & 1016) ===" -ForegroundColor Cyan
+Write-Host "=== [6/8] Configuring Vendor C Claude Code CLI Environments (Ports 1015, 1016 & 1017) ===" -ForegroundColor Cyan
 
 # 1. Verify Node.js and claude CLI
 $claudeBin = Join-Path $env:APPDATA "npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe"
@@ -34,12 +34,24 @@ $profiles = @(
         Port = 1016
         Name = "Claude Code 1016"
         CliAlias = "CLI_1016"
-        ConfigDir = ".claude-secondary"
-        Title = "Claude Code CLI (Vendor C - Socket 1016 Secondary)"
+        ConfigDir = ".claude-2"
+        Title = "Claude Code CLI (Vendor C - Socket 1016 Profile 2)"
         WorkDir = "Vendor_C_1016"
+        Color = "gold"
+    },
+    @{
+        Port = 1017
+        Name = "Claude Code 1017"
+        CliAlias = "CLI_1017"
+        ConfigDir = ".claude-3"
+        Title = "Claude Code CLI (Vendor C - Socket 1017 Profile 3)"
+        WorkDir = "Vendor_C_1017"
         Color = "gold"
     }
 )
+
+# Skills repository: add_profile.py registers a profile in claude_homes, deploys user skills and adds the update-check hook
+$addProfileTool = "C:\myFiles\mainSkill-claude\tools\add_profile.py"
 
 $wsh = New-Object -ComObject WScript.Shell
 
@@ -125,8 +137,20 @@ REM 5. Update profile status on exit
         $lnk.Save()
     }
 
+    # Connect skills (same as new_claude/add_vendor_c_cli_instance.py setup_profile_skills)
+    if (Test-Path $addProfileTool) {
+        & $python $addProfileTool $configPath
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[+] Skills connected: $configPath\skills" -ForegroundColor Yellow
+        } else {
+            Write-Host "[!] add_profile.py failed with code $LASTEXITCODE - skills of $configPath are not set up" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "[*] Skills not connected: $addProfileTool not found (clone mainSkill-claude, then run it with $configPath)" -ForegroundColor DarkYellow
+    }
+
     # Sync profile status
     & $python "C:\proj\vless2socks\vendor_c_sync.py" --port $port --quiet
 }
 
-Write-Host "[SUCCESS] Vendor C Claude Code CLI profiles 1015 & 1016 successfully deployed and isolated!" -ForegroundColor Green
+Write-Host "[SUCCESS] Vendor C Claude Code CLI profiles 1015, 1016 & 1017 successfully deployed and isolated!" -ForegroundColor Green

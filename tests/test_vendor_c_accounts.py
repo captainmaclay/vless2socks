@@ -51,7 +51,8 @@ class TestVendorCDefaultAccountNum(unittest.TestCase):
         candidates_1 = get_vendor_c_config_candidates(1015)
         self.assertTrue(any(".claude.json" in str(c) for c in candidates_1))
         candidates_2 = get_vendor_c_config_candidates(1016)
-        self.assertTrue(any(".claude-secondary" in str(c) for c in candidates_2))
+        self.assertIn(".claude-2", str(candidates_2[0]))   # profile 2 is ~/.claude-2 since 2026-10-28
+        self.assertTrue(any(".claude-secondary" in str(c) for c in candidates_2))   # the old name is still found
         candidates_custom = get_vendor_c_config_candidates(1020, account_num=3)
         self.assertTrue(any(".claude-3" in str(c) for c in candidates_custom))
 

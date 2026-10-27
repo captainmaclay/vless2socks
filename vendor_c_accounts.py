@@ -5,7 +5,7 @@ Vendor C Environment and Profile Management for vless2socks (Research & Testing)
 
 Maps proxy ports to Vendor C profiles by default:
   - Profile 1 -> Port 1015 (~/.claude.json)
-  - Profile 2 -> Port 1016 (~/.claude-secondary/.claude.json, ~/.claude-2/.claude.json)
+  - Profile 2 -> Port 1016 (~/.claude-2/.claude.json; old name ~/.claude-secondary)
   - Profile N -> Port 1015 + (N - 1) (~/.claude-N/.claude.json, ~/.claude-PORT/.claude.json)
 
 Parses active OAuth profile details (email, display name, organization) and synchronizes
@@ -31,6 +31,7 @@ USER_HOME = os.environ.get("USERPROFILE") or os.path.expanduser("~")
 DEFAULT_PORT_PROFILE_MAP = {
     1015: 1,
     1016: 2,
+    1017: 3,
     1020: 3,
     1021: 4,
     1030: 5,
@@ -66,8 +67,8 @@ def get_vendor_c_config_candidates(port: int, account_num: Optional[int] = None)
         candidates.append(os.path.join(USER_HOME, ".claude.json"))
         candidates.append(os.path.join(USER_HOME, ".claude", "config.json"))
     elif account_num == 2 or port == 1016:
-        candidates.append(os.path.join(USER_HOME, ".claude-secondary", ".claude.json"))
         candidates.append(os.path.join(USER_HOME, ".claude-2", ".claude.json"))
+        candidates.append(os.path.join(USER_HOME, ".claude-secondary", ".claude.json"))   # old name of profile 2
         candidates.append(os.path.join(USER_HOME, ".claude-1016", ".claude.json"))
     else:
         candidates.append(os.path.join(USER_HOME, f".claude-{account_num}", ".claude.json"))
@@ -159,7 +160,7 @@ def get_vendor_c_account_for_port(port: int, cfg: Optional[dict] = None) -> dict
         "org_type": "",
         "logged_in": False,
         "config_path": candidates[0] if candidates else "",
-        "is_vendor_c": (port in (1015, 1016) or bool(cfg and (cfg.get("system_proxy") or cfg.get("System_Proxy")))),
+        "is_vendor_c": (port in (1015, 1016, 1017) or bool(cfg and (cfg.get("system_proxy") or cfg.get("System_Proxy")))),
     }
 
     # 1. Try reading live candidate config files

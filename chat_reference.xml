@@ -371,7 +371,7 @@
             Необходимо исключить перезапись OAuth токена первого аккаунта (`ligneoussarcoid@outlook.com`) вторым аккаунтом (`putativepilcrow@gmail.com`).
           </description>
           <resolution>
-            Задан `CLAUDE_CONFIG_DIR=C:\Users\Admin\.claude-secondary`, что принудительно создало отдельный слот хранения в Windows Credential Manager.
+            Задан `CLAUDE_CONFIG_DIR=C:\Users\Admin\.claude-2`, что принудительно создало отдельный слот хранения в Windows Credential Manager.
           </resolution>
         </challenge>
       </challenges_faced>
@@ -379,7 +379,7 @@
         <command>Создан файл C:\MyFiles\Proxy\Vendor_C_Socket_1016.bat</command>
         <command>Создан файл C:\MyFiles\Proxy\Claude_Socket_1016.bat</command>
         <command>Создана рабочая папка C:\Users\Admin\Downloads\Vendor_C_1016</command>
-        <command>Создана папка конфигурации C:\Users\Admin\.claude-secondary</command>
+        <command>Создана папка конфигурации C:\Users\Admin\.claude-2</command>
         <command>Созданы ярлыки CLI_1016.lnk и Claude Code 1016.lnk на Рабочем столе и в каталогах прокси</command>
         <command>Вызвана синхронизация python vendor_c_sync.py --port 1016</command>
       </executed_actions>

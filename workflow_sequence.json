@@ -116,7 +116,7 @@
       "step_id": "STEP_06_SETUP_CLAUDE_CLI_1015_AND_1016",
       "order": 6,
       "user_request_raw": "установи claude code cli для виндовс - настрой работу через 1015 исключительно по киллсвитч клиент эту работу настрой через скилы описания vless2socks / в описании и скиллах называется вендор c ищи / теперь по образцу скиллам и описанию настрой работу cli виндовс клод для порта 1016",
-      "normalized_task_prompt": "Развернуть Node.js LTS и @anthropic-ai/claude-code. Сформировать лаунчеры Vendor_C_Socket_1015.bat и Vendor_C_Socket_1016.bat с пре-лаунч валидацией verify_and_notify.py (Killswitch). Изолировать конфигурации в .claude-1 и .claude-secondary для предотвращения перезаписи ключей в Windows Credential Manager. Создать ярлыки с золотыми иконками claude_gold.ico на Рабочем столе и в Proxy\\ink.",
+      "normalized_task_prompt": "Развернуть Node.js LTS и @anthropic-ai/claude-code. Сформировать лаунчеры Vendor_C_Socket_1015.bat и Vendor_C_Socket_1016.bat с пре-лаунч валидацией verify_and_notify.py (Killswitch). Изолировать конфигурации в .claude-1 и .claude-2 для предотвращения перезаписи ключей в Windows Credential Manager. Создать ярлыки с золотыми иконками claude_gold.ico на Рабочем столе и в Proxy\\ink.",
       "subagent_role": "CLI Process Isolation & Security Specialist",
       "script_runner": "setup_helpers/06_setup_vendor_c_claude_cli.ps1",
       "command_line": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\proj\\vless2socks\\setup_helpers\\06_setup_vendor_c_claude_cli.ps1\"",

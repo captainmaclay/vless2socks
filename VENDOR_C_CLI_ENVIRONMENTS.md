@@ -31,7 +31,7 @@
 ### 2.1. Каталог конфигурации `CLAUDE_CONFIG_DIR`
 CLI-утилита поддерживает переменную окружения `CLAUDE_CONFIG_DIR`:
 ```bat
-set CLAUDE_CONFIG_DIR=C:\Users\79251\.claude-secondary
+set CLAUDE_CONFIG_DIR=C:\Users\79251\.claude-2
 ```
 При ее установке:
 1. Файл настроек размещается в `%CLAUDE_CONFIG_DIR%\.claude.json`.
@@ -43,7 +43,7 @@ set CLAUDE_CONFIG_DIR=C:\Users\79251\.claude-secondary
 ### 2.2. Изоляция в Windows Credential Manager
 В архитектуре CLI предусмотрено разделение ключей хранилища учетных данных:
 - Если `CLAUDE_CONFIG_DIR` **не задан** (основной инстанс): токен сохраняется под системным ключом `Claude Code-credentials`.
-- Если `CLAUDE_CONFIG_DIR` **задан** (например, `.claude-secondary`): вычисляется 8-символьный SHA-256 хеш от пути каталога, и токен сохраняется под уникальным ключом `Claude Code-credentials-xxxxxxxx`.
+- Если `CLAUDE_CONFIG_DIR` **задан** (например, `.claude-2`): вычисляется 8-символьный SHA-256 хеш от пути каталога, и токен сохраняется под уникальным ключом `Claude Code-credentials-xxxxxxxx`.
 
 **Результат:** Токены первого и второго профилей хранятся в Windows в разных ячейках и никогда не перезаписывают друг друга.
 
@@ -96,8 +96,8 @@ set all_proxy=http://127.0.0.1:1016
 set NO_PROXY=
 
 REM Isolated configuration directory for profile 2
-set CLAUDE_CONFIG_DIR=C:\Users\79251\.claude-secondary
-set CLAUDE_SECURESTORAGE_CONFIG_DIR=C:\Users\79251\.claude-secondary
+set CLAUDE_CONFIG_DIR=C:\Users\79251\.claude-2
+set CLAUDE_SECURESTORAGE_CONFIG_DIR=C:\Users\79251\.claude-2
 if not exist "%CLAUDE_CONFIG_DIR%" mkdir "%CLAUDE_CONFIG_DIR%"
 
 REM 3. Synchronize profile metadata with vless2socks

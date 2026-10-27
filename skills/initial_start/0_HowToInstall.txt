@@ -29,7 +29,7 @@
 3. Изолированные тестовые среды Claude Code CLI (Vendor C):
    - Профиль 1 (порт 1015, Gold) и Профиль 2 (порт 1016, Gold Secondary).
    - Предотвращение коллизий в Windows Credential Manager через независимые
-     переменные CLAUDE_CONFIG_DIR (.claude-1 и .claude-secondary).
+     переменные CLAUDE_CONFIG_DIR (.claude-1 и .claude-2).
    - Пре-лаунч валидация исходящего IP и Killswitch-защита (verify_and_notify.py).
    - Автоматическая синхронизация профилей с vless2socks (vendor_c_sync.py).
 
@@ -112,7 +112,7 @@
 ШАГ 6: Настройка изолированных сред Claude Code CLI (Vendor C)
 - Убедись в наличии Node.js LTS и глобального пакета `@anthropic-ai/claude-code`.
 - Создай батники Vendor_C_Socket_1015.bat и Vendor_C_Socket_1016.bat с пре-лаунч валидацией `verify_and_notify.py` (Killswitch).
-- Раздели хранилища Windows Credential Manager через `set CLAUDE_CONFIG_DIR=C:\Users\<User>\.claude-1` (для 1015) и `set CLAUDE_CONFIG_DIR=C:\Users\<User>\.claude-secondary` (для 1016).
+- Раздели хранилища Windows Credential Manager через `set CLAUDE_CONFIG_DIR=C:\Users\<User>\.claude-1` (для 1015) и `set CLAUDE_CONFIG_DIR=C:\Users\<User>\.claude-2` (для 1016).
 - Создай ярлыки с золотыми иконками claude_gold.ico на Рабочем столе и в папке C:\MyFiles\Proxy\ink.
 - Скрипт-раннер: `powershell -File C:\proj\vless2socks\setup_helpers\06_setup_vendor_c_claude_cli.ps1`.
 

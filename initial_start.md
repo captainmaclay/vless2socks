@@ -60,7 +60,7 @@ description: >-
 
 10. **Запрос 10 (Второй профиль CLI на сокете 1016):**
     > *«теперь по образцу скиллам и описанию настрой работу cli виндовс клод для порта 1016»*
-    * **Действие:** Создание лаунчера `Vendor_C_Socket_1016.bat`, изоляция каталога в `.claude-secondary`, изоляция ключа в Windows Credential Manager, создание ярлыков, синхронизация с `vendor_c_accounts.json`, тестирование Killswitch.
+    * **Действие:** Создание лаунчера `Vendor_C_Socket_1016.bat`, изоляция каталога в `.claude-2`, изоляция ключа в Windows Credential Manager, создание ярлыков, синхронизация с `vendor_c_accounts.json`, тестирование Killswitch.
 
 11. **Запрос 11 (Упаковка в Спеку-Скилл и инструментарий):**
     > *«Сохрани эту последовательность всех моих запросов в чате и корректировок в Спеку - initial_start.md skill распиши подробно все подводные камни с которыми столкнулись при установки, сформируй xml этого чата как образец на который скилл будет ссылаться. Напиши вспомогательные скрипты...»*
@@ -77,7 +77,7 @@ flowchart TD
         
         subgraph CLI_Profiles["Vendor C Claude Code CLI"]
             p1015["CLI Socket 1015<br/>CLAUDE_CONFIG_DIR=.claude-1<br/>CredKey: Claude Code-credentials-c8..."]
-            p1016["CLI Socket 1016<br/>CLAUDE_CONFIG_DIR=.claude-secondary<br/>CredKey: Claude Code-credentials-7a..."]
+            p1016["CLI Socket 1016<br/>CLAUDE_CONFIG_DIR=.claude-2<br/>CredKey: Claude Code-credentials-7a..."]
         end
 
         subgraph Chrome_Profiles["Изолированные инстансы Google Chrome"]
@@ -176,7 +176,7 @@ flowchart TD
 ### 10. Затирание токенов OAuth в Windows Credential Manager
 * **Симптом:** При запуске второго профиля Claude Code CLI первый аккаунт разлогинивался.
 * **Причина:** CLI по умолчанию сохраняет токен в единый ключ `Claude Code-credentials`.
-* **Решение:** Назначение раздельных каталогов `CLAUDE_CONFIG_DIR=C:\Users\Admin\.claude-1` и `CLAUDE_CONFIG_DIR=C:\Users\Admin\.claude-secondary`. Архитектура CLI автоматически хеширует путь через SHA-256 и сохраняет токены в уникальные ключи `Claude Code-credentials-xxxxxxxx`.
+* **Решение:** Назначение раздельных каталогов `CLAUDE_CONFIG_DIR=C:\Users\Admin\.claude-1` и `CLAUDE_CONFIG_DIR=C:\Users\Admin\.claude-2`. Архитектура CLI автоматически хеширует путь через SHA-256 и сохраняет токены в уникальные ключи `Claude Code-credentials-xxxxxxxx`.
 
 ### 11. Символ амперсанда `&` в комментариях `REM` в батниках Windows
 * **Симптом:** Батник падает с сообщением *«не распознано как внутренняя или внешняя команда»*.

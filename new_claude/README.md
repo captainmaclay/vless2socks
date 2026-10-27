@@ -78,7 +78,7 @@ python C:\MyFiles\vless2socks\new_claude\add_vendor_c_cli_instance.py --id 3 --p
 В режиме **«Обзор»** (`Overview`) vless2socks автоматически привязывает системные прокси к профилям Вендора C:
 1. **Нумерация по умолчанию:**
    - **1 профиль** ──► Порт `1015` (`C:\Users\79251\.claude.json`)
-   - **2 профиль** ──► Порт `1016` (`C:\Users\79251\.claude-secondary\.claude.json`)
+   - **2 профиль** ──► Порт `1016` (`C:\Users\79251\.claude-2\.claude.json`)
    - **N профиль** ──► Порт `1015 + (N - 1)` (`C:\Users\79251\.claude-N\.claude.json`)
 2. **Отображение в карточке «Обзор»:**
    - Бейдж 1: `⚙️ System_Proxy ({N} профиль)` (желтый акцент)

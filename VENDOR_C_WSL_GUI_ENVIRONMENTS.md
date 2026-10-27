@@ -143,7 +143,7 @@ set HTTPS_PROXY=http://127.0.0.1:1016
 set ALL_PROXY=http://127.0.0.1:1016
 set NO_PROXY=
 
-set CLAUDE_CONFIG_DIR=C:\Users\79251\.claude-secondary
+set CLAUDE_CONFIG_DIR=C:\Users\79251\.claude-2
 if not exist "%CLAUDE_CONFIG_DIR%" mkdir "%CLAUDE_CONFIG_DIR%"
 
 python "C:\MyFiles\vless2socks\vendor_c_sync.py" --port 1016 --quiet

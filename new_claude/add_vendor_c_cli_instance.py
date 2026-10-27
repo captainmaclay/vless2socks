@@ -35,7 +35,8 @@ COLOR_HUES = {
 
 PORT_THEMES = {
     1015: ("gold", "Vendor C Socket 1015"),
-    1016: ("gold", "Vendor C Socket 1016 (Secondary)"),
+    1016: ("gold", "Vendor C Socket 1016 (Profile 2)"),
+    1017: ("gold", "Vendor C Socket 1017 (Profile 3)"),
     1020: ("purple", "Vendor C Socket 1020 (Profile 3)"),
     1021: ("orange", "Vendor C Socket 1021 (Profile 4)"),
     1030: ("blue", "Vendor C Socket 1030"),
@@ -151,23 +152,55 @@ python "C:\\MyFiles\\vless2socks\\vendor_c_sync.py" --port {socks_port} --quiet
     except Exception as e:
         print(f"[*] Note on legacy bat: {e}")
 
+    # Synchronize batch files with repo proxys
+    proxys_repo = r"C:\proj\vless2socks\proxys"
+    os.makedirs(proxys_repo, exist_ok=True)
+    try:
+        shutil.copy2(bat_path, os.path.join(proxys_repo, bat_filename))
+        shutil.copy2(legacy_bat_path, os.path.join(proxys_repo, f"Claude_Socket_{socks_port}.bat"))
+        print(f"[+] Synced CLI batch files to repo: {proxys_repo}")
+    except Exception as e:
+        print(f"[*] Note on repo copy: {e}")
+
     # Ensure profile directory exists
     os.makedirs(config_dir_path, exist_ok=True)
     return bat_path
 
 
+SKILLS_REPO = r"C:\myFiles\mainSkill-claude"
+
+
+def setup_profile_skills(config_dir_path):
+    """Connects the new profile to the skills repository the same way as every other profile:
+    claude_homes in sources.json, user skills in <profile>/skills, the update-check hook in <profile>/settings.json
+    (mainSkill-claude tools/add_profile.py). Returns False when the repository is not on this machine."""
+    tool = os.path.join(SKILLS_REPO, "tools", "add_profile.py")
+    if not os.path.exists(tool):
+        print(f"[*] Skills not connected: {tool} not found (clone mainSkill-claude, then run it with {config_dir_path})")
+        return False
+    r = subprocess.run([sys.executable, tool, config_dir_path], cwd=SKILLS_REPO)
+    if r.returncode:
+        print(f"[!] add_profile.py failed with code {r.returncode} - skills of {config_dir_path} are not set up")
+        return False
+    print(f"[+] Skills connected: {os.path.join(config_dir_path, 'skills')} (publish sources.json with the skills-push skill)")
+    return True
+
+
 def create_cli_shortcut(shortcut_name, bat_path, icon_path):
-    """Creates Desktop & Proxy/ink shortcuts for Vendor C CLI."""
+    """Creates Desktop, Proxy/ink, and proxys/ink shortcuts for Vendor C CLI."""
     desktop_dir = os.path.join(os.environ["USERPROFILE"], "Desktop")
     proxy_ink_dir = r"C:\MyFiles\Proxy\ink"
+    proj_ink_dir = r"C:\proj\vless2socks\proxys\ink"
     work_dir = os.path.dirname(bat_path)
     cmd_exe = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe")
 
     targets = [
         os.path.join(desktop_dir, f"{shortcut_name}.lnk"),
-        os.path.join(proxy_ink_dir, f"{shortcut_name}.lnk")
+        os.path.join(proxy_ink_dir, f"{shortcut_name}.lnk"),
+        os.path.join(proj_ink_dir, f"{shortcut_name}.lnk")
     ]
 
+    targets_items = "\n".join(f"    '{t}'," for t in targets).rstrip(",")
     ps_code = f"""
 $wsh = New-Object -ComObject WScript.Shell
 $cmd = '{cmd_exe}'
@@ -176,8 +209,7 @@ $work = '{work_dir}'
 $ico = '{icon_path},0'
 
 $targets = @(
-    '{targets[0]}',
-    '{targets[1]}'
+{targets_items}
 )
 
 foreach ($t in $targets) {{
@@ -240,10 +272,13 @@ def main():
     else:
         print(f"[*] Icon already exists: {out_ico}")
 
-    config_dir_name = f".claude-{instance_id}" if instance_id not in ("2", "secondary") else ".claude-secondary"
+    if instance_id == "secondary":   # the old name of profile 2 (before 2026-10-28 the folder was .claude-secondary)
+        instance_id = "2"
+    config_dir_name = f".claude-{instance_id}"   # one naming for every instance: ~/.claude-<N>
     config_dir_path = os.path.join(os.environ.get("USERPROFILE") or os.path.expanduser("~"), config_dir_name)
     bat_path = deploy_cli_bat(instance_id, socks_port, config_dir_name)
     create_cli_shortcut(shortcut_name, bat_path, out_ico)
+    skills_ok = setup_profile_skills(config_dir_path)
 
     print("\n[SUCCESS] Vendor C CLI Setup complete!")
     print(f"  - Instance ID: {instance_id}")
@@ -251,6 +286,7 @@ def main():
     print(f"  - Config Directory: {config_dir_path}")
     print(f"  - Batch Launcher: {bat_path}")
     print(f"  - Desktop Shortcut: {shortcut_name}.lnk")
+    print(f"  - Skills: {os.path.join(config_dir_path, 'skills')} ({'connected to mainSkill-claude' if skills_ok else 'NOT connected - see the note above'})")
 
 
 if __name__ == "__main__":
