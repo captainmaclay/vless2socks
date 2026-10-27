@@ -1,13 +1,16 @@
 # Step 6: Setup Vendor C / Claude Code CLI isolated profiles with Killswitch (Ports 1015, 1016 and 1017)
+# -BatOnly: only regenerate the .bat launchers (C:\MyFiles\Proxy + proxys\ copies); no npm, shortcuts, skills or sync
 [CmdletBinding()]
-param()
+param(
+    [switch]$BatOnly
+)
 
 $ErrorActionPreference = "Stop"
 Write-Host "=== [6/8] Configuring Vendor C Claude Code CLI Environments (Ports 1015, 1016 & 1017) ===" -ForegroundColor Cyan
 
 # 1. Verify Node.js and claude CLI
 $claudeBin = Join-Path $env:APPDATA "npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe"
-if (-not (Test-Path $claudeBin)) {
+if (-not $BatOnly -and -not (Test-Path $claudeBin)) {
     Write-Host "[+] Installing @anthropic-ai/claude-code globally via npm..." -ForegroundColor Yellow
     npm install -g @anthropic-ai/claude-code
 }
@@ -78,7 +81,7 @@ REM 1. Pre-launch IP Verification and Killswitch Protection
 "%PY%" "C:\MyFiles\vless2socks\new_claude\verify_and_notify.py" --port $port --app "Vendor C CLI"
 if errorlevel 1 (
     echo [BLOCKED] Launch aborted: Killswitch blocked traffic leak!
-    timeout /t 5 >nul
+    timeout /t 3 >nul
     exit /b 1
 )
 
@@ -99,8 +102,8 @@ if not exist "%CLAUDE_CONFIG_DIR%" mkdir "%CLAUDE_CONFIG_DIR%"
 REM 4. Sync profile status with vless2socks
 "%PY%" "C:\MyFiles\vless2socks\vendor_c_sync.py" --port $port --quiet
 
-cd /d "$workPath"
 if not exist "$workPath" mkdir "$workPath"
+cd /d "$workPath"
 
 "$claudeBin" --dangerously-skip-permissions %*
 
@@ -108,11 +111,15 @@ REM 5. Update profile status on exit
 "%PY%" "C:\MyFiles\vless2socks\vendor_c_sync.py" --port $port --quiet
 "@
 
-    [System.IO.File]::WriteAllText($batPath, $batContent, [System.Text.Encoding]::UTF8)
-    [System.IO.File]::WriteAllText($legacyBatPath, $batContent, [System.Text.Encoding]::UTF8)
-    Copy-Item $batPath "C:\proj\vless2socks\proxys\" -Force -ErrorAction SilentlyContinue
+    # cmd.exe needs CRLF and no BOM (a BOM breaks the first line "@echo off")
+    $batContent = ($batContent -replace "`r?`n", "`r`n") + "`r`n"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($batPath, $batContent, $utf8NoBom)
+    [System.IO.File]::WriteAllText($legacyBatPath, $batContent, $utf8NoBom)
+    Copy-Item $batPath, $legacyBatPath "C:\proj\vless2socks\proxys\" -Force -ErrorAction SilentlyContinue
 
     Write-Host "[+] Deployed batch launchers for Port $port." -ForegroundColor Yellow
+    if ($BatOnly) { continue }
 
     # Shortcuts
     $icoPath = Join-Path $proxyDir "ico\claude_$($p.Color).ico"
@@ -153,4 +160,8 @@ REM 5. Update profile status on exit
     & $python "C:\proj\vless2socks\vendor_c_sync.py" --port $port --quiet
 }
 
+if ($BatOnly) {
+    Write-Host "[SUCCESS] Batch launchers 1015, 1016 & 1017 regenerated (shortcuts, skills and sync skipped)." -ForegroundColor Green
+    return
+}
 Write-Host "[SUCCESS] Vendor C Claude Code CLI profiles 1015, 1016 & 1017 successfully deployed and isolated!" -ForegroundColor Green
