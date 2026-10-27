@@ -169,6 +169,7 @@ Persistent settings saved to `settings.json`:
 - **Force Port Takeover** — kill processes occupying required ports (default: ON)
 - **Auto-Start Proxies on Launch** — start all proxies when app opens (default: ON)
 - **Start Minimized to Tray** — launch directly to system tray (default: OFF)
+- **Launch with Windows** - start at sign-in via a per-user `HKCU\...\Run` entry, no admin rights (default: OFF). Both startup flags are also in the tray context menu, are stored in `settings.json` and travel with `.hbak` backups
 - **Auto-Reconnect on Failure** — automatic retry with configurable intervals (default: ON)
   - Default cycle: `10s → 15s → 30s → 1m → 2m → 3m → 30s (repeat)`
 - **TelegramProxy Virtual Port** — customizable listening port for the Telegram relay virtual socket (default: `1373`, with "Reset to 1373" button)
@@ -635,6 +636,7 @@ GUI поднимает каждый прокси отдельным процес
 - **Force Port Takeover** — принудительное освобождение портов (по умолчанию: ВКЛ)
 - **Auto-Start Proxies on Launch** — запуск прокси при старте (по умолчанию: ВКЛ)
 - **Start Minimized to Tray** — запуск в трее (по умолчанию: ВЫКЛ)
+- **Запуск вместе с системой** - автозапуск при входе в Windows через запись `HKCU\...\Run` для текущего пользователя, без прав администратора (по умолчанию: ВЫКЛ). Оба флага запуска есть и в контекстном меню трея, хранятся в `settings.json` и попадают в бэкапы `.hbak`
 - **Auto-Reconnect on Failure** — автопереподключение (по умолчанию: ВКЛ)
   - Цикл по умолчанию: `10с → 15с → 30с → 1м → 2м → 3м → 30с (повтор)`
 - **Порт TelegramProxy** — настраиваемый порт виртуального сокета для Telegram (по умолчанию: `1373`, с кнопкой сброса к 1373)

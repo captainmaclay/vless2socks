@@ -314,7 +314,7 @@ def wipe_all_sensitive_data(stop_all_callback: Optional[Callable[[], None]] = No
         except Exception:
             pass
 
-    for p in ROOT_DIR.glob(".instance_*.json"):
+    for p in [*ROOT_DIR.glob(".instance_*.json"), *(ROOT_DIR / "instances").glob(".instance_*.json")]:
         try:
             p.unlink()
         except Exception:

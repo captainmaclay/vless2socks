@@ -17,7 +17,8 @@ import shutil
 import sys
 from pathlib import Path
 
-__all__ = ["APP_DIR", "BUNDLE_DIR", "FROZEN", "bundled", "unpack_bundled_bin"]
+__all__ = ["APP_DIR", "BUNDLE_DIR", "FROZEN", "INSTANCES_DIR", "bundled", "instance_config_path",
+           "migrate_instance_configs", "unpack_bundled_bin"]
 
 #: Запущены из собранного PyInstaller'ом .exe?
 FROZEN = bool(getattr(sys, "frozen", False))
@@ -30,6 +31,9 @@ APP_DIR = (
     else Path(__file__).resolve().parent.parent
 )
 
+#: Рабочие конфиги прокси (``.instance_<id>.json``), раньше лежали прямо в :data:`APP_DIR`.
+INSTANCES_DIR = APP_DIR / "instances"
+
 #: Каталог с зашитыми в сборку данными (*.example.json, bin/).
 #: В режиме скрипта совпадает с :data:`APP_DIR`.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -38,6 +42,31 @@ BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
 def bundled(name: str) -> Path:
     """Путь к файлу, зашитому в сборку (шаблоны ``*.example.json``, ``bin/...``)."""
     return BUNDLE_DIR / name
+
+
+def instance_config_path(global_id: int | str, base: Path | None = None) -> Path:
+    """Путь к рабочему конфигу прокси ``instances/.instance_<id>.json`` (папка создаётся)."""
+    folder = (base / "instances") if base is not None else INSTANCES_DIR
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return folder / f".instance_{global_id}.json"
+
+
+def migrate_instance_configs(base: Path | None = None) -> int:
+    """Перенести старые ``.instance_*.json`` из корня в ``instances/``. Возвращает число файлов."""
+    root = base if base is not None else APP_DIR
+    target = root / "instances"
+    moved = 0
+    for src in root.glob(".instance_*.json"):
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            src.replace(target / src.name)
+            moved += 1
+        except OSError:
+            pass
+    return moved
 
 
 def unpack_bundled_bin() -> None:

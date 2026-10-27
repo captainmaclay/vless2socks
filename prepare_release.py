@@ -21,6 +21,7 @@ COPY_FILES = [
     "tray_widget.py",
     "i18n.py",
     "settings_manager.py",
+    "autostart.py",
     "backup_manager.py",
     "geo_ip.py",
     "requirements.txt",

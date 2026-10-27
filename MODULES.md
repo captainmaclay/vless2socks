@@ -134,7 +134,7 @@ Each `ProxyInstance` manages one SOCKS5 tunnel subprocess.
 
 **Constructor** (`__init__`):
 - Receives: parent `VlessApp`, config dict, global instance ID
-- Creates: per-instance config file (`.instance_N.json`)
+- Creates: per-instance config file (`instances/.instance_N.json`)
 - Initializes: geo info from URL, empty UI references, reconnect state
 
 **Lifecycle Methods**:
@@ -679,7 +679,7 @@ User clicks "▶ ON"
       ▼
 ProxyInstance.start()
       │
-      ├── Write .instance_N.json (per-instance config)
+      ├── Write instances/.instance_N.json (per-instance config)
       │
       ├── Force port takeover? ─yes─► kill_processes_on_port()
       │                               │
@@ -687,8 +687,8 @@ ProxyInstance.start()
       │                          netstat -ano → taskkill /F /PID
       │
       ├── subprocess.Popen(proxy_command(...))
-      │      script build : python main.py        -c .instance_N.json
-      │      frozen  build: vless2socks.exe --cli -c .instance_N.json
+      │      script build : python main.py        -c instances/.instance_N.json
+      │      frozen  build: vless2socks.exe --cli -c instances/.instance_N.json
       │
       ├── Thread: _reader() → read stdout → append to log_lines deque
       │

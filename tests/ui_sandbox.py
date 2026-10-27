@@ -118,6 +118,13 @@ class Sandbox:
         gui.HAS_TRAY = False
         gui.SingleInstanceIpcServer = _Stub
         gui.PowerBroadcastWatcher = _Stub
+        # "Launch with Windows" writes HKCU\...\Run: the sandbox records the calls instead,
+        # so a test can never remove or rewrite the user's real autostart entry
+        self.autostart_calls: list[tuple] = []
+        self._saved_autostart = {n: getattr(gui.autostart, n) for n in ("apply", "sync_from_settings")}
+        calls = self.autostart_calls
+        gui.autostart.apply = lambda enabled: calls.append(("apply", bool(enabled))) or True
+        gui.autostart.sync_from_settings = lambda: calls.append(("sync",)) or True
         self._lang = i18n.get_current_language()
         i18n.load_language_preference()
         self.app = gui.VlessApp()
@@ -171,6 +178,8 @@ class Sandbox:
             setattr(self.gui, n, v)
         for n, v in self._saved_inst.items():
             setattr(self.gui.ProxyInstance, n, v)
+        for n, v in self._saved_autostart.items():
+            setattr(self.gui.autostart, n, v)
         settings_manager.SETTINGS_FILE = self._saved_settings
         i18n._CURRENT_LANGUAGE = self._lang
         shutil.rmtree(self.tmp, ignore_errors=True)

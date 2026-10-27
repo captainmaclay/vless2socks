@@ -27,7 +27,7 @@ description: >-
    - `config.json` и `instances.json` (содержащие реальные UUID, ключи Reality `pbk=...`, приватные WireGuard ключи).
    - `vendor_c_accounts.json` и `claude_accounts.json` (содержащие реальные email и аккаунты).
    - `.env` (содержащий мастер-пароль).
-   - `.instance_*.json`, `.vless2socks.lock`, `*.hbak` (шифрованные бэкапы).
+   - `instances/.instance_*.json` (и старые `.instance_*.json` в корне), `.vless2socks.lock`, `*.hbak` (шифрованные бэкапы).
 3. **Логи и дампы сессий:**
    - `*.log`, `selftest-output.txt`.
    - Сессионные логи терминалов, пароли Xshell в незашифрованном виде.
@@ -39,6 +39,7 @@ description: >-
    - `proxys/link` и `proxys/lnk` (NTFS Junctions).
    - `bin/*.exe` (бинарник Xray-core загружается через `tools/get_xray.py`).
    - `dist/`, `build/`, `.venv/`.
+   - `vless2socks.lnk` в корне (локальный ярлык с абсолютными путями машины).
 
 ---
 

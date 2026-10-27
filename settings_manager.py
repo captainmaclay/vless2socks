@@ -6,6 +6,7 @@ Stores persistent user preferences in settings.json:
 - autostart_proxies (True by default): Start all configured proxies on app launch
 - force_restart (True by default): Automatically restart proxies on crash or disconnect
 - start_minimized_tray (False by default): Launch minimized in system tray
+- launch_at_startup (False by default): Start together with Windows (HKCU Run entry)
 - auto_reconnect (True by default): Automatically attempt to restart failed proxies
 - reconnect_intervals ("10, 15, 30, 60, 120, 180, 30" by default): Retry backoff schedule
 - auto_backup_enabled (False by default): Periodic background backup
@@ -36,6 +37,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "autostart_proxies": True,
     "force_restart": True,
     "start_minimized_tray": False,
+    "launch_at_startup": False,
     "auto_reconnect": True,
     "reconnect_intervals": DEFAULT_RECONNECT_INTERVALS,
     "auto_backup_enabled": False,

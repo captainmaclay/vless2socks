@@ -34,6 +34,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 from typing import Any, Iterable, Optional
 
+import autostart
 import backup_manager
 import geo_ip
 import proxy_groups
@@ -46,7 +47,7 @@ import responsive
 from responsive import Adaptive, AdaptiveRow, variants
 from overview_view import Button as OverviewButton, CardModel, HeaderModel, HintModel, OverviewView
 from i18n import get_current_language, load_language_preference, save_language_preference, t
-from vless2socks.paths import APP_DIR, FROZEN, bundled, unpack_bundled_bin
+from vless2socks.paths import APP_DIR, FROZEN, bundled, instance_config_path, migrate_instance_configs, unpack_bundled_bin
 from vless2socks.power_watcher import PowerBroadcastWatcher
 from vless2socks.wsl_watchdog import WSL_OPERATION_LOCK, WslWatchdog
 from vless2socks.ipc_server import SingleInstanceIpcServer, request_show_running_instance
@@ -960,7 +961,7 @@ class ProxyInstance:
         self._pending_log: list[str] = []
         self._log_lock = threading.Lock()
         self._log_flush_scheduled = False
-        self.config_path = ROOT_DIR / f".instance_{global_id}.json"
+        self.config_path = instance_config_path(global_id, ROOT_DIR)
 
         # Geo status
         self.geo_info: dict[str, Any] = {
@@ -4588,6 +4589,11 @@ class VlessApp(tk.Tk):
         self.bind("<Unmap>", self._on_main_unmap, add="+")
         self.bind("<Deactivate>", self._on_main_deactivate, add="+")
 
+        # Proxy configs live in instances/ now: move the ones left in the root by older versions
+        try:
+            migrate_instance_configs(ROOT_DIR)
+        except Exception:
+            pass
         self._load_saved_data()
 
         # Watcher: which proxies start with the program and are kept up
@@ -4627,6 +4633,12 @@ class VlessApp(tk.Tk):
 
         # Updates: first check once the proxies are up, then every 15 minutes
         self.after(UPDATE_FIRST_CHECK_MS, self._update_check_tick)
+
+        # Startup Options: keep the Windows Run entry in line with the saved flag
+        try:
+            autostart.sync_from_settings()
+        except Exception:
+            pass
 
         # Startup Options: Start minimized to tray
         if HAS_TRAY and settings_manager.get_setting("start_minimized_tray", True):
@@ -6835,6 +6847,25 @@ class VlessApp(tk.Tk):
             fg=C["subtext"], bg=C["card"], wraplength=700, justify=tk.LEFT,
         ).pack(anchor="w", padx=36, pady=(0, 10))
 
+        # 2. Launch with Windows
+        card2 = tk.Frame(opt_content, bg=C["card"], relief=tk.FLAT, borderwidth=1)
+        card2.pack(fill=tk.X, pady=6, padx=2)
+
+        self.launch_at_startup_var = tk.BooleanVar(value=settings_manager.get_setting("launch_at_startup", False))
+        cb2 = tk.Checkbutton(
+            card2, text=f"  {t('opt_launch_at_startup_title')}", variable=self.launch_at_startup_var,
+            font=("Segoe UI", 10, "bold"), fg=C["text"], bg=C["card"], selectcolor=C["overlay"],
+            activebackground=C["card"], activeforeground=C["blue"],
+            command=lambda: self._set_launch_at_startup(self.launch_at_startup_var.get()),
+        )
+        cb2.pack(anchor="w", padx=12, pady=(10, 2))
+        if not autostart.is_supported():
+            cb2.config(state=tk.DISABLED)
+        tk.Label(
+            card2, text=t("opt_launch_at_startup_desc"), font=("Segoe UI", 8),
+            fg=C["subtext"], bg=C["card"], wraplength=700, justify=tk.LEFT,
+        ).pack(anchor="w", padx=36, pady=(0, 10))
+
         # 3. Start in Tray
         card3 = tk.Frame(opt_content, bg=C["card"], relief=tk.FLAT, borderwidth=1)
         card3.pack(fill=tk.X, pady=6, padx=2)
@@ -6844,7 +6875,7 @@ class VlessApp(tk.Tk):
             card3, text=f"  {t('opt_start_minimized_tray_title')}", variable=self.start_tray_var,
             font=("Segoe UI", 10, "bold"), fg=C["text"], bg=C["card"], selectcolor=C["overlay"],
             activebackground=C["card"], activeforeground=C["blue"],
-            command=lambda: settings_manager.set_setting("start_minimized_tray", self.start_tray_var.get()),
+            command=lambda: self._set_start_minimized_tray(self.start_tray_var.get()),
         )
         cb3.pack(anchor="w", padx=12, pady=(10, 2))
         tk.Label(
@@ -7507,6 +7538,16 @@ class VlessApp(tk.Tk):
                 self.auto_reconnect_var.set(settings_manager.get_setting("auto_reconnect", True))
             if hasattr(self, "start_port_var"):
                 self.start_port_var.set(str(subscriptions.get_start_port()))
+            # Startup flags: checkboxes, tray menu and the Windows Run entry follow the backup
+            if hasattr(self, "start_tray_var"):
+                self.start_tray_var.set(bool(settings_manager.get_setting("start_minimized_tray", False)))
+            if hasattr(self, "launch_at_startup_var"):
+                self.launch_at_startup_var.set(bool(settings_manager.get_setting("launch_at_startup", False)))
+            try:
+                autostart.sync_from_settings()
+            except Exception:
+                pass
+            self._tray_refresh_menu()
             # The restored Telegram port is what the user had: never "migrate" it later,
             # and move the running dispatcher to it now
             settings_manager.set_setting("telegram_proxy_port_migrated", True)
@@ -8232,7 +8273,7 @@ class VlessApp(tk.Tk):
         }
 
     def _next_global_id(self) -> int:
-        """Id for a new proxy. Ids name the .instance_<id>.json config files, so after a
+        """Id for a new proxy. Ids name the instances/.instance_<id>.json config files, so after a
         deletion len(instances) may belong to a live proxy; max + 1 never does."""
         return max((inst.global_id for inst in self.instances), default=-1) + 1
 
@@ -8804,6 +8845,18 @@ class VlessApp(tk.Tk):
         return pystray.Menu(
             pystray.MenuItem(t("tray_show"), self._show_from_tray, default=True),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem(
+                f"🚀 {t('tray_launch_at_startup')}",
+                self._tray_toggle_launch_at_startup,
+                checked=lambda _: bool(settings_manager.get_setting("launch_at_startup", False)),
+                enabled=autostart.is_supported(),
+            ),
+            pystray.MenuItem(
+                f"📥 {t('tray_start_minimized')}",
+                self._tray_toggle_start_minimized,
+                checked=lambda _: bool(settings_manager.get_setting("start_minimized_tray", False)),
+            ),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem(f"🔄 {t('btn_restart_services')}", self._tray_restart_services),
             pystray.MenuItem(f"✈️ {t('lbl_restart_telegram_proxy')}", self._tray_restart_telegram_proxy),
             pystray.MenuItem(
@@ -8861,6 +8914,32 @@ class VlessApp(tk.Tk):
     def _tray_restart_telegram_proxy(self, icon=None, item=None):
         """Restart only TelegramProxy (flagged instances + dispatcher) from system tray context menu."""
         self.after(0, lambda: self.restart_single_service("telegram"))
+
+    def _set_launch_at_startup(self, enabled: bool):
+        """Persist "Launch with Windows" and mirror it to the Run entry; keep checkbox and tray in sync."""
+        ok = autostart.set_enabled(bool(enabled))
+        var = getattr(self, "launch_at_startup_var", None)
+        if var is not None:
+            var.set(bool(enabled))
+        if not ok and autostart.is_supported():
+            self._log(f"⚠️ {t('opt_launch_at_startup_failed')}")
+        self._tray_refresh_menu()
+
+    def _set_start_minimized_tray(self, enabled: bool):
+        """Persist "Start in tray"; keep checkbox and tray in sync."""
+        settings_manager.set_setting("start_minimized_tray", bool(enabled))
+        var = getattr(self, "start_tray_var", None)
+        if var is not None:
+            var.set(bool(enabled))
+        self._tray_refresh_menu()
+
+    def _tray_toggle_launch_at_startup(self, icon=None, item=None):
+        new_val = not bool(settings_manager.get_setting("launch_at_startup", False))
+        self.after(0, lambda: self._set_launch_at_startup(new_val))
+
+    def _tray_toggle_start_minimized(self, icon=None, item=None):
+        new_val = not bool(settings_manager.get_setting("start_minimized_tray", False))
+        self.after(0, lambda: self._set_start_minimized_tray(new_val))
 
     def _tray_toggle_telegram_proxy(self, icon=None, item=None):
         cur = bool(settings_manager.get_setting("restart_telegram_proxy", True))

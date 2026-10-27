@@ -13,6 +13,8 @@ vendor_c_accounts.json
 *.accounts.json
 .env
 .instance_*.json
+instances/*
+!instances/.gitkeep
 .vless2socks.lock
 *.hbak
 selftest-output.txt
@@ -34,3 +36,6 @@ Claude outputs/
 proxys/link
 proxys/lnk
 
+
+# Local desktop shortcut (absolute paths of this machine)
+/vless2socks.lnk

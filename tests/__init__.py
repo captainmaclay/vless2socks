@@ -34,6 +34,8 @@ def is_protected(path) -> bool:
     if folder == _APP_DIR and (name in _PROTECTED_NAMES or name.startswith(".instance_")
                                or name.endswith(".hbak")):
         return True
+    if folder == os.path.join(_APP_DIR, "instances") and name.startswith(".instance_"):
+        return True
     return any(p == d or p.startswith(d + os.sep) for d in _PROTECTED_DIRS)
 
 
